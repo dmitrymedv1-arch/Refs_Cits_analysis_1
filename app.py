@@ -2829,9 +2829,9 @@ Altmetric metrics included for social media and online attention analysis
         scientific_words = []
         valid_titles = [t for t in titles if t not in ['Unknown', 'Error']]
         for title in valid_titles:
-            content_words.extend(self.preprocess_content_words(title)
-            compound_words.extend(self.extract_compound_words(title)
-            scientific_words.extend(self.extract_scientific_stopwords(title)
+            content_words.extend(self.preprocess_content_words(title))
+            compound_words.extend(self.extract_compound_words(title))
+            scientific_words.extend(self.extract_scientific_stopwords(title))
         return Counter(content_words), Counter(compound_words), Counter(scientific_words)
 
     def run_ethics_analysis(self, combined_df: pd.DataFrame, source_articles_df: pd.DataFrame) -> Dict:
@@ -3461,3 +3461,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
