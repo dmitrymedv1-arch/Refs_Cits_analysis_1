@@ -30,6 +30,9 @@ from nltk.stem import PorterStemmer
 import base64
 from openpyxl import Workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
+import networkx as nx
+from itertools import combinations
+import math
 
 try:
     nltk.data.find('corpora/stopwords')
@@ -63,6 +66,404 @@ class PerformanceMonitor:
                 'requests_per_second': self.request_count / elapsed if elapsed > 0 else 0
             }
         return {}
+
+class EthicsDetector:
+    """Детектор неэтичных практик цитирования"""
+    
+    def __init__(self):
+        self.suspicious_patterns = []
+        
+    def detect_citation_burst(self, citations_df: pd.DataFrame, source_articles_df: pd.DataFrame, 
+                            threshold_ratio: float = 10.0) -> List[Dict]:
+        """
+        Обнаружение внезапных всплесков цитирований
+        threshold_ratio: минимальное отношение цитирований к возрасту статьи для подозрения
+        """
+        suspicious = []
+        
+        for _, article in source_articles_df.iterrows():
+            try:
+                citation_count = max(article.get('citation_count_openalex', 0), 
+                                   article.get('citation_count_crossref', 0))
+                years_since_pub = article.get('years_since_publication', 1)
+                
+                if years_since_pub <= 0:
+                    years_since_pub = 1
+                
+                citation_ratio = citation_count / years_since_pub
+                
+                if citation_ratio > threshold_ratio:
+                    suspicious.append({
+                        'type': 'CITATION_BURST',
+                        'severity': 'HIGH',
+                        'article_doi': article.get('doi', 'Unknown'),
+                        'citation_count': citation_count,
+                        'years_since_publication': years_since_pub,
+                        'citation_ratio': round(citation_ratio, 2),
+                        'threshold': threshold_ratio,
+                        'description': f"Статья имеет {citation_count} цитирований за {years_since_pub} год(а) - соотношение {citation_ratio:.1f} цитирований/год"
+                    })
+            except Exception as e:
+                continue
+                
+        return suspicious
+    
+    def detect_self_citation(self, source_articles_df: pd.DataFrame, references_df: pd.DataFrame, 
+                           threshold_percentage: float = 40.0) -> List[Dict]:
+        """
+        Обнаружение чрезмерного самоцитирования
+        threshold_percentage: процент самоцитирований для подозрения
+        """
+        suspicious = []
+        
+        # Создаем словарь авторов для каждой статьи
+        article_authors = {}
+        for _, article in source_articles_df.iterrows():
+            authors = self._extract_author_names(article.get('authors', ''))
+            article_authors[article.get('doi')] = authors
+        
+        # Анализируем ссылки для каждой статьи
+        for source_doi, authors in article_authors.items():
+            if not authors:
+                continue
+                
+            article_refs = references_df[references_df['source_doi'] == source_doi]
+            total_refs = len(article_refs)
+            
+            if total_refs == 0:
+                continue
+                
+            self_citation_count = 0
+            
+            for _, ref in article_refs.iterrows():
+                ref_authors = self._extract_author_names(ref.get('authors', ''))
+                if self._has_author_overlap(authors, ref_authors):
+                    self_citation_count += 1
+            
+            self_citation_percentage = (self_citation_count / total_refs) * 100
+            
+            if self_citation_percentage > threshold_percentage:
+                suspicious.append({
+                    'type': 'EXCESSIVE_SELF_CITATION',
+                    'severity': 'MEDIUM',
+                    'article_doi': source_doi,
+                    'self_citation_count': self_citation_count,
+                    'total_references': total_refs,
+                    'self_citation_percentage': round(self_citation_percentage, 1),
+                    'threshold': threshold_percentage,
+                    'description': f"{self_citation_percentage:.1f}% ссылок ({self_citation_count}/{total_refs}) являются самоцитированием"
+                })
+                
+        return suspicious
+    
+    def detect_citation_cartels(self, references_df: pd.DataFrame, 
+                              affiliation_threshold: float = 0.7,
+                              citation_threshold: float = 0.6) -> List[Dict]:
+        """
+        Обнаружение цитатных колец (групп авторов/организаций, цитирующих друг друга)
+        """
+        suspicious = []
+        
+        try:
+            # Строим граф цитирований между аффилиациями
+            affiliation_citation_graph = nx.Graph()
+            affiliation_citations = {}
+            
+            for _, ref in references_df.iterrows():
+                source_affiliations = self._extract_affiliations(ref.get('affiliations', ''))
+                citing_affiliations = self._extract_affiliations(ref.get('affiliations', ''))
+                
+                for source_affil in source_affiliations:
+                    for citing_affil in citing_affiliations:
+                        if source_affil != citing_affil and source_affil != 'Unknown' and citing_affil != 'Unknown':
+                            key = (source_affil, citing_affil)
+                            affiliation_citations[key] = affiliation_citations.get(key, 0) + 1
+                            
+                            if affiliation_citation_graph.has_edge(source_affil, citing_affil):
+                                affiliation_citation_graph[source_affil][citing_affil]['weight'] += 1
+                            else:
+                                affiliation_citation_graph.add_edge(source_affil, citing_affil, weight=1)
+            
+            # Анализируем плотность цитирований внутри групп
+            if len(affiliation_citation_graph.nodes()) > 0:
+                # Ищем клики и плотные подграфы
+                cliques = list(nx.find_cliques(affiliation_citation_graph))
+                
+                for clique in cliques:
+                    if len(clique) >= 3:  # Минимум 3 организации для кольца
+                        internal_citations = 0
+                        total_possible_citations = len(clique) * (len(clique) - 1)
+                        
+                        for org1, org2 in combinations(clique, 2):
+                            if affiliation_citation_graph.has_edge(org1, org2):
+                                internal_citations += affiliation_citation_graph[org1][org2]['weight']
+                        
+                        if total_possible_citations > 0:
+                            density = internal_citations / total_possible_citations
+                            
+                            if density > citation_threshold:
+                                suspicious.append({
+                                    'type': 'CITATION_CARTEL',
+                                    'severity': 'HIGH',
+                                    'organizations': clique,
+                                    'internal_citations': internal_citations,
+                                    'total_possible_citations': total_possible_citations,
+                                    'density': round(density, 3),
+                                    'threshold': citation_threshold,
+                                    'description': f"Обнаружено цитатное кольцо из {len(clique)} организаций с плотностью цитирований {density:.1%}"
+                                })
+                                
+        except Exception as e:
+            # В случае ошибки просто возвращаем пустой список
+            pass
+            
+        return suspicious
+    
+    def detect_newborn_citation(self, references_df: pd.DataFrame, 
+                              max_days_old: int = 30) -> List[Dict]:
+        """
+        Обнаружение цитирования очень новых статей
+        max_days_old: максимальный возраст статьи в днях для подозрения
+        """
+        suspicious = []
+        
+        current_year = datetime.now().year
+        current_month = datetime.now().month
+        
+        for _, ref in references_df.iterrows():
+            try:
+                ref_year = ref.get('year', 'Unknown')
+                if ref_year == 'Unknown':
+                    continue
+                    
+                ref_year = int(ref_year)
+                ref_age_years = current_year - ref_year
+                
+                # Если статья текущего года, считаем примерный возраст в месяцах
+                if ref_year == current_year:
+                    # Упрощенная логика - считаем, что статья не должна быть младше 1 месяца
+                    ref_age_days = 30  # Консервативная оценка
+                    
+                    if ref_age_days < max_days_old:
+                        source_doi = ref.get('source_doi', 'Unknown')
+                        suspicious.append({
+                            'type': 'NEWBORN_CITATION',
+                            'severity': 'LOW',
+                            'source_doi': source_doi,
+                            'cited_doi': ref.get('doi', 'Unknown'),
+                            'cited_year': ref_year,
+                            'estimated_age_days': ref_age_days,
+                            'threshold': max_days_old,
+                            'description': f"Статья цитирует очень новую публикацию ({ref_year} года), возраст ~{ref_age_days} дней"
+                        })
+                        
+            except (ValueError, TypeError):
+                continue
+                
+        return suspicious
+    
+    def detect_mass_citation_by_author(self, references_df: pd.DataFrame,
+                                     threshold_count: int = 50) -> List[Dict]:
+        """
+        Обнаружение массового цитирования одним автором
+        threshold_count: минимальное количество цитирований для подозрения
+        """
+        suspicious = []
+        
+        try:
+            # Анализируем частоту цитирования по авторам
+            author_citation_count = {}
+            
+            for _, ref in references_df.iterrows():
+                authors = self._extract_author_names(ref.get('authors', ''))
+                for author in authors:
+                    author_citation_count[author] = author_citation_count.get(author, 0) + 1
+            
+            # Проверяем авторов с подозрительно высокой активностью
+            for author, count in author_citation_count.items():
+                if count > threshold_count and author != 'Unknown':
+                    suspicious.append({
+                        'type': 'MASS_CITATION_BY_AUTHOR',
+                        'severity': 'MEDIUM',
+                        'author': author,
+                        'citation_count': count,
+                        'threshold': threshold_count,
+                        'description': f"Автор {author} имеет {count} цитирований, что превышает порог в {threshold_count}"
+                    })
+                    
+        except Exception as e:
+            pass
+            
+        return suspicious
+    
+    def detect_citation_snowball(self, references_df: pd.DataFrame,
+                               similarity_threshold: float = 0.8) -> List[Dict]:
+        """
+        Обнаружение "цитатного снежного кома" - статей с очень однородными цитированиями
+        similarity_threshold: порог схожести паттернов цитирования
+        """
+        suspicious = []
+        
+        try:
+            # Группируем ссылки по исходным статьям
+            source_articles = references_df['source_doi'].unique()
+            
+            if len(source_articles) < 2:
+                return suspicious
+            
+            # Создаем матрицу цитирований
+            citation_patterns = {}
+            for source_doi in source_articles:
+                refs = references_df[references_df['source_doi'] == source_doi]
+                cited_dois = set(refs['doi'].dropna())
+                citation_patterns[source_doi] = cited_dois
+            
+            # Сравниваем паттерны цитирования
+            for doi1, doi2 in combinations(source_articles, 2):
+                pattern1 = citation_patterns[doi1]
+                pattern2 = citation_patterns[doi2]
+                
+                if not pattern1 or not pattern2:
+                    continue
+                
+                intersection = len(pattern1.intersection(pattern2))
+                union = len(pattern1.union(pattern2))
+                
+                if union > 0:
+                    similarity = intersection / union
+                    
+                    if similarity > similarity_threshold:
+                        suspicious.append({
+                            'type': 'CITATION_SNOWBALL',
+                            'severity': 'MEDIUM',
+                            'article_doi_1': doi1,
+                            'article_doi_2': doi2,
+                            'common_citations': intersection,
+                            'total_unique_citations': union,
+                            'similarity': round(similarity, 3),
+                            'threshold': similarity_threshold,
+                            'description': f"Статьи {doi1} и {doi2} имеют {similarity:.1%} схожих цитирований ({intersection} общих из {union} уникальных)"
+                        })
+                        
+        except Exception as e:
+            pass
+            
+        return suspicious
+    
+    def detect_citation_templating(self, references_df: pd.DataFrame,
+                                 template_size: int = 5,
+                                 occurrence_threshold: int = 10) -> List[Dict]:
+        """
+        Обнаружение шаблонного цитирования (одинаковые наборы цитирований)
+        template_size: размер шаблона для поиска
+        occurrence_threshold: минимальное количество повторений
+        """
+        suspicious = []
+        
+        try:
+            # Создаем наборы цитирований для каждой статьи
+            article_citation_sets = {}
+            for source_doi in references_df['source_doi'].unique():
+                refs = references_df[references_df['source_doi'] == source_doi]
+                cited_dois = set(refs['doi'].dropna())
+                if len(cited_dois) >= template_size:
+                    article_citation_sets[source_doi] = cited_dois
+            
+            # Ищем часто встречающиеся комбинации
+            citation_combinations = {}
+            
+            for doi, citation_set in article_citation_sets.items():
+                # Берем все комбинации заданного размера
+                for combo in combinations(citation_set, min(template_size, len(citation_set))):
+                    combo_key = frozenset(combo)
+                    citation_combinations[combo_key] = citation_combinations.get(combo_key, []) + [doi]
+            
+            # Проверяем комбинации, встречающиеся часто
+            for combo, articles in citation_combinations.items():
+                if len(articles) >= occurrence_threshold:
+                    suspicious.append({
+                        'type': 'CITATION_TEMPLATING',
+                        'severity': 'HIGH',
+                        'template_size': len(combo),
+                        'articles_using_template': len(articles),
+                        'template_dois': list(combo)[:10],  # Показываем первые 10 DOI
+                        'affected_articles': articles[:10],  # Показываем первые 10 статей
+                        'threshold': occurrence_threshold,
+                        'description': f"Шаблон из {len(combo)} цитирований используется в {len(articles)} статьях"
+                    })
+                    
+        except Exception as e:
+            pass
+            
+        return suspicious
+    
+    def run_complete_analysis(self, references_df: pd.DataFrame, source_articles_df: pd.DataFrame) -> Dict:
+        """Запуск полного анализа на неэтичные практики"""
+        
+        results = {
+            'citation_burst': self.detect_citation_burst(source_articles_df, references_df),
+            'self_citation': self.detect_self_citation(source_articles_df, references_df),
+            'citation_cartels': self.detect_citation_cartels(references_df),
+            'newborn_citation': self.detect_newborn_citation(references_df),
+            'mass_citation_author': self.detect_mass_citation_by_author(references_df),
+            'citation_snowball': self.detect_citation_snowball(references_df),
+            'citation_templating': self.detect_citation_templating(references_df)
+        }
+        
+        # Сводная статистика
+        total_findings = sum(len(findings) for findings in results.values())
+        severity_counts = {
+            'HIGH': 0,
+            'MEDIUM': 0, 
+            'LOW': 0
+        }
+        
+        for findings in results.values():
+            for finding in findings:
+                severity_counts[finding.get('severity', 'LOW')] += 1
+        
+        results['summary'] = {
+            'total_findings': total_findings,
+            'severity_counts': severity_counts,
+            'analysis_timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        return results
+    
+    def _extract_author_names(self, authors_str: str) -> List[str]:
+        """Извлекает список авторов из строки"""
+        if not authors_str or authors_str in ['Unknown', 'Error']:
+            return []
+        
+        authors = []
+        for author in authors_str.split(','):
+            author = author.strip()
+            if author and author not in ['Unknown', 'Error']:
+                # Берем только фамилию (первое слово)
+                surname = author.split()[0] if author.split() else author
+                authors.append(surname)
+        
+        return authors
+    
+    def _has_author_overlap(self, authors1: List[str], authors2: List[str]) -> bool:
+        """Проверяет пересечение авторов"""
+        if not authors1 or not authors2:
+            return False
+        
+        return len(set(authors1).intersection(set(authors2))) > 0
+    
+    def _extract_affiliations(self, affiliations_str: str) -> List[str]:
+        """Извлекает список аффилиаций из строки"""
+        if not affiliations_str or affiliations_str in ['Unknown', 'Error']:
+            return []
+        
+        affiliations = []
+        for affil in affiliations_str.split(';'):
+            affil = affil.strip()
+            if affil and affil not in ['Unknown', 'Error']:
+                affiliations.append(affil)
+        
+        return affiliations
 
 class FastAffiliationProcessor:
     """Быстрый процессор аффилиаций с группировкой похожих организаций"""
@@ -379,6 +780,7 @@ class CitationAnalyzer:
         self.stemmer = PorterStemmer()
         self.fast_affiliation_processor = FastAffiliationProcessor()
         self.altmetric_processor = AltmetricProcessor()
+        self.ethics_detector = EthicsDetector()  # Новый детектор неэтичных практик
         self.scientific_stopwords = {
             'using', 'based', 'study', 'studies', 'research', 'analysis',
             'effect', 'effects', 'properties', 'property', 'development',
@@ -2337,6 +2739,8 @@ Altmetric metrics included for social media and online attention analysis
             bins = period_starts + [period_starts[-1] + 5]
             labels = [f"{s}-{s+4}" for s in period_starts]
             years_total = pd.to_numeric(references_df['year'], errors='coerce')
+            years_total = years_total[years_total.notna() & years_total.between(1900, current_year)].ast
+            years_total = pd.to_numeric(references_df['year'], errors='coerce')
             years_total = years_total[years_total.notna() & years_total.between(1900, current_year)].astype(int)
             period_counts_total = pd.cut(years_total, bins=bins, labels=labels, right=False).astype(str)
             period_df_total = period_counts_total.value_counts().reset_index()
@@ -2425,15 +2829,131 @@ Altmetric metrics included for social media and online attention analysis
         scientific_words = []
         valid_titles = [t for t in titles if t not in ['Unknown', 'Error']]
         for title in valid_titles:
-            content_words.extend(self.preprocess_content_words(title))
-            compound_words.extend(self.extract_compound_words(title))
-            scientific_words.extend(self.extract_scientific_stopwords(title))
+            content_words.extend(self.preprocess_content_words(title)
+            compound_words.extend(self.extract_compound_words(title)
+            scientific_words.extend(self.extract_scientific_stopwords(title)
         return Counter(content_words), Counter(compound_words), Counter(scientific_words)
+
+    def run_ethics_analysis(self, combined_df: pd.DataFrame, source_articles_df: pd.DataFrame) -> Dict:
+        """Запуск анализа неэтичных практик"""
+        st.info("🔍 Запуск анализа неэтичных практик цитирования...")
+        
+        ethics_results = self.ethics_detector.run_complete_analysis(combined_df, source_articles_df)
+        
+        return ethics_results
+
+    def display_ethics_results(self, ethics_results: Dict):
+        """Отображение результатов анализа неэтичных практик"""
+        st.markdown("## 🚨 Анализ неэтичных практик цитирования")
+        
+        summary = ethics_results.get('summary', {})
+        total_findings = summary.get('total_findings', 0)
+        severity_counts = summary.get('severity_counts', {})
+        
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Всего находок", total_findings)
+        col2.metric("Высокий риск", severity_counts.get('HIGH', 0))
+        col3.metric("Средний риск", severity_counts.get('MEDIUM', 0))
+        col4.metric("Низкий риск", severity_counts.get('LOW', 0))
+        
+        if total_findings == 0:
+            st.success("✅ Неэтичные практики не обнаружены!")
+            return
+        
+        # Отображаем находки по типам
+        for practice_type, findings in ethics_results.items():
+            if practice_type == 'summary' or not findings:
+                continue
+                
+            st.markdown(f"### {self._get_practice_title(practice_type)}")
+            
+            for finding in findings[:10]:  # Показываем первые 10 находок каждого типа
+                severity = finding.get('severity', 'LOW')
+                severity_color = {
+                    'HIGH': '🔴',
+                    'MEDIUM': '🟡', 
+                    'LOW': '🟢'
+                }.get(severity, '⚪')
+                
+                st.markdown(f"{severity_color} **{finding.get('description', '')}**")
+                
+                # Дополнительная информация
+                details = self._get_practice_details(finding)
+                if details:
+                    with st.expander("Подробности"):
+                        for key, value in details.items():
+                            st.write(f"**{key}:** {value}")
+        
+        st.warning("💡 **Примечание:** Обнаружение этих паттернов не обязательно означает нарушение, но требует дополнительной проверки.")
+
+    def _get_practice_title(self, practice_type: str) -> str:
+        """Возвращает читаемое название типа практики"""
+        titles = {
+            'citation_burst': 'Внезапный всплеск цитирований',
+            'self_citation': 'Чрезмерное самоцитирование',
+            'citation_cartels': 'Цитатные кольца',
+            'newborn_citation': 'Цитирование новых статей',
+            'mass_citation_author': 'Массовое цитирование автором',
+            'citation_snowball': 'Цитатный снежный ком',
+            'citation_templating': 'Шаблонное цитирование'
+        }
+        return titles.get(practice_type, practice_type)
+
+    def _get_practice_details(self, finding: Dict) -> Dict:
+        """Извлекает детали для отображения"""
+        details = {}
+        practice_type = finding.get('type', '')
+        
+        if practice_type == 'CITATION_BURST':
+            details = {
+                'DOI статьи': finding.get('article_doi', 'N/A'),
+                'Количество цитирований': finding.get('citation_count', 'N/A'),
+                'Лет с публикации': finding.get('years_since_publication', 'N/A'),
+                'Соотношение цит./год': finding.get('citation_ratio', 'N/A')
+            }
+        elif practice_type == 'EXCESSIVE_SELF_CITATION':
+            details = {
+                'DOI статьи': finding.get('article_doi', 'N/A'),
+                'Самоцитирования': finding.get('self_citation_count', 'N/A'),
+                'Всего ссылок': finding.get('total_references', 'N/A'),
+                'Процент самоцитирования': f"{finding.get('self_citation_percentage', 'N/A')}%"
+            }
+        elif practice_type == 'CITATION_CARTEL':
+            details = {
+                'Организации': ', '.join(finding.get('organizations', [])[:5]),
+                'Внутренние цитирования': finding.get('internal_citations', 'N/A'),
+                'Плотность цитирований': f"{finding.get('density', 'N/A'):.1%}"
+            }
+        elif practice_type == 'NEWBORN_CITATION':
+            details = {
+                'Исходная статья': finding.get('source_doi', 'N/A'),
+                'Цитируемая статья': finding.get('cited_doi', 'N/A'),
+                'Год цитируемой': finding.get('cited_year', 'N/A')
+            }
+        elif practice_type == 'MASS_CITATION_BY_AUTHOR':
+            details = {
+                'Автор': finding.get('author', 'N/A'),
+                'Количество цитирований': finding.get('citation_count', 'N/A')
+            }
+        elif practice_type == 'CITATION_SNOWBALL':
+            details = {
+                'Статья 1': finding.get('article_doi_1', 'N/A'),
+                'Статья 2': finding.get('article_doi_2', 'N/A'),
+                'Общие цитирования': finding.get('common_citations', 'N/A'),
+                'Схожесть': f"{finding.get('similarity', 'N/A'):.1%}"
+            }
+        elif practice_type == 'CITATION_TEMPLATING':
+            details = {
+                'Размер шаблона': finding.get('template_size', 'N/A'),
+                'Статей с шаблоном': finding.get('articles_using_template', 'N/A')
+            }
+        
+        return details
 
     def save_all_data_to_excel(self, combined_df: pd.DataFrame, source_articles_df: pd.DataFrame,
                          doi_list: List[str], total_references: int, unique_dois: int,
-                         all_titles: List[str]) -> BytesIO:
-        """Сохраняет анализ references в Excel с альтметриками"""
+                         all_titles: List[str], ethics_results: Dict = None) -> BytesIO:
+        """Сохраняет анализ references в Excel с альтметриками и этическим анализом"""
         try:
             timestamp = int(time.time())
             excel_buffer = BytesIO()
@@ -2486,6 +3006,23 @@ Altmetric metrics included for social media and online attention analysis
                 affiliations_percentage = 0
                 altmetric_percentage = 0
 
+            # Добавляем информацию об этическом анализе
+            ethics_summary = ""
+            if ethics_results:
+                ethics_summary = f"""
+ETHICS ANALYSIS SUMMARY
+=======================
+Total findings: {ethics_results.get('summary', {}).get('total_findings', 0)}
+High severity: {ethics_results.get('summary', {}).get('severity_counts', {}).get('HIGH', 0)}
+Medium severity: {ethics_results.get('summary', {}).get('severity_counts', {}).get('MEDIUM', 0)}
+Low severity: {ethics_results.get('summary', {}).get('severity_counts', {}).get('LOW', 0)}
+
+DETAILED FINDINGS:
+"""
+                for practice_type, findings in ethics_results.items():
+                    if practice_type != 'summary' and findings:
+                        ethics_summary += f"- {self._get_practice_title(practice_type)}: {len(findings)} findings\n"
+
             summary_content = f"""@MedvDmitry production
 
 REFERENCES ANALYSIS REPORT
@@ -2527,6 +3064,13 @@ X Mentions: Twitter/X accounts mentioning
 RSS/Blogs: Blog and RSS feed mentions
 Unique Accounts: Unique accounts across platforms
 
+ETHICS ANALYSIS
+===============
+Advanced detection of unethical citation practices
+7 different patterns analyzed
+Severity levels: HIGH, MEDIUM, LOW
+{ethics_summary}
+
 PERFORMANCE STATISTICS
 ======================
 Total processing time: {stats.get('elapsed_seconds', 0):.2f} seconds ({stats.get('elapsed_minutes', 0):.2f} minutes)
@@ -2541,6 +3085,7 @@ All standard statistical analyses performed (authors, journals, countries, etc.)
 Error handling ensures report generation even with partial data
 Affiliations normalized and grouped for consistent organization names
 Altmetric metrics provide social media and online attention analysis
+Ethics analysis helps identify potential citation manipulation
 """
 
             # Создаем вкладку Report_Summary первой
@@ -2596,6 +3141,14 @@ Altmetric metrics provide social media and online attention analysis
             except Exception as e:
                 sheets_data.append(('Title_Word_Frequency', pd.DataFrame()))
 
+            # Добавляем вкладки с этическим анализом
+            if ethics_results:
+                for practice_type, findings in ethics_results.items():
+                    if practice_type != 'summary' and findings:
+                        sheet_name = f"Ethics_{practice_type.upper()}"
+                        findings_df = pd.DataFrame(findings)
+                        sheets_data.append((sheet_name, findings_df))
+
             for sheet_name, df in sheets_data:
                 try:
                     if not df.empty:
@@ -2631,14 +3184,14 @@ Altmetric metrics provide social media and online attention analysis
 
     def display_analysis_results(self, combined_df: pd.DataFrame, source_articles_df: pd.DataFrame,
                          doi_list: List[str], total_references: int, unique_dois: int,
-                         all_titles: List[str]) -> None:
-        """Отображает результаты анализа references с альтметриками"""
+                         all_titles: List[str], ethics_results: Dict = None) -> None:
+        """Отображает результаты анализа references с альтметриками и этическим анализом"""
         try:
             st.markdown(f"{'='*80}\n**REFERENCES ANALYSIS RESULTS FOR {len(doi_list)} ARTICLES**\n{'='*80}")
 
             if combined_df.empty and source_articles_df.empty:
                 st.error("No data available - generating error report")
-                excel_buffer = self.save_all_data_to_excel(combined_df, source_articles_df, doi_list, total_references, unique_dois, all_titles)
+                excel_buffer = self.save_all_data_to_excel(combined_df, source_articles_df, doi_list, total_references, unique_dois, all_titles, ethics_results)
                 st.download_button(
                     label="Download Error Report",
                     data=excel_buffer.getvalue(),
@@ -2689,6 +3242,10 @@ Altmetric metrics provide social media and online attention analysis
                 except Exception as e:
                     pass
 
+            # Отображаем результаты этического анализа
+            if ethics_results:
+                self.display_ethics_results(ethics_results)
+
             analyses = [
                 ('DUPLICATE REFERENCES', self.find_duplicate_references),
                 ('COUNTRIES FREQUENCY', self.analyze_countries_frequency),
@@ -2730,7 +3287,7 @@ Altmetric metrics provide social media and online attention analysis
             except Exception as e:
                 st.error("Error in title analysis")
 
-            excel_buffer = self.save_all_data_to_excel(combined_df, source_articles_df, doi_list, total_references, unique_dois, all_titles)
+            excel_buffer = self.save_all_data_to_excel(combined_df, source_articles_df, doi_list, total_references, unique_dois, all_titles, ethics_results)
             st.download_button(
                 label="Download Full Report (Excel)",
                 data=excel_buffer.getvalue(),
@@ -2740,7 +3297,7 @@ Altmetric metrics provide social media and online attention analysis
 
         except Exception as e:
             st.error(f"Critical error in display_analysis_results: {e}")
-            excel_buffer = self.save_all_data_to_excel(combined_df, source_articles_df, doi_list, total_references, unique_dois, all_titles)
+            excel_buffer = self.save_all_data_to_excel(combined_df, source_articles_df, doi_list, total_references, unique_dois, all_titles, ethics_results)
             st.download_button(
                 label="Download Error Report",
                 data=excel_buffer.getvalue(),
@@ -2754,7 +3311,7 @@ def main():
 
     analyzer = CitationAnalyzer()
 
-    tab1, tab2 = st.tabs(["References Analysis", "Citing Articles Analysis"])
+    tab1, tab2, tab3 = st.tabs(["References Analysis", "Citing Articles Analysis", "Ethics Analysis"])
 
     with tab1:
         st.markdown("### Analyze References")
@@ -2765,6 +3322,11 @@ def main():
             placeholder='Enter DOIs for references analysis (e.g., 10.1010/XYZ, doi:10.1010/XYZ, https://doi.org/10.1010/XYZ, etc.) separated by any punctuation or newlines',
             height=200
         )
+        
+        # Добавляем опцию для включения этического анализа
+        enable_ethics = st.checkbox("Включить анализ неэтичных практик", value=True, 
+                                  help="Обнаруживает подозрительные паттерны цитирования")
+        
         if st.button("Analyze References", type="primary"):
             with st.spinner("Processing..."):
                 input_text = doi_input_references
@@ -2784,7 +3346,13 @@ def main():
                 st.success("Starting sequential processing for references analysis...")
                 try:
                     combined_references_df, source_articles_df, total_references, unique_dois, all_titles = analyzer.process_doi_sequential(doi_list)
-                    analyzer.display_analysis_results(combined_references_df, source_articles_df, doi_list, total_references, unique_dois, all_titles)
+                    
+                    # Запускаем этический анализ если включено
+                    ethics_results = None
+                    if enable_ethics and not combined_references_df.empty:
+                        ethics_results = analyzer.run_ethics_analysis(combined_references_df, source_articles_df)
+                    
+                    analyzer.display_analysis_results(combined_references_df, source_articles_df, doi_list, total_references, unique_dois, all_titles, ethics_results)
                 except Exception as e:
                     st.error(f"Critical error during processing: {e}")
                     empty_df = pd.DataFrame()
@@ -2869,6 +3437,27 @@ def main():
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
                     st.info("Error report generated despite processing failure.")
+
+    with tab3:
+        st.markdown("### Ethics Analysis")
+        st.markdown("Advanced detection of unethical citation practices")
+        
+        st.info("""
+        **Обнаруживаемые практики:**
+        
+        🔴 **Внезапный всплеск цитирований** - статьи с аномально высоким соотношением цитирований к возрасту
+        🟡 **Чрезмерное самоцитирование** - когда автор цитирует собственные работы сверх разумного предела  
+        🔴 **Цитатные кольца** - группы организаций, активно цитирующих друг друга
+        🟢 **Цитирование новых статей** - ссылки на очень свежие публикации
+        🟡 **Массовое цитирование автором** - один автор с подозрительно большим количеством цитирований
+        🟡 **Цитатный снежный ком** - статьи с очень схожими паттернами цитирования
+        🔴 **Шаблонное цитирование** - одинаковые наборы цитирований в разных статьях
+        """)
+        
+        st.warning("""
+        **Важно:** Обнаружение этих паттернов не обязательно означает нарушение, 
+        но указывает на практики, требующие дополнительной проверки.
+        """)
 
 if __name__ == "__main__":
     main()
