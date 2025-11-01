@@ -42,7 +42,7 @@ except LookupError:
 class Config:
     REQUEST_TIMEOUT = 30
     MAX_RETRIES = 5
-    DELAY_BETWEEN_REQUESTS = 0.3
+    DELAY_BETWEEN_REQUESTS = 0.31
     RETRY_DELAY = 1
 
 class PerformanceMonitor:
@@ -3461,4 +3461,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
