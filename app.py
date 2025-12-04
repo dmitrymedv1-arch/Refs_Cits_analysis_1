@@ -1024,7 +1024,7 @@ class OpenAlexClient(APIClient):
             # Увеличиваем параметры для получения всех цитирований
             params = {
                 'filter': f'cites:{article_id}',
-                'per-page': 2000,  # Максимально разрешенное значение
+                'per-page': 200,  # Максимально разрешенное значение
                 'select': 'doi,title,publication_year,authorships'
             }
             
@@ -1036,7 +1036,7 @@ class OpenAlexClient(APIClient):
                 
                 try:
                     response = self.session.get(self.works_url, params=params, timeout=15)
-                    if response.status_code == 2000:
+                    if response.status_code == 200:
                         data = response.json()
                         
                         for work in data.get('results', []):
@@ -5625,6 +5625,7 @@ if __name__ == "__main__":
     system = ArticleAnalyzerSystem()
 
     system.run()
+
 
 
 
