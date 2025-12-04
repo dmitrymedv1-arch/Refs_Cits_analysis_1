@@ -5021,7 +5021,8 @@ class StreamlitInterfaceManager:
                 min_value=Config.MIN_WORKERS,
                 max_value=Config.MAX_WORKERS,
                 value=Config.DEFAULT_WORKERS,
-                help="Количество параллельных потоков для обработки DOI"
+                help="Количество параллельных потоков для обработки DOI",
+                key="workers_slider"  # Добавляем уникальный ключ
             )
             
             # Analysis types
@@ -5061,6 +5062,33 @@ class StreamlitInterfaceManager:
                 st.metric("Размер кэша", f"{cache_stats['cache_size_mb']} MB")
             
             return workers
+
+            # Analysis types с ключами
+            st.subheader("🔍 Типы анализа")
+            st.session_state.analysis_types['quick_checks'] = st.checkbox(
+                "Quick Checks (5-10 сек)", 
+                value=st.session_state.analysis_types['quick_checks'],
+                help="Быстрые проверки на неэтичные практики",
+                key="quick_checks_checkbox"  # Добавляем ключ
+            )
+            st.session_state.analysis_types['medium_insights'] = st.checkbox(
+                "Medium Insights (15-30 сек)", 
+                value=st.session_state.analysis_types['medium_insights'],
+                help="Средние инсайты с детальным анализом",
+                key="medium_insights_checkbox"  # Добавляем ключ
+            )
+            st.session_state.analysis_types['deep_analysis'] = st.checkbox(
+                "Deep Analysis (60-120 сек)", 
+                value=st.session_state.analysis_types['deep_analysis'],
+                help="Глубокий анализ с ML и сетевыми метриками",
+                key="deep_analysis_checkbox"  # Добавляем ключ
+            )
+            st.session_state.analysis_types['analyzed_citing_relationships'] = st.checkbox(
+                "Analyzed-Citing Relationships (30-60 сек)", 
+                value=st.session_state.analysis_types['analyzed_citing_relationships'],
+                help="Анализ связей между анализируемыми и цитирующими статьями",
+                key="relationships_checkbox"  # Добавляем ключ
+            )
     
     def render_main_interface(self):
         """Render the main interface"""
@@ -5128,19 +5156,20 @@ class StreamlitInterfaceManager:
         with progress_container:
             st.subheader("📈 Прогресс обработки")
             
-            # Main progress
+            # Main progress с уникальными ключами
             main_progress = st.progress(0, text="Общий прогресс")
             main_status = st.empty()
             
-            # Individual progress bars
-            analyzed_progress = st.progress(0, text="Анализ статей")
-            refs_progress = st.progress(0, text="Анализ ссылок")
-            cites_progress = st.progress(0, text="Анализ цитирований")
-            insights_progress = st.progress(0, text="Анализ инсайтов")
-            excel_progress = st.progress(0, text="Создание Excel")
+            # Individual progress bars с уникальными ключами
+            analyzed_progress = st.progress(0, text="Анализ статей", key="analyzed_progress")
+            refs_progress = st.progress(0, text="Анализ ссылок", key="refs_progress")
+            cites_progress = st.progress(0, text="Анализ цитирований", key="cites_progress")
+            insights_progress = st.progress(0, text="Анализ инсайтов", key="insights_progress")
+            excel_progress = st.progress(0, text="Создание Excel", key="excel_progress")
         
-        # Get workers from sidebar
-        workers = self.render_sidebar()
+        # Вместо повторного вызова render_sidebar(), получаем значение из session_state
+        # Если workers_slider еще не установлен, используем значение по умолчанию
+        workers = st.session_state.get('workers_slider', Config.DEFAULT_WORKERS)
         
         # Update system settings
         self.system.widgets.workers_slider.value = workers
@@ -5491,7 +5520,7 @@ class ArticleAnalyzerSystem:
                 doi = doi[len(prefix):]
         
         return doi.strip()
-    
+
     def run(self):
         """Run the Streamlit application"""
         # Set page config
@@ -5508,8 +5537,8 @@ class ArticleAnalyzerSystem:
                 self.cache_manager._clean_expired_cache()
                 st.session_state.system_initialized = True
         
-        # Render interface
-        workers = self.interface_manager.render_sidebar()
+        # Render interface - render_sidebar() сохранит значение в session_state
+        self.interface_manager.render_sidebar()  # Не присваиваем результат
         self.interface_manager.render_main_interface()
 
 # ============================================================================
@@ -5519,4 +5548,5 @@ class ArticleAnalyzerSystem:
 if __name__ == "__main__":
     # Create and run the system
     system = ArticleAnalyzerSystem()
+
     system.run()
