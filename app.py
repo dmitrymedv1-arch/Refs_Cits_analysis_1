@@ -976,7 +976,7 @@ class OpenAlexClient(APIClient):
         url = f"{self.base_url}{clean_doi}"
         return self.make_request(url, f"openalex:{clean_doi}", category="openalex")
     
-    def fetch_citations(self, doi: str, max_pages: int = 3) -> List[str]:
+    def fetch_citations(self, doi: str, max_pages: int = 30) -> List[str]:
         clean_doi = self._clean_doi(doi)
         if not clean_doi:
             return []
@@ -994,7 +994,7 @@ class OpenAlexClient(APIClient):
             
             params = {
                 'filter': f'cites:{article_id}',
-                'per-page': 100,
+                'per-page': 200,
                 'select': 'doi,title,publication_year'
             }
             
@@ -5233,7 +5233,7 @@ class StreamlitInterfaceManager:
                 main_status.info(f"🔗 Найдено {len(all_cite_dois)} citation DOI")
                 cites_progress.progress(0, text="Обработка citation DOI...")
                 
-                cite_dois_to_analyze = all_cite_dois[:5000]
+                cite_dois_to_analyze = all_cite_dois[:10000]
                 self.system.citing_results = self.system.doi_processor.process_doi_batch(
                     cite_dois_to_analyze, "citing", None, True, True, Config.BATCH_SIZE, progress_container
                 )
@@ -5570,5 +5570,6 @@ if __name__ == "__main__":
     system = ArticleAnalyzerSystem()
 
     system.run()
+
 
 
