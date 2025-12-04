@@ -5163,28 +5163,28 @@ class StreamlitInterfaceManager:
             
             # Main progress с использованием st.empty() для текста
             main_status = st.empty()
-            main_progress = st.progress(0, key="main_progress")
+            main_progress = st.progress(0)
             main_status.text("Общий прогресс")
             
             # Individual progress bars с отдельными текстовыми элементами
             analyzed_status = st.empty()
-            analyzed_progress = st.progress(0, key="analyzed_progress")
+            analyzed_progress = st.progress(0)
             analyzed_status.text("Анализ статей")
             
             refs_status = st.empty()
-            refs_progress = st.progress(0, key="refs_progress")
+            refs_progress = st.progress(0)
             refs_status.text("Анализ ссылок")
             
             cites_status = st.empty()
-            cites_progress = st.progress(0, key="cites_progress")
+            cites_progress = st.progress(0)
             cites_status.text("Анализ цитирований")
             
             insights_status = st.empty()
-            insights_progress = st.progress(0, key="insights_progress")
+            insights_progress = st.progress(0)
             insights_status.text("Анализ инсайтов")
             
             excel_status = st.empty()
-            excel_progress = st.progress(0, key="excel_progress")
+            excel_progress = st.progress(0)
             excel_status.text("Создание Excel")
         
         # Вместо повторного вызова render_sidebar(), получаем значение из session_state
@@ -5199,7 +5199,7 @@ class StreamlitInterfaceManager:
             start_time = time.time()
             
             # Update main progress
-            main_progress.progress(10, text="Начало обработки...")
+            main_progress.progress(0.1, text="Начало обработки...")
             main_status.info("🔄 Начинаю обработку DOI...")
             
             # Process analyzed DOIs
@@ -5207,8 +5207,8 @@ class StreamlitInterfaceManager:
             self.system.analyzed_results = self.system.doi_processor.process_doi_batch(
                 dois, "analyzed", None, True, True, Config.BATCH_SIZE, progress_container
             )
-            analyzed_progress.progress(100, text="Оригинальные DOI обработаны")
-            main_progress.progress(40, text="Оригинальные DOI обработаны")
+            analyzed_progress.progress(1.0, text="Оригинальные DOI обработаны")
+            main_progress.progress(0.4, text="Оригинальные DOI обработаны")
             
             # Collect and process references
             all_ref_dois = self.system.doi_processor.collect_all_references(self.system.analyzed_results)
@@ -5570,4 +5570,5 @@ if __name__ == "__main__":
     system = ArticleAnalyzerSystem()
 
     system.run()
+
 
