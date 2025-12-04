@@ -1024,8 +1024,9 @@ class OpenAlexClient(APIClient):
             # Увеличиваем параметры для получения всех цитирований
             params = {
                 'filter': f'cites:{article_id}',
-                'per-page': 200,  # Максимально разрешенное значение
-                'select': 'doi,title,publication_year,authorships'
+                'per-page': 900,
+                'select': 'doi,title,publication_year,authorships',
+                'sort': 'publication_date:asc'  # Добавили сортировку для стабильной пагинации
             }
             
             page = 1
@@ -1663,10 +1664,24 @@ class OptimizedDOIProcessor:
     def process_doi_batch(self, dois: List[str], source_type: str = "analyzed", 
                          original_doi: str = None, fetch_refs: bool = True, 
                          fetch_cites: bool = True, batch_size: int = Config.BATCH_SIZE,
-                         progress_container=None) -> Dict[str, Dict]:
+                         progress_container=None, limit: int = None) -> Dict[str, Dict]:  # Добавили limit
+        
+        # Если указан лимит и у нас много DOI, берем только первые N
+        if limit and len(dois) > limit:
+            st.warning(f"⚠️ Ограничение обработки: выбрано {limit} из {len(dois)} DOI для источника '{source_type}'")
+            dois = dois[:limit]
         
         results = {}
+        # Уменьшаем batch_size для больших объемов
+        if len(dois) > 1000:
+            batch_size = min(batch_size, 20)  # Меньше DOI в пачке для стабильности
+        
         total_batches = (len(dois) + batch_size - 1) // batch_size
+        
+        # Добавляем прогресс для больших наборов
+        if len(dois) > 500:
+            st.info(f"📦 Обработка {len(dois)} DOI (источник: {source_type})")
+            st.info(f"⚙️ Размер пачки уменьшен до {batch_size} для стабильности")
         
         if progress_container:
             progress_container.info(f"🔧 Обработка {len(dois)} DOI (источник: {source_type})")
@@ -5625,6 +5640,7 @@ if __name__ == "__main__":
     system = ArticleAnalyzerSystem()
 
     system.run()
+
 
 
 
