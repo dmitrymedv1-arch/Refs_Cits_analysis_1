@@ -907,7 +907,7 @@ class CrossrefClient(APIClient):
         
         url = f"{self.base_url}{clean_doi}"
         return self.make_request(url, f"crossref:{clean_doi}", category="crossref")
-    
+
     def fetch_references(self, doi: str) -> List[str]:
         clean_doi = self._clean_doi(doi)
         if not clean_doi:
@@ -916,15 +916,24 @@ class CrossrefClient(APIClient):
         data = self.fetch_article(clean_doi)
         references = []
         
+        # Обрабатываем ВСЕ ссылки, без ограничений
         if 'message' in data and 'reference' in data['message']:
             for ref in data['message']['reference']:
-                if 'DOI' in ref and ref['DOI']:
-                    ref_doi = self._clean_doi(ref['DOI'])
-                    if ref_doi:
-                        references.append(ref_doi)
+                # Добавляем все возможные источники DOI
+                doi_sources = ['DOI', 'doi', 'DOI-asserted-by']
+                for source in doi_sources:
+                    if source in ref and ref[source]:
+                        ref_doi = self._clean_doi(ref[source])
+                        if ref_doi:
+                            references.append(ref_doi)
+                            break
+        
+        # Логирование для отладки
+        if len(references) > 100:
+            st.info(f"📚 Статья {clean_doi[:30]}... содержит {len(references)} ссылок")
         
         return references
-    
+
     def fetch_citations(self, doi: str) -> List[str]:
         clean_doi = self._clean_doi(doi)
         if not clean_doi:
@@ -932,22 +941,42 @@ class CrossrefClient(APIClient):
         
         citing_dois = []
         try:
+            # Используем параметры для получения полного списка
             url = f"{self.base_url}{clean_doi}"
-            params = {'filter': 'has-reference:1'}
+            params = {
+                'filter': 'has-reference:1',
+                'rows': 5000,  # Увеличиваем лимит для одной страницы
+                'select': 'DOI,title,created'
+            }
+            
             data = self.make_request(url, f"crossref_citations:{clean_doi}", params=params)
+            
+            # Обрабатываем все цитирования
+            if 'message' in data and 'is-referenced-by-count' in data['message']:
+                total_citations = data['message']['is-referenced-by-count']
+                if total_citations > 100:
+                    st.info(f"🔗 Статья {clean_doi[:30]}... цитируется {total_citations} раз")
             
             if 'message' in data and 'is-referenced-by' in data['message']:
                 references = data['message']['is-referenced-by']
                 for ref in references:
-                    if isinstance(ref, dict) and 'DOI' in ref:
-                        citing_doi = self._clean_doi(ref['DOI'])
-                        if citing_doi:
-                            citing_dois.append(citing_doi)
+                    # Обрабатываем разные форматы DOI
+                    if isinstance(ref, dict):
+                        doi_sources = ['DOI', 'doi', 'DOI-asserted-by', 'URL']
+                        for source in doi_sources:
+                            if source in ref and ref[source]:
+                                citing_doi = self._clean_doi(ref[source])
+                                if citing_doi:
+                                    citing_dois.append(citing_doi)
+                                    break
                             
         except Exception as e:
             st.warning(f"Crossref citations error for {doi}: {e}")
         
-        return citing_dois
+        # Убираем дубликаты
+        unique_citing_dois = list(set(citing_dois))
+        
+        return unique_citing_dois
     
     def _clean_doi(self, doi: str) -> str:
         if not doi or not isinstance(doi, str):
@@ -976,7 +1005,7 @@ class OpenAlexClient(APIClient):
         url = f"{self.base_url}{clean_doi}"
         return self.make_request(url, f"openalex:{clean_doi}", category="openalex")
     
-    def fetch_citations(self, doi: str, max_pages: int = 30) -> List[str]:
+    def fetch_citations(self, doi: str, max_pages: int = 100) -> List[str]:
         clean_doi = self._clean_doi(doi)
         if not clean_doi:
             return []
@@ -992,41 +1021,67 @@ class OpenAlexClient(APIClient):
             if not article_id:
                 return []
             
+            # Увеличиваем параметры для получения всех цитирований
             params = {
                 'filter': f'cites:{article_id}',
-                'per-page': 200,
-                'select': 'doi,title,publication_year'
+                'per-page': 200,  # Максимально разрешенное значение
+                'select': 'doi,title,publication_year,authorships'
             }
             
             page = 1
             has_more = True
             
-            while has_more and page <= max_pages:
+            while has_more and page <= max_pages:  # Увеличили max_pages до 100
                 self.delay.wait_if_needed()
                 
-                response = self.session.get(self.works_url, params=params)
-                if response.status_code == 200:
-                    data = response.json()
-                    
-                    for work in data.get('results', []):
-                        if work.get('doi'):
-                            citing_doi = self._clean_doi(work['doi'])
-                            if citing_doi:
-                                citing_dois.append(citing_doi)
-                    
-                    if 'meta' in data and data['meta'].get('next_cursor'):
-                        params['cursor'] = data['meta']['next_cursor']
-                        page += 1
-                        time.sleep(0.1)
+                try:
+                    response = self.session.get(self.works_url, params=params, timeout=15)
+                    if response.status_code == 200:
+                        data = response.json()
+                        
+                        for work in data.get('results', []):
+                            if work.get('doi'):
+                                citing_doi = self._clean_doi(work['doi'])
+                                if citing_doi:
+                                    citing_dois.append(citing_doi)
+                        
+                        # Отображение прогресса для больших наборов
+                        if len(citing_dois) > 0 and len(citing_dois) % 1000 == 0:
+                            st.info(f"📥 Загружено {len(citing_dois)} цитирований из OpenAlex для {clean_doi[:30]}...")
+                        
+                        # Проверяем наличие следующей страницы
+                        if 'meta' in data and data['meta'].get('next_cursor'):
+                            params['cursor'] = data['meta']['next_cursor']
+                            page += 1
+                            # Уменьшаем задержку для быстрой обработки
+                            time.sleep(0.05)
+                        else:
+                            has_more = False
+                    elif response.status_code == 429:
+                        # Rate limiting - увеличиваем задержку
+                        st.warning(f"⚠️ Rate limit для {clean_doi[:30]}..., ждем 2 секунды")
+                        time.sleep(2)
                     else:
                         has_more = False
-                else:
+                        
+                except requests.exceptions.Timeout:
+                    st.warning(f"⚠️ Таймаут при загрузке цитирований для {clean_doi[:30]}..., пробуем продолжить")
+                    time.sleep(1)
+                    continue
+                    
+                except Exception as e:
+                    st.warning(f"⚠️ Ошибка загрузки страницы {page} для {clean_doi}: {e}")
                     has_more = False
         
         except Exception as e:
             st.warning(f"OpenAlex citations error for {doi}: {e}")
         
-        return list(set(citing_dois))
+        unique_citing_dois = list(set(citing_dois))
+        
+        if len(unique_citing_dois) > 500:
+            st.success(f"✅ Загружено {len(unique_citing_dois)} цитирований из OpenAlex для {clean_doi[:30]}...")
+        
+        return unique_citing_dois
     
     def _clean_doi(self, doi: str) -> str:
         if not doi or not isinstance(doi, str):
@@ -5570,6 +5625,7 @@ if __name__ == "__main__":
     system = ArticleAnalyzerSystem()
 
     system.run()
+
 
 
 
