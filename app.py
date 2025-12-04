@@ -1672,21 +1672,19 @@ class OptimizedDOIProcessor:
             progress_container.info(f"🔧 Обработка {len(dois)} DOI (источник: {source_type})")
             progress_container.info(f"📦 Разбито на {total_batches} пачек по {batch_size} DOI")
         
-        # Создаем прогресс-бар для Streamlit
         progress_bar = None
         status_text = None
         if progress_container:
             progress_bar = progress_container.progress(0)
             status_text = progress_container.empty()
         
-        # Передаем и progress_bar и status_text в ProgressMonitor
         monitor = ProgressMonitor(len(dois), f"Обработка {source_type}", 
                                  progress_bar=progress_bar, status_text=status_text)
         
         for batch_idx in range(0, len(dois), batch_size):
             batch = dois[batch_idx:batch_idx + batch_size]
             batch_results = self._process_single_batch(
-                batch, source_type, original_doi, True, True
+                batch, source_type, original_doi, fetch_refs, fetch_cites  # Используем переданные флаги
             )
             
             results.update(batch_results)
@@ -5265,32 +5263,34 @@ class StreamlitInterfaceManager:
             analyzed_progress.progress(1.0, text="Оригинальные DOI обработаны")
             main_progress.progress(0.4, text="Оригинальные DOI обработаны")
             
-            # Collect and process references
+            # Collect and process ALL references
             all_ref_dois = self.system.doi_processor.collect_all_references(self.system.analyzed_results)
             self.system.system_stats['total_ref_dois'] = len(all_ref_dois)
             
             if all_ref_dois:
                 main_status.info(f"📎 Найдено {len(all_ref_dois)} reference DOI")
+                st.info(f"🔍 Будет обработано ВСЕ {len(all_ref_dois)} reference DOI (без ограничений)")
                 refs_progress.progress(0, text="Обработка reference DOI...")
                 
-                ref_dois_to_analyze = all_ref_dois[:5000]
+                # Обрабатываем ВСЕ reference DOI без ограничений
                 self.system.ref_results = self.system.doi_processor.process_doi_batch(
-                    ref_dois_to_analyze, "ref", None, True, True, Config.BATCH_SIZE, progress_container
+                    all_ref_dois, "ref", None, True, True, Config.BATCH_SIZE, progress_container
                 )
                 refs_progress.progress(100, text="Reference DOI обработаны")
                 main_progress.progress(60, text="Reference DOI обработаны")
             
-            # Collect and process citations
+            # Collect and process ALL citations
             all_cite_dois = self.system.doi_processor.collect_all_citations(self.system.analyzed_results)
             self.system.system_stats['total_cite_dois'] = len(all_cite_dois)
             
             if all_cite_dois:
                 main_status.info(f"🔗 Найдено {len(all_cite_dois)} citation DOI")
+                st.info(f"🔍 Будет обработано ВСЕ {len(all_cite_dois)} citation DOI (без ограничений)")
                 cites_progress.progress(0, text="Обработка citation DOI...")
                 
-                cite_dois_to_analyze = all_cite_dois[:10000]
+                # Обрабатываем ВСЕ citation DOI без ограничений
                 self.system.citing_results = self.system.doi_processor.process_doi_batch(
-                    cite_dois_to_analyze, "citing", None, True, True, Config.BATCH_SIZE, progress_container
+                    all_cite_dois, "citing", None, True, True, Config.BATCH_SIZE, progress_container
                 )
                 cites_progress.progress(100, text="Citation DOI обработаны")
                 main_progress.progress(80, text="Citation DOI обработаны")
@@ -5625,6 +5625,7 @@ if __name__ == "__main__":
     system = ArticleAnalyzerSystem()
 
     system.run()
+
 
 
 
