@@ -624,7 +624,7 @@ class AdaptiveDelayManager:
 # ============================================================================
 
 class ProgressMonitor:
-    def __init__(self, total_items: int, stage_name: str = "Обработка", progress_bar=None):
+    def __init__(self, total_items: int, stage_name: str = "Обработка", progress_bar=None, status_text=None):
         self.total_items = total_items
         self.processed_items = 0
         self.start_time = time.time()
@@ -644,8 +644,9 @@ class ProgressMonitor:
         
         # Streamlit progress bar
         self.progress_bar = progress_bar
-        self.status_text = None
+        self.status_text = status_text  # Теперь принимаем status_text как параметр
         
+        # Если нет прогресс-бара, создаем информационное сообщение
         if self.progress_bar is None:
             st.info(f"📊 {stage_name}: начата обработка {total_items} элементов")
     
@@ -661,8 +662,11 @@ class ProgressMonitor:
         # Update Streamlit progress bar if available
         if self.progress_bar and self.total_items > 0:
             progress_percent = (self.processed_items / self.total_items) * 100
+            
+            # Обновляем прогресс бар
             self.progress_bar.progress(progress_percent / 100.0)
             
+            # Обновляем текстовый статус
             if self.status_text:
                 elapsed = time.time() - self.start_time
                 if elapsed > 0:
@@ -681,6 +685,7 @@ class ProgressMonitor:
                         if count > 0:
                             stats_str += f", {stat_type}: {count}"
                     
+                    # Обновляем текст статуса
                     self.status_text.text(
                         f"{self.stage_name}: {self.processed_items}/{self.total_items} "
                         f"({progress_percent:.1f}%), "
@@ -1619,9 +1624,9 @@ class OptimizedDOIProcessor:
             progress_bar = progress_container.progress(0)
             status_text = progress_container.empty()
         
-        monitor = ProgressMonitor(len(dois), f"Обработка {source_type}", progress_bar)
-        if status_text:
-            monitor.status_text = status_text
+        # Передаем и progress_bar и status_text в ProgressMonitor
+        monitor = ProgressMonitor(len(dois), f"Обработка {source_type}", 
+                                 progress_bar=progress_bar, status_text=status_text)
         
         for batch_idx in range(0, len(dois), batch_size):
             batch = dois[batch_idx:batch_idx + batch_size]
@@ -5152,20 +5157,35 @@ class StreamlitInterfaceManager:
         # Create progress containers
         progress_container = st.container()
         results_container = st.container()
-        
+
         with progress_container:
             st.subheader("📈 Прогресс обработки")
             
-            # Main progress с уникальными ключами
-            main_progress = st.progress(0, text="Общий прогресс")
+            # Main progress с использованием st.empty() для текста
             main_status = st.empty()
+            main_progress = st.progress(0, key="main_progress")
+            main_status.text("Общий прогресс")
             
-            # Individual progress bars с уникальными ключами
-            analyzed_progress = st.progress(0, text="Анализ статей", key="analyzed_progress")
-            refs_progress = st.progress(0, text="Анализ ссылок", key="refs_progress")
-            cites_progress = st.progress(0, text="Анализ цитирований", key="cites_progress")
-            insights_progress = st.progress(0, text="Анализ инсайтов", key="insights_progress")
-            excel_progress = st.progress(0, text="Создание Excel", key="excel_progress")
+            # Individual progress bars с отдельными текстовыми элементами
+            analyzed_status = st.empty()
+            analyzed_progress = st.progress(0, key="analyzed_progress")
+            analyzed_status.text("Анализ статей")
+            
+            refs_status = st.empty()
+            refs_progress = st.progress(0, key="refs_progress")
+            refs_status.text("Анализ ссылок")
+            
+            cites_status = st.empty()
+            cites_progress = st.progress(0, key="cites_progress")
+            cites_status.text("Анализ цитирований")
+            
+            insights_status = st.empty()
+            insights_progress = st.progress(0, key="insights_progress")
+            insights_status.text("Анализ инсайтов")
+            
+            excel_status = st.empty()
+            excel_progress = st.progress(0, key="excel_progress")
+            excel_status.text("Создание Excel")
         
         # Вместо повторного вызова render_sidebar(), получаем значение из session_state
         # Если workers_slider еще не установлен, используем значение по умолчанию
@@ -5550,3 +5570,4 @@ if __name__ == "__main__":
     system = ArticleAnalyzerSystem()
 
     system.run()
+
