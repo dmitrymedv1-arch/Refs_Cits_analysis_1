@@ -1024,7 +1024,7 @@ class OpenAlexClient(APIClient):
             # Увеличиваем параметры для получения всех цитирований
             params = {
                 'filter': f'cites:{article_id}',
-                'per-page': 900,
+                'per-page': 200,
                 'select': 'doi,title,publication_year,authorships',
                 'sort': 'publication_date:asc'  # Добавили сортировку для стабильной пагинации
             }
@@ -5640,6 +5640,7 @@ if __name__ == "__main__":
     system = ArticleAnalyzerSystem()
 
     system.run()
+
 
 
 
