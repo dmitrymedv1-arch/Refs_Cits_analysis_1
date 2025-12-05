@@ -4979,68 +4979,95 @@ class ExcelExporter:
 
 class ArticleAnalyzerSystem:
     def __init__(self):
-        # Инициализация кэша с использованием Streamlit cache
+        # Инициализация ВСЕХ переменных состояния ДО их использования
+        self._init_session_state()
+        
+        # Теперь безопасно получаем значения
+        self.cache_manager = st.session_state.cache_manager
+        self.delay_manager = st.session_state.delay_manager
+        self.failed_tracker = st.session_state.failed_tracker
+        self.crossref_client = st.session_state.crossref_client
+        self.openalex_client = st.session_state.openalex_client
+        self.ror_client = st.session_state.ror_client
+        self.data_processor = st.session_state.data_processor
+        self.doi_processor = st.session_state.doi_processor
+        self.hierarchical_analyzer = st.session_state.hierarchical_analyzer
+        self.excel_exporter = st.session_state.excel_exporter
+        self.analyzed_results = st.session_state.analyzed_results
+        self.ref_results = st.session_state.ref_results
+        self.citing_results = st.session_state.citing_results
+        self.system_stats = st.session_state.system_stats
+        
+        self._setup_streamlit_interface()
+    
+    def _init_session_state(self):
+        """Инициализация всех переменных session_state"""
+        # Инициализация кэша и менеджеров
         if 'cache_manager' not in st.session_state:
             st.session_state.cache_manager = SmartCacheManager()
-        self.cache_manager = st.session_state.cache_manager
         
         if 'delay_manager' not in st.session_state:
             st.session_state.delay_manager = AdaptiveDelayManager()
-        self.delay_manager = st.session_state.delay_manager
         
         if 'failed_tracker' not in st.session_state:
             st.session_state.failed_tracker = FailedDOITracker()
-        self.failed_tracker = st.session_state.failed_tracker
         
-        # Инициализация клиентов API с кэшированием
+        # Инициализация клиентов API
         if 'crossref_client' not in st.session_state:
-            st.session_state.crossref_client = CrossrefClient(self.cache_manager, self.delay_manager)
-        self.crossref_client = st.session_state.crossref_client
+            st.session_state.crossref_client = CrossrefClient(
+                st.session_state.cache_manager, 
+                st.session_state.delay_manager
+            )
         
         if 'openalex_client' not in st.session_state:
-            st.session_state.openalex_client = OpenAlexClient(self.cache_manager, self.delay_manager)
-        self.openalex_client = st.session_state.openalex_client
+            st.session_state.openalex_client = OpenAlexClient(
+                st.session_state.cache_manager, 
+                st.session_state.delay_manager
+            )
         
         if 'ror_client' not in st.session_state:
-            st.session_state.ror_client = RORClient(self.cache_manager)
-        self.ror_client = st.session_state.ror_client
+            st.session_state.ror_client = RORClient(st.session_state.cache_manager)
         
         # Инициализация процессоров
         if 'data_processor' not in st.session_state:
-            st.session_state.data_processor = DataProcessor(self.cache_manager)
-        self.data_processor = st.session_state.data_processor
+            st.session_state.data_processor = DataProcessor(st.session_state.cache_manager)
         
         if 'doi_processor' not in st.session_state:
             st.session_state.doi_processor = OptimizedDOIProcessor(
-                self.cache_manager, self.delay_manager, 
-                self.data_processor, self.failed_tracker
+                st.session_state.cache_manager, 
+                st.session_state.delay_manager, 
+                st.session_state.data_processor, 
+                st.session_state.failed_tracker
             )
-        self.doi_processor = st.session_state.doi_processor
         
         if 'hierarchical_analyzer' not in st.session_state:
             st.session_state.hierarchical_analyzer = HierarchicalDataAnalyzer(
-                self.cache_manager, self.data_processor, self.doi_processor
+                st.session_state.cache_manager, 
+                st.session_state.data_processor, 
+                st.session_state.doi_processor
             )
-        self.hierarchical_analyzer = st.session_state.hierarchical_analyzer
         
         if 'excel_exporter' not in st.session_state:
-            st.session_state.excel_exporter = ExcelExporter(self.data_processor, self.ror_client, self.failed_tracker)
-            st.session_state.excel_exporter.set_hierarchical_analyzer(self.hierarchical_analyzer)
-        self.excel_exporter = st.session_state.excel_exporter
+            st.session_state.excel_exporter = ExcelExporter(
+                st.session_state.data_processor, 
+                st.session_state.ror_client, 
+                st.session_state.failed_tracker
+            )
+            st.session_state.excel_exporter.set_hierarchical_analyzer(
+                st.session_state.hierarchical_analyzer
+            )
         
         # Инициализация состояния приложения
         if 'analyzed_results' not in st.session_state:
             st.session_state.analyzed_results = {}
-        self.analyzed_results = st.session_state.analyzed_results
         
         if 'ref_results' not in st.session_state:
             st.session_state.ref_results = {}
-        self.ref_results = st.session_state.ref_results
         
         if 'citing_results' not in st.session_state:
             st.session_state.citing_results = {}
-        self.citing_results = st.session_state.citing_results
         
+        # КРИТИЧНО: инициализация processing_active ДО ее использования
         if 'processing_active' not in st.session_state:
             st.session_state.processing_active = False
         
@@ -5679,3 +5706,4 @@ if __name__ == "__main__":
     except Exception as e:
         st.error(f"❌ Ошибка запуска системы: {str(e)}")
         st.code(traceback.format_exc())
+
