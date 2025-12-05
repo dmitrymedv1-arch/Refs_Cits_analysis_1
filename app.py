@@ -5016,54 +5016,114 @@ class StreamlitInterfaceManager:
             
             # Workers setting
             st.subheader("Параллельность")
+            
+            # Инициализация в session_state если нужно
+            if 'workers' not in st.session_state:
+                st.session_state.workers = Config.DEFAULT_WORKERS
+                
             workers = st.slider(
                 "Количество потоков",
                 min_value=Config.MIN_WORKERS,
                 max_value=Config.MAX_WORKERS,
-                value=Config.DEFAULT_WORKERS,
+                value=st.session_state.workers,
                 help="Количество параллельных потоков для обработки DOI",
-                key="unique_workers_slider"  # ← Добавлено
+                key="workers_slider_sidebar"  # Уникальный ключ
             )
+            
+            # Сохраняем значение в session_state
+            st.session_state.workers = workers
             
             # Analysis types
             st.subheader("🔍 Типы анализа")
-            st.session_state.analysis_types['quick_checks'] = st.checkbox(
+            
+            # Инициализация analysis_types если нужно
+            if 'analysis_types' not in st.session_state:
+                st.session_state.analysis_types = {
+                    'quick_checks': True,
+                    'medium_insights': True,
+                    'deep_analysis': False,
+                    'analyzed_citing_relationships': False
+                }
+            
+            # Создаем чекбоксы с уникальными ключами
+            quick_checks = st.checkbox(
                 "Quick Checks (5-10 сек)", 
                 value=st.session_state.analysis_types['quick_checks'],
                 help="Быстрые проверки на неэтичные практики",
-                key="unique_checkbox_quick_checks"  # ← Добавлено
+                key="checkbox_quick_checks"
             )
-            st.session_state.analysis_types['medium_insights'] = st.checkbox(
+            
+            medium_insights = st.checkbox(
                 "Medium Insights (15-30 сек)", 
                 value=st.session_state.analysis_types['medium_insights'],
                 help="Средние инсайты с детальным анализом",
-                key="unique_checkbox_medium_insights"  # ← Добавлено
+                key="checkbox_medium_insights"
             )
-            st.session_state.analysis_types['deep_analysis'] = st.checkbox(
+            
+            deep_analysis = st.checkbox(
                 "Deep Analysis (60-120 сек)", 
                 value=st.session_state.analysis_types['deep_analysis'],
                 help="Глубокий анализ с ML и сетевыми метриками",
-                key="unique_checkbox_deep_analysis"  # ← Добавлено
+                key="checkbox_deep_analysis"
             )
-            st.session_state.analysis_types['analyzed_citing_relationships'] = st.checkbox(
+            
+            analyzed_citing_relationships = st.checkbox(
                 "Analyzed-Citing Relationships (30-60 сек)", 
                 value=st.session_state.analysis_types['analyzed_citing_relationships'],
                 help="Анализ связей между анализируемыми и цитирующими статьями",
-                key="unique_checkbox_analyzed_citing_relationships"  # ← Добавлено
+                key="checkbox_analyzed_citing_relationships"
             )
+            
+            # Обновляем session_state с новыми значениями
+            st.session_state.analysis_types = {
+                'quick_checks': quick_checks,
+                'medium_insights': medium_insights,
+                'deep_analysis': deep_analysis,
+                'analyzed_citing_relationships': analyzed_citing_relationships
+            }
             
             # Cache controls
             st.subheader("🗂️ Управление кэшем")
-            if st.button("🧹 Очистить кэш", type="secondary", key="unique_clear_cache_btn"):  # ← Добавлено
+            
+            # Используем уникальный ключ для кнопки
+            if st.button("🧹 Очистить кэш", type="secondary", key="clear_cache_btn"):
                 self.system.cache_manager.clear_all()
                 st.success("Кэш очищен!")
+                
+                # Принудительно обновляем страницу, чтобы показать обновленную статистику
+                st.rerun()
             
             # Display cache stats
             cache_stats = self.system.cache_manager.get_stats()
-            with st.expander("Статистика кэша"):  # ← Добавлено
-                st.metric("Эффективность", f"{cache_stats['hit_ratio']}%", key="unique_metric_efficiency")
-                st.metric("Сохранено API вызовов", cache_stats['api_calls_saved'], key="unique_metric_api_saved")
-                st.metric("Размер кэша", f"{cache_stats['cache_size_mb']} MB", key="unique_metric_cache_size")
+            
+            # Используем expander с уникальным ключом
+            with st.expander("Статистика кэша", key="cache_stats_expander"):
+                # Используем дельты или статические значения для метрик
+                st.metric(
+                    "Эффективность", 
+                    f"{cache_stats['hit_ratio']}%",
+                    delta=None,  # Явно указываем delta=None
+                    delta_color="normal",
+                    help=f"Хит-рейт кэша: {cache_stats['hits']} / {cache_stats['hits'] + cache_stats['misses']}",
+                    key="metric_efficiency"
+                )
+                
+                st.metric(
+                    "Сохранено API вызовов", 
+                    cache_stats['api_calls_saved'],
+                    delta=None,
+                    delta_color="normal",
+                    key="metric_api_saved"
+                )
+                
+                st.metric(
+                    "Размер кэша", 
+                    f"{cache_stats['cache_size_mb']} MB",
+                    delta=None,
+                    delta_color="normal",
+                    help=f"Элементов в памяти: {cache_stats['memory_items']}",
+                    key="metric_cache_size"
+                )
             
             return workers
     
@@ -5126,7 +5186,7 @@ class StreamlitInterfaceManager:
         
         st.info(f"📚 Найдено {len(dois)} DOI для обработки")
 
-        # Get workers from session_state (а не вызывая render_sidebar снова)
+        # Получаем workers из session_state
         workers = st.session_state.get('workers', Config.DEFAULT_WORKERS)
     
         # Create progress containers
@@ -5528,6 +5588,7 @@ if __name__ == "__main__":
     # Create and run the system
     system = ArticleAnalyzerSystem()
     system.run()
+
 
 
 
