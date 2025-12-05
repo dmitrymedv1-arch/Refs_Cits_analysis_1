@@ -1596,17 +1596,20 @@ class OptimizedDOIProcessor:
     def __init__(self, cache_manager: SmartCacheManager, 
                  delay_manager: AdaptiveDelayManager,
                  data_processor: DataProcessor,
-                 failed_tracker: FailedDOITracker):
+                 failed_tracker: FailedDOITracker,
+                 crossref_client: Optional[CrossrefClient] = None,
+                 openalex_client: Optional[OpenAlexClient] = None,
+                 ror_client: Optional[RORClient] = None):
         
         self.cache = cache_manager
         self.delay = delay_manager
         self.data_processor = data_processor
         self.failed_tracker = failed_tracker
         
-        # Инициализируем клиенты позже - они будут установлены извне
-        self.crossref_client = None
-        self.openalex_client = None
-        self.ror_client = None
+        # Инициализация клиентов
+        self.crossref_client = CrossrefClient(cache_manager, delay_manager)
+        self.openalex_client = OpenAlexClient(cache_manager, delay_manager)
+        self.ror_client = RORClient(cache_manager)
         
         self.processed_dois = {}
         self.reference_relationships = defaultdict(list)
@@ -4986,6 +4989,7 @@ class StreamlitArticleAnalyzer:
     
     def initialize_system(self):
         """Инициализация системы с использованием Streamlit session state"""
+        # Создаем базовые компоненты
         if 'cache_manager' not in st.session_state:
             st.session_state.cache_manager = SmartCacheManager()
         
@@ -4998,7 +5002,7 @@ class StreamlitArticleAnalyzer:
         if 'data_processor' not in st.session_state:
             st.session_state.data_processor = DataProcessor(st.session_state.cache_manager)
         
-        # Обновляем инициализацию клиентов
+        # Создаем клиенты API
         if 'crossref_client' not in st.session_state:
             st.session_state.crossref_client = CrossrefClient(
                 st.session_state.cache_manager, 
@@ -5014,64 +5018,17 @@ class StreamlitArticleAnalyzer:
         if 'ror_client' not in st.session_state:
             st.session_state.ror_client = RORClient(st.session_state.cache_manager)
         
+        # Создаем DOI процессор с передачей клиентов
         if 'doi_processor' not in st.session_state:
             st.session_state.doi_processor = OptimizedDOIProcessor(
                 st.session_state.cache_manager,
                 st.session_state.delay_manager,
                 st.session_state.data_processor,
-                st.session_state.failed_tracker
+                st.session_state.failed_tracker,
+                crossref_client=st.session_state.crossref_client,
+                openalex_client=st.session_state.openalex_client,
+                ror_client=st.session_state.ror_client
             )
-            
-            # Устанавливаем клиенты для процессора
-            st.session_state.doi_processor.crossref_client = st.session_state.crossref_client
-            st.session_state.doi_processor.openalex_client = st.session_state.openalex_client
-            st.session_state.doi_processor.ror_client = st.session_state.ror_client
-        
-        if 'hierarchical_analyzer' not in st.session_state:
-            st.session_state.hierarchical_analyzer = HierarchicalDataAnalyzer(
-                st.session_state.cache_manager,
-                st.session_state.data_processor,
-                st.session_state.doi_processor
-            )
-        
-        if 'excel_exporter' not in st.session_state:
-            st.session_state.excel_exporter = ExcelExporter(
-                st.session_state.data_processor,
-                st.session_state.ror_client,
-                st.session_state.failed_tracker
-            )
-            st.session_state.excel_exporter.set_hierarchical_analyzer(st.session_state.hierarchical_analyzer)
-        
-        # Инициализация результатов
-        if 'analyzed_results' not in st.session_state:
-            st.session_state.analyzed_results = {}
-        
-        if 'ref_results' not in st.session_state:
-            st.session_state.ref_results = {}
-        
-        if 'citing_results' not in st.session_state:
-            st.session_state.citing_results = {}
-        
-        if 'processing_active' not in st.session_state:
-            st.session_state.processing_active = False
-        
-        if 'processing_progress' not in st.session_state:
-            st.session_state.processing_progress = {
-                'main': 0,
-                'analyzed': 0,
-                'refs': 0,
-                'cites': 0,
-                'insights': 0,
-                'excel': 0
-            }
-        
-        if 'analysis_types' not in st.session_state:
-            st.session_state.analysis_types = {
-                'quick_checks': True,
-                'medium_insights': True,
-                'deep_analysis': False,
-                'analyzed_citing_relationships': False
-            }
     
     def parse_dois(self, input_text: str) -> List[str]:
         """Парсинг DOI из текста"""
@@ -5636,6 +5593,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
