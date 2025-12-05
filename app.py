@@ -5254,7 +5254,10 @@ class StreamlitArticleAnalyzer:
         ref_success = sum(1 for r in st.session_state.ref_results.values() if r.get('status') == 'success') if st.session_state.ref_results else 0
         cite_success = sum(1 for r in st.session_state.citing_results.values() if r.get('status') == 'success') if st.session_state.citing_results else 0
         
-        cache_stats = st.session_state.cache_manager.get_stats()
+        # Безопасное получение статистики кэша
+        cache_stats = st.session_state.get('cache_manager', {}).get_stats() if hasattr(st.session_state, 'cache_manager') and st.session_state.cache_manager else {'hit_ratio': 0, 'api_calls_saved': 0}
+        st.caption(f"Эффективность: {cache_stats.get('hit_ratio', 0)}%")
+        st.caption(f"API сохранено: {cache_stats.get('api_calls_saved', 0)}")
         
         # Статистика в expander
         with st.expander("📊 Статистика анализа", expanded=True):
@@ -5585,3 +5588,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
