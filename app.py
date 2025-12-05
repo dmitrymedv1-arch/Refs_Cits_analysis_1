@@ -1,108 +1,85 @@
 # -*- coding: utf-8 -*-
-"""📚 Анализатор научных статей по DOI с умным кэшированием и экспортом в Excel
-Streamlit версия с поддержкой анализа 100 статей, 5000 ссылок и 4000 цитирований одновременно
-"""
+"""📚 Анализатор научных статей по DOI с умным кэшированием и экспортом в Excel (Streamlit версия)"""
 
-import os
-import sys
+# ============================================================================
+# 📦 ИМПОРТЫ И НАСТРОЙКА
+# ============================================================================
+
+import streamlit as st
+import requests
 import json
-import time
-import hashlib
-import pickle
 import re
-import warnings
+import time
+import pickle
+import hashlib
+import os
+import pandas as pd
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Tuple, Set, Union
 from collections import defaultdict, Counter, OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
-from queue import Queue
+from tqdm import tqdm
+import warnings
+warnings.filterwarnings('ignore')
 import threading
 import math
-from dataclasses import dataclass, field
-import logging
-
-# Основные библиотеки
-import streamlit as st
-import pandas as pd
-import numpy as np
-import requests
-from tqdm import tqdm
-from thefuzz import fuzz
 import networkx as nx
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
-from sklearn.feature_extraction.text import TfidfVectorizer
-import plotly.graph_objects as go
-import plotly.express as px
-import matplotlib.pyplot as plt
-import seaborn as sns
-from wordcloud import WordCloud
-import openpyxl
-from openpyxl.utils import get_column_letter
-import io
-import base64
+import numpy as np
 import tempfile
-import zipfile
-import joblib
-
-warnings.filterwarnings('ignore')
+import base64
+import io
 
 # ============================================================================
 # ⚙️ КОНФИГУРАЦИЯ
 # ============================================================================
 
-@dataclass
 class Config:
-    # API URLs
-    CROSSREF_URL: str = "https://api.crossref.org/works/"
-    OPENALEX_URL: str = "https://api.openalex.org/works/https://doi.org/"
-    OPENALEX_WORKS_URL: str = "https://api.openalex.org/works"
-    ORCID_API_URL: str = "https://pub.orcid.org/v3.0/search/"
-    ROR_API_URL: str = "https://api.ror.org/organizations"
+    CROSSREF_URL = "https://api.crossref.org/works/"
+    OPENALEX_URL = "https://api.openalex.org/works/https://doi.org/"
+    OPENALEX_WORKS_URL = "https://api.openalex.org/works"
+    ORCID_API_URL = "https://pub.orcid.org/v3.0/search/"
+    ROR_API_URL = "https://api.ror.org/organizations"
     
-    # Request settings
-    REQUEST_TIMEOUT: int = 10
-    MAX_RETRIES: int = 2
-    MAX_DELAY: float = 1.0
-    MIN_DELAY: float = 0.1
-    INITIAL_DELAY: float = 0.2
+    REQUEST_TIMEOUT = 10
+    MAX_RETRIES = 2
+    MAX_DELAY = 1.0
+    MIN_DELAY = 0.1
+    INITIAL_DELAY = 0.2
     
-    # Cache settings
-    CACHE_DIR: str = "./.cache/article_analyzer_cache"
-    TTL_HOURS: int = 24
-    MAX_CACHE_SIZE_MB: int = 50
+    # Для Streamlit используем временную директорию
+    CACHE_DIR = os.path.join(tempfile.gettempdir(), "article_analyzer_cache_streamlit")
+    TTL_HOURS = 24
+    MAX_CACHE_SIZE_MB = 50
     
-    # Parallel processing
-    MIN_WORKERS: int = 1
-    MAX_WORKERS: int = 10
-    DEFAULT_WORKERS: int = 4
-    BATCH_SIZE: int = 50
+    MIN_WORKERS = 1
+    MAX_WORKERS = 10
+    DEFAULT_WORKERS = 4
     
-    # Analysis thresholds
-    TOP_PERCENTILE_FOR_DEEP_ANALYSIS: int = 10
-    MIN_CITATIONS_FOR_DEEP_ANALYSIS: int = 10
+    BATCH_SIZE = 50
     
-    # Quick check thresholds
-    QUICK_CHECK_THRESHOLDS: Dict[str, float] = field(default_factory=lambda: {
+    TOP_PERCENTILE_FOR_DEEP_ANALYSIS = 10
+    MIN_CITATIONS_FOR_DEEP_ANALYSIS = 10
+    
+    # Пороговые значения для анализа неэтичных практик
+    QUICK_CHECK_THRESHOLDS = {
         'journal_concentration': 0.7,  # >70% из одного журнала
         'author_self_citation': 0.3,   # >30% с общими авторами
         'affiliation_self_citation': 0.6,  # >60% из той же аффилиации
         'single_country': 0.8,         # >80% из одной страны
         'citation_velocity': 20,       # >20 цитирований в год
         'first_year_share': 0.5        # >50% в первый год
-    })
+    }
     
-    # Medium insight thresholds
-    MEDIUM_INSIGHT_THRESHOLDS: Dict[str, float] = field(default_factory=lambda: {
+    MEDIUM_INSIGHT_THRESHOLDS = {
         'first_two_years': 0.7,        # >70% за первые 2 года
         'top_journal_share': 0.6,      # >60% из топ-1 журнала
         'cluster_coefficient': 0.8,    # коэффициент кластеризации >0.8
         'geographic_bias': 0.9         # географический bias >0.9
-    })
+    }
     
-    # Country codes mapping
-    COUNTRY_CODES: Dict[str, str] = field(default_factory=lambda: {
+    COUNTRY_CODES = {
         'USA': 'US', 'United States': 'US', 'US': 'US',
         'United Kingdom': 'GB', 'UK': 'GB', 'Great Britain': 'GB',
         'Germany': 'DE', 'Deutschland': 'DE',
@@ -175,21 +152,10 @@ class Config:
         'Tajikistan': 'TJ', 'Tajikistan': 'TJ',
         'Turkmenistan': 'TM', 'Turkmenistan': 'TM',
         'Mongolia': 'MN', 'Mongolia': 'MN',
-    })
-    
-    # Streamlit specific
-    PAGE_TITLE: str = "📚 Анализатор научных статей по DOI"
-    PAGE_ICON: str = "📊"
-    LAYOUT: str = "wide"
-    INITIAL_SIDEBAR_STATE: str = "expanded"
-    
-    # Analysis limits
-    MAX_ANALYZED_ARTICLES: int = 100
-    MAX_REFERENCE_ARTICLES: int = 5000
-    MAX_CITING_ARTICLES: int = 4000
+    }
 
 # ============================================================================
-# 🗂️ КЛАСС УМНОГО КЭШИРОВАНИЯ (АДАПТИРОВАН ДЛЯ STREAMLIT)
+# 🗂️ КЛАСС УМНОГО КЭШИРОВАНИЯ (УЛУЧШЕННЫЙ)
 # ============================================================================
 
 class SmartCacheManager:
@@ -231,6 +197,7 @@ class SmartCacheManager:
             'mutual_citations': {}
         }
         
+        # Кэш для результатов анализа неэтичных практик
         self.ethical_analysis_cache = {
             'quick_checks': {},
             'medium_insights': {},
@@ -238,10 +205,11 @@ class SmartCacheManager:
             'citing_relationships': {}
         }
         
-        # Create cache directory
-        os.makedirs(cache_dir, exist_ok=True)
-        
+        if not os.path.exists(cache_dir):
+            os.makedirs(cache_dir, exist_ok=True)
+            
         self._clean_expired_cache()
+        
         self._load_popular_dois()
     
     def _get_cache_key(self, source: str, identifier: str) -> str:
@@ -267,7 +235,6 @@ class SmartCacheManager:
     
     def _clean_expired_cache(self):
         try:
-            current_time = time.time()
             for filename in os.listdir(self.cache_dir):
                 if filename.endswith('.pkl'):
                     filepath = os.path.join(self.cache_dir, filename)
@@ -275,7 +242,7 @@ class SmartCacheManager:
                         with open(filepath, 'rb') as f:
                             cached_data = pickle.load(f)
                         
-                        if current_time - cached_data.get('timestamp', 0) > self.ttl_seconds:
+                        if time.time() - cached_data.get('timestamp', 0) > self.ttl_seconds:
                             os.remove(filepath)
                             self.stats['expired'] += 1
                             
@@ -328,17 +295,23 @@ class SmartCacheManager:
             st.warning(f"⚠️ Ошибка удаления старых элементов кэша: {e}")
     
     def get(self, source: str, identifier: str, category: str = "default") -> Optional[Any]:
-        # Используем Streamlit cache для часто используемых данных
-        cache_key = f"{source}:{identifier}:{category}"
+        failed_key = f"failed:{source}:{identifier}"
+        if failed_key in self.failed_cache:
+            failed_data = self.failed_cache[failed_key]
+            if time.time() - failed_data['timestamp'] < self.failed_cache_ttl:
+                return None
         
-        # Проверяем в памяти
-        if cache_key in self.memory_cache:
+        key = self._get_cache_key(source, identifier)
+        
+        memory_key = f"{category}:{key}"
+        if memory_key in self.memory_cache:
+            data = self.memory_cache[memory_key]
+            del self.memory_cache[memory_key]
+            self.memory_cache[memory_key] = data
             self.stats['hits'] += 1
             self.stats['memory_hits'] += 1
-            return self.memory_cache[cache_key]
+            return data
         
-        # Проверяем в файловом кэше
-        key = self._get_cache_key(source, identifier)
         cache_path = self._get_cache_path(key)
         meta_path = self._get_cache_metadata_path(key)
         
@@ -347,27 +320,39 @@ class SmartCacheManager:
                 with open(cache_path, 'rb') as f:
                     cached_data = pickle.load(f)
                 
-                # Проверяем TTL
-                if time.time() - cached_data.get('timestamp', 0) < self.ttl_seconds:
-                    data = cached_data['data']
+                if os.path.exists(meta_path):
+                    try:
+                        with open(meta_path, 'r') as mf:
+                            metadata = json.load(mf)
+                        category_match = metadata.get('category') == category
+                    except:
+                        category_match = True
+                else:
+                    category_match = True
+                
+                if (time.time() - cached_data.get('timestamp', 0) < self.ttl_seconds and 
+                    category_match):
                     
-                    # Сохраняем в память
                     if len(self.memory_cache) >= self.max_memory_items:
                         self.memory_cache.popitem(last=False)
-                    self.memory_cache[cache_key] = data
                     
+                    self.memory_cache[memory_key] = cached_data['data']
                     self.stats['hits'] += 1
                     self.stats['file_hits'] += 1
-                    return data
+                    return cached_data['data']
                 else:
-                    # Удаляем просроченный кэш
                     os.remove(cache_path)
                     if os.path.exists(meta_path):
                         os.remove(meta_path)
                     self.stats['expired'] += 1
                     
-            except Exception as e:
-                st.warning(f"Ошибка чтения кэша: {e}")
+            except:
+                try:
+                    os.remove(cache_path)
+                    if os.path.exists(meta_path):
+                        os.remove(meta_path)
+                except:
+                    pass
         
         self.stats['misses'] += 1
         return None
@@ -399,17 +384,16 @@ class SmartCacheManager:
             with open(meta_path, 'w') as mf:
                 json.dump(metadata, mf, indent=2)
             
-            # Сохраняем в памяти
-            cache_key = f"{source}:{identifier}:{category}"
+            memory_key = f"{category}:{key}"
             if len(self.memory_cache) >= self.max_memory_items:
                 self.memory_cache.popitem(last=False)
             
-            self.memory_cache[cache_key] = data
+            self.memory_cache[memory_key] = data
             
             self.stats['api_calls_saved'] += 1
             
         except Exception as e:
-            st.error(f"⚠️ Ошибка сохранения в кэш: {e}")
+            st.warning(f"⚠️ Ошибка сохранения в кэш: {e}")
     
     def mark_as_failed(self, source: str, identifier: str, error: str = ""):
         failed_key = f"failed:{source}:{identifier}"
@@ -426,7 +410,6 @@ class SmartCacheManager:
             try:
                 with open(popular_file, 'r') as f:
                     self.popular_cache = json.load(f)
-                st.success(f"✅ Загружено {len(self.popular_cache)} популярных DOI")
             except:
                 self.popular_cache = {}
     
@@ -489,10 +472,8 @@ class SmartCacheManager:
             }
             self.stats = {k: 0 for k in self.stats.keys()}
             
-            st.success("✅ Кэш полностью очищен")
-            
         except Exception as e:
-            st.error(f"⚠️ Ошибка очистки кэша: {e}")
+            st.warning(f"⚠️ Ошибка очистки кэша: {e}")
     
     def get_ror_cache(self, category: str, query: str) -> Optional[Dict]:
         if category in self.ror_cache and query in self.ror_cache[category]:
@@ -533,6 +514,7 @@ class SmartCacheManager:
             for insight in self.insights_cache:
                 self.insights_cache[insight].clear()
     
+    # Методы для кэширования анализа неэтичных практик
     def get_ethical_analysis(self, analysis_type: str, doi: str) -> Optional[Dict]:
         if analysis_type in self.ethical_analysis_cache and doi in self.ethical_analysis_cache[analysis_type]:
             return self.ethical_analysis_cache[analysis_type][doi]
@@ -632,7 +614,7 @@ class AdaptiveDelayManager:
         }
 
 # ============================================================================
-# 📊 КЛАСС МОНИТОРИНГА ПРОГРЕССА ДЛЯ STREAMLIT
+# 📊 КЛАСС МОНИТОРИНГА ПРОГРЕССА (НОВЫЙ)
 # ============================================================================
 
 class ProgressMonitor:
@@ -643,6 +625,7 @@ class ProgressMonitor:
         self.stage_name = stage_name
         self.last_progress_time = self.start_time
         self.processing_speeds = []
+        self.progress_bar = progress_bar
         
         self.checkpoint_times = []
         self.checkpoint_items = []
@@ -653,12 +636,6 @@ class ProgressMonitor:
             'cached': 0,
             'skipped': 0
         }
-        
-        self.progress_bar = progress_bar
-        self.status_text = None
-        
-        if self.progress_bar:
-            self.status_text = st.empty()
     
     def update(self, count: int = 1, item_type: str = None):
         self.processed_items += count
@@ -669,32 +646,17 @@ class ProgressMonitor:
             else:
                 self.stats[item_type] = count
         
-        if self.progress_bar:
-            if self.total_items > 0:
-                progress_percent = (self.processed_items / self.total_items) * 100
-                self.progress_bar.progress(int(progress_percent))
-                
+        if self.total_items > 0:
+            progress_percent = (self.processed_items / self.total_items) * 100
+            if progress_percent % 10 < 1 and progress_percent > 0:
                 current_time = time.time()
                 elapsed = current_time - self.start_time
-                
-                if elapsed > 0:
-                    speed = self.processed_items / elapsed
-                    items_per_min = speed * 60
-                    
-                    remaining_items = self.total_items - self.processed_items
-                    if speed > 0:
-                        eta_seconds = remaining_items / speed
-                        eta_str = self._format_time(eta_seconds)
-                    else:
-                        eta_str = "расчет..."
-                    
-                    stats_str = ""
-                    for stat_type, stat_count in self.stats.items():
-                        if stat_count > 0:
-                            stats_str += f", {stat_type}: {stat_count}"
-                    
-                    status_text = f"📈 {self.stage_name}: {self.processed_items}/{self.total_items} ({progress_percent:.1f}%), скорость: {items_per_min:.1f} DOI/мин, осталось: {eta_str}{stats_str}"
-                    self.status_text.text(status_text)
+                self.checkpoint_times.append(elapsed)
+                self.checkpoint_items.append(self.processed_items)
+        
+        # Обновляем прогресс-бар если он есть
+        if self.progress_bar:
+            self.progress_bar.progress(progress_percent / 100.0)
     
     def _format_time(self, seconds: float) -> str:
         if seconds < 60:
@@ -729,23 +691,17 @@ class ProgressMonitor:
     def complete(self):
         elapsed = time.time() - self.start_time
         
-        if self.progress_bar:
-            self.progress_bar.progress(100)
-            
-            if self.total_items > 0:
-                progress_percent = (self.processed_items / self.total_items) * 100
-            else:
-                progress_percent = 100
-            
-            summary = self.get_summary()
-            
-            status_text = f"✅ {self.stage_name} завершена! Обработано: {self.processed_items}/{self.total_items} ({progress_percent:.1f}%), время: {self._format_time(elapsed)}, скорость: {summary['speed_per_min']:.1f} DOI/мин"
-            self.status_text.text(status_text)
+        if self.total_items > 0:
+            progress_percent = (self.processed_items / self.total_items) * 100
+        else:
+            progress_percent = 100
         
-        return self.get_summary()
+        summary = self.get_summary()
+        
+        return summary
 
 # ============================================================================
-# 📝 КЛАСС ТРЕКИНГА НЕУДАЧНЫХ DOI
+# 📝 КЛАСС ТРЕКИНГА НЕУДАЧНЫХ DOI (НОВЫЙ)
 # ============================================================================
 
 class FailedDOITracker:
@@ -847,7 +803,7 @@ class APIClient:
         self.delay = delay_manager
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'ArticleAnalyzer/3.0 (streamlit-app@example.com)',
+            'User-Agent': 'ArticleAnalyzer/3.0 (colab-user@example.com)',
             'Accept': 'application/json',
             'Accept-Encoding': 'gzip'
         })
@@ -941,7 +897,7 @@ class CrossrefClient(APIClient):
                             citing_dois.append(citing_doi)
                             
         except Exception as e:
-            st.warning(f"Crossref citations error for {doi}: {e}")
+            pass
         
         return citing_dois
     
@@ -1020,7 +976,7 @@ class OpenAlexClient(APIClient):
                     has_more = False
         
         except Exception as e:
-            st.warning(f"OpenAlex citations error for {doi}: {e}")
+            pass
         
         return list(set(citing_dois))
     
@@ -1042,7 +998,7 @@ class RORClient:
         self.cache = cache_manager
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'ArticleAnalyzer-ROR/3.0 (streamlit-app@example.com)',
+            'User-Agent': 'ArticleAnalyzer-ROR/3.0 (colab-user@example.com)',
             'Accept': 'application/json'
         })
         self.last_request_time = 0
@@ -1129,7 +1085,6 @@ class RORClient:
             return result
             
         except Exception as e:
-            st.warning(f"ROR error for query '{query}': {e}")
             return self._create_empty_result()
     
     def _improved_find_best_match(self, query: str, items: List[Dict]) -> Optional[Dict]:
@@ -1186,14 +1141,18 @@ class RORClient:
         return 0
     
     def _strategy_fuzzy_match(self, query: str, name: str, aliases: List[str], acronyms: List[str]) -> int:
-        all_texts = [name] + aliases
-        best_fuzzy = 0
-        for text in all_texts:
-            if text:
-                score = fuzz.token_set_ratio(query, text)
-                if score > best_fuzzy:
-                    best_fuzzy = score
-        return best_fuzzy
+        try:
+            from thefuzz import fuzz
+            all_texts = [name] + aliases
+            best_fuzzy = 0
+            for text in all_texts:
+                if text:
+                    score = fuzz.token_set_ratio(query, text)
+                    if score > best_fuzzy:
+                        best_fuzzy = score
+            return best_fuzzy
+        except:
+            return 0
     
     def _create_empty_result(self) -> Dict[str, str]:
         return {
@@ -1211,7 +1170,7 @@ class RORClient:
 class DataProcessor:
     def __init__(self, cache_manager: SmartCacheManager):
         self.cache = cache_manager
-        self.country_codes = Config().COUNTRY_CODES
+        self.country_codes = Config.COUNTRY_CODES
     
     def extract_article_info(self, crossref_data: Dict, openalex_data: Dict, 
                            doi: str, references: List[str], citations: List[str]) -> Dict:
@@ -1403,7 +1362,7 @@ class DataProcessor:
                     
                     authors.append(author_info)
         except Exception as e:
-            st.warning(f"⚠️ OpenAlex author extraction error: {e}")
+            pass
         
         if not authors and crossref_data:
             try:
@@ -1440,7 +1399,7 @@ class DataProcessor:
                         
                         authors.append(author_info)
             except Exception as e:
-                st.warning(f"⚠️ Crossref author extraction error: {e}")
+                pass
         
         return authors, list(set(countries))
     
@@ -1567,7 +1526,7 @@ class DataProcessor:
         return family
 
 # ============================================================================
-# 🎯 КЛАСС ОПТИМИЗИРОВАННОЙ ОБРАБОТКИ DOI
+# 🎯 КЛАСС ОПТИМИЗИРОВАННОЙ ОБРАБОТКИ DOI (НОВЫЙ)
 # ============================================================================
 
 class OptimizedDOIProcessor:
@@ -1604,20 +1563,14 @@ class OptimizedDOIProcessor:
     def process_doi_batch(self, dois: List[str], source_type: str = "analyzed", 
                          original_doi: str = None, fetch_refs: bool = True, 
                          fetch_cites: bool = True, batch_size: int = Config.BATCH_SIZE,
-                         progress_container=None) -> Dict[str, Dict]:
+                         progress_bar=None) -> Dict[str, Dict]:
         
         results = {}
         total_batches = (len(dois) + batch_size - 1) // batch_size
         
-        status_text = st.empty()
-        status_text.info(f"🔧 Обработка {len(dois)} DOI (источник: {source_type}), разбито на {total_batches} пачек по {batch_size} DOI")
-        
-        if progress_container:
-            progress_bar = progress_container.progress(0)
-            status_text = progress_container.empty()
-        else:
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+        if progress_bar:
+            progress_bar.text(f"🔧 Обработка {len(dois)} DOI (источник: {source_type})")
+            progress_bar.progress(0)
         
         monitor = ProgressMonitor(len(dois), f"Обработка {source_type}", progress_bar)
         
@@ -1630,13 +1583,8 @@ class OptimizedDOIProcessor:
             results.update(batch_results)
             
             monitor.update(len(batch), 'processed')
-            
-            batch_success = sum(1 for r in batch_results.values() if r.get('status') == 'success')
-            status_text.text(f"   Пачка {batch_idx//batch_size + 1}/{total_batches}: "
-                          f"{batch_success}/{len(batch)} успешно, "
-                          f"{self.delay.get_delay():.2f}s задержка")
         
-        summary = monitor.complete()
+        monitor.complete()
         
         successful = sum(1 for r in results.values() if r.get('status') == 'success')
         failed = len(dois) - successful
@@ -1645,20 +1593,13 @@ class OptimizedDOIProcessor:
         self.stats['successful'] += successful
         self.stats['failed'] += failed
         
-        if progress_container:
-            status_text.empty()
-        else:
-            status_text.empty()
-        
         return results
     
     def _process_single_batch(self, batch: List[str], source_type: str, 
                              original_doi: str, fetch_refs: bool, fetch_cites: bool) -> Dict[str, Dict]:
         results = {}
         
-        max_workers = min(st.session_state.get('workers', Config.DEFAULT_WORKERS), len(batch))
-        
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        with ThreadPoolExecutor(max_workers=min(Config.MAX_WORKERS, len(batch))) as executor:
             future_to_doi = {}
             
             for doi in batch:
@@ -1749,7 +1690,7 @@ class OptimizedDOIProcessor:
             if references:
                 self.reference_relationships[doi] = references
         except Exception as e:
-            st.warning(f"⚠️ Error fetching references for {doi}: {e}")
+            pass
         
         citations = []
         try:
@@ -1764,7 +1705,7 @@ class OptimizedDOIProcessor:
             if citations:
                 self.citation_relationships[doi] = citations
         except Exception as e:
-            st.warning(f"⚠️ Error fetching citations for {doi}: {e}")
+            pass
         
         result = self.data_processor.extract_article_info(
             crossref_data, openalex_data, doi, references, citations
@@ -1877,11 +1818,8 @@ class OptimizedDOIProcessor:
         if not rate_limit_dois:
             return retry_results
         
-        st.info(f"🔄 Повторная обработка {len(rate_limit_dois)} DOI с rate limiting ошибками")
-        
         original_delay = self.delay.current_delay
         self.delay.current_delay = min(Config.MAX_DELAY, original_delay * 1.5)
-        st.info(f"   Увеличена задержка: {original_delay:.3f}s -> {self.delay.current_delay:.3f}s")
         
         retry_results = self.process_doi_batch(
             rate_limit_dois, "retry", None, True, True, Config.BATCH_SIZE
@@ -1889,13 +1827,10 @@ class OptimizedDOIProcessor:
         
         self.delay.current_delay = original_delay
         
-        successful_retries = sum(1 for r in retry_results.values() if r.get('status') == 'success')
-        st.success(f"   Успешно повторно обработано: {successful_retries}/{len(rate_limit_dois)}")
-        
         return retry_results
 
 # ============================================================================
-# 🔍 КЛАСС ИЕРАРХИЧЕСКОГО АНАЛИЗА ДАННЫХ
+# 🔍 КЛАСС ИЕРАРХИЧЕСКОГО АНАЛИЗА ДАННЫХ (НОВЫЙ)
 # ============================================================================
 
 class HierarchicalDataAnalyzer:
@@ -1928,31 +1863,24 @@ class HierarchicalDataAnalyzer:
         """Быстрые проверки (5-10 секунд на статью)"""
         quick_checks = []
         
-        with st.spinner("🔍 Выполняю быстрые проверки..."):
-            progress_bar = st.progress(0)
-            total_articles = len([r for r in analyzed_results.values() if r.get('status') == 'success'])
+        for doi, result in analyzed_results.items():
+            if result.get('status') != 'success':
+                continue
             
-            for idx, (doi, result) in enumerate(analyzed_results.items()):
-                if result.get('status') != 'success':
-                    continue
-                
-                progress_bar.progress((idx + 1) / total_articles)
-                
-                # Получаем цитирующие статьи для этой DOI
-                citing_dois = result.get('citations', [])
-                citing_data = {}
-                for cite_doi in citing_dois:
-                    if cite_doi in citing_results and citing_results[cite_doi].get('status') == 'success':
-                        citing_data[cite_doi] = citing_results[cite_doi]
-                
-                # Анализ
-                analysis = self._perform_quick_check_analysis(doi, result, citing_data)
-                quick_checks.append(analysis)
-                
-                # Кэшируем результаты
-                self.cache.set_ethical_analysis('quick_checks', doi, analysis)
+            # Получаем цитирующие статьи для этой DOI
+            citing_dois = result.get('citations', [])
+            citing_data = {}
+            for cite_doi in citing_dois:
+                if cite_doi in citing_results and citing_results[cite_doi].get('status') == 'success':
+                    citing_data[cite_doi] = citing_results[cite_doi]
+            
+            # Анализ
+            analysis = self._perform_quick_check_analysis(doi, result, citing_data)
+            quick_checks.append(analysis)
+            
+            # Кэшируем результаты
+            self.cache.set_ethical_analysis('quick_checks', doi, analysis)
         
-        progress_bar.empty()
         return sorted(quick_checks, key=lambda x: x['Quick_Risk_Score'], reverse=True)
     
     def _perform_quick_check_analysis(self, doi: str, result: Dict, 
@@ -2246,34 +2174,27 @@ class HierarchicalDataAnalyzer:
         """Средние инсайты (15-30 секунд на статью)"""
         medium_insights = []
         
-        with st.spinner("🔍 Выполняю анализ средних инсайтов..."):
-            # Собираем статистику по журналам для сравнения
-            journal_stats = self._collect_journal_statistics(analyzed_results, citing_results)
-            
-            progress_bar = st.progress(0)
-            total_articles = len([r for r in analyzed_results.values() if r.get('status') == 'success'])
-            
-            for idx, (doi, result) in enumerate(analyzed_results.items()):
-                if result.get('status') != 'success':
-                    continue
-                
-                progress_bar.progress((idx + 1) / total_articles)
-                
-                # Получаем цитирующие статьи
-                citing_dois = result.get('citations', [])
-                citing_data = {}
-                for cite_doi in citing_dois:
-                    if cite_doi in citing_results and citing_results[cite_doi].get('status') == 'success':
-                        citing_data[cite_doi] = citing_results[cite_doi]
-                
-                # Анализ
-                analysis = self._perform_medium_insight_analysis(doi, result, citing_data, journal_stats)
-                medium_insights.append(analysis)
-                
-                # Кэшируем результаты
-                self.cache.set_ethical_analysis('medium_insights', doi, analysis)
+        # Собираем статистику по журналам для сравнения
+        journal_stats = self._collect_journal_statistics(analyzed_results, citing_results)
         
-        progress_bar.empty()
+        for doi, result in analyzed_results.items():
+            if result.get('status') != 'success':
+                continue
+            
+            # Получаем цитирующие статьи
+            citing_dois = result.get('citations', [])
+            citing_data = {}
+            for cite_doi in citing_dois:
+                if cite_doi in citing_results and citing_results[cite_doi].get('status') == 'success':
+                    citing_data[cite_doi] = citing_results[cite_doi]
+            
+            # Анализ
+            analysis = self._perform_medium_insight_analysis(doi, result, citing_data, journal_stats)
+            medium_insights.append(analysis)
+            
+            # Кэшируем результаты
+            self.cache.set_ethical_analysis('medium_insights', doi, analysis)
+        
         return sorted(medium_insights, key=lambda x: x['Anomaly_Score'], reverse=True)
     
     def _collect_journal_statistics(self, analyzed_results: Dict[str, Dict], 
@@ -2326,6 +2247,7 @@ class HierarchicalDataAnalyzer:
                     'count': len(data_list),
                     'min': min(annual_citations),
                     'max': max(annual_citations),
+                    # Добавляем 'median' для совместимости со старым кодом
                     'median': annual_citations[median_index]
                 }
         
@@ -2460,7 +2382,6 @@ class HierarchicalDataAnalyzer:
             }
             
         except Exception as e:
-            st.warning(f"⚠️ Temporal pattern analysis error: {e}")
             return {'annual_rate': 0, 'year_1': 0, 'year_2': 0, 
                     'first_2_years_percent': 0, 'anomaly_index': 0, 'red_flags': 0}
     
@@ -2671,7 +2592,6 @@ class HierarchicalDataAnalyzer:
             }
             
         except Exception as e:
-            st.warning(f"⚠️ Journal comparison error: {e}")
             return {'journal_median': 0, 'citation_ratio': 0, 'percentile': 50}
     
     def _calculate_anomaly_score(self, temporal_pattern: Dict, journal_concentration: Dict,
@@ -2729,34 +2649,27 @@ class HierarchicalDataAnalyzer:
         """Глубокий анализ (60-120 секунд на статью)"""
         deep_analysis = []
         
-        with st.spinner("🔍 Выполняю глубокий анализ..."):
-            # Строим полную сеть для сетевого анализа
-            full_network = self._build_citation_network(analyzed_results, citing_results, ref_results)
-            
-            progress_bar = st.progress(0)
-            total_articles = len([r for r in analyzed_results.values() if r.get('status') == 'success'])
-            
-            for idx, (doi, result) in enumerate(analyzed_results.items()):
-                if result.get('status') != 'success':
-                    continue
-                
-                progress_bar.progress((idx + 1) / total_articles)
-                
-                # Получаем связанные данные
-                citing_dois = result.get('citations', [])
-                citing_data = {}
-                for cite_doi in citing_dois:
-                    if cite_doi in citing_results and citing_results[cite_doi].get('status') == 'success':
-                        citing_data[cite_doi] = citing_results[cite_doi]
-                
-                # Выполняем глубокий анализ
-                analysis = self._perform_deep_analysis(doi, result, citing_data, full_network)
-                deep_analysis.append(analysis)
-                
-                # Кэшируем результаты
-                self.cache.set_ethical_analysis('deep_analysis', doi, analysis)
+        # Строим полную сеть для сетевого анализа
+        full_network = self._build_citation_network(analyzed_results, citing_results, ref_results)
         
-        progress_bar.empty()
+        for doi, result in analyzed_results.items():
+            if result.get('status') != 'success':
+                continue
+            
+            # Получаем связанные данные
+            citing_dois = result.get('citations', [])
+            citing_data = {}
+            for cite_doi in citing_dois:
+                if cite_doi in citing_results and citing_results[cite_doi].get('status') == 'success':
+                    citing_data[cite_doi] = citing_results[cite_doi]
+            
+            # Выполняем глубокий анализ
+            analysis = self._perform_deep_analysis(doi, result, citing_data, full_network)
+            deep_analysis.append(analysis)
+            
+            # Кэшируем результаты
+            self.cache.set_ethical_analysis('deep_analysis', doi, analysis)
+        
         return sorted(deep_analysis, key=lambda x: x['Machine_Learning_Risk_Score'], reverse=True)
     
     def _build_citation_network(self, analyzed_results: Dict[str, Dict], 
@@ -2940,7 +2853,6 @@ class HierarchicalDataAnalyzer:
             }
             
         except Exception as e:
-            st.warning(f"⚠️ Network analysis error for {doi}: {e}")
             return {'author_cluster_id': 'N/A', 'cluster_size': 0, 'internal_density': 0,
                     'cross_cluster_citations': 0, 'betweenness_centrality': 0,
                     'clustering_coefficient': 0, 'eigenvector_centrality': 0,
@@ -3059,7 +2971,6 @@ class HierarchicalDataAnalyzer:
             }
             
         except Exception as e:
-            st.warning(f"⚠️ Temporal pattern mining error: {e}")
             return {'quarterly_peaks': 0, 'seasonal_pattern': False,
                     'wave_length': 0, 'burst_score': 0,
                     'temporal_anomaly_score': 0, 'pattern_anomaly_score': 0}
@@ -3372,41 +3283,28 @@ class HierarchicalDataAnalyzer:
         """Анализирует связи анализируемые ↔ цитирующие (30-60 сек)"""
         relationships = []
         
-        with st.spinner("🔍 Анализирую связи между статьями..."):
-            # Строим граф для сетевого анализа
-            citation_graph = self._build_citation_network(analyzed_results, citing_results)
-            
-            total_relationships = 0
-            for analyzed_doi, analyzed_result in analyzed_results.items():
-                if analyzed_result.get('status') == 'success':
-                    total_relationships += len(analyzed_result.get('citations', []))
-            
-            progress_bar = st.progress(0)
-            processed_relationships = 0
-            
-            for analyzed_doi, analyzed_result in analyzed_results.items():
-                if analyzed_result.get('status') != 'success':
-                    continue
-                
-                citing_dois = analyzed_result.get('citations', [])
-                
-                for citing_doi in citing_dois:
-                    if citing_doi in citing_results and citing_results[citing_doi].get('status') == 'success':
-                        citing_result = citing_results[citing_doi]
-                        
-                        # Анализ связи
-                        analysis = self._perform_relationship_analysis(
-                            analyzed_doi, analyzed_result, 
-                            citing_doi, citing_result, 
-                            citation_graph
-                        )
-                        
-                        relationships.append(analysis)
-                    
-                    processed_relationships += 1
-                    progress_bar.progress(processed_relationships / total_relationships)
+        # Строим граф для сетевого анализа
+        citation_graph = self._build_citation_network(analyzed_results, citing_results)
         
-        progress_bar.empty()
+        for analyzed_doi, analyzed_result in analyzed_results.items():
+            if analyzed_result.get('status') != 'success':
+                continue
+            
+            citing_dois = analyzed_result.get('citations', [])
+            
+            for citing_doi in citing_dois:
+                if citing_doi in citing_results and citing_results[citing_doi].get('status') == 'success':
+                    citing_result = citing_results[citing_doi]
+                    
+                    # Анализ связи
+                    analysis = self._perform_relationship_analysis(
+                        analyzed_doi, analyzed_result, 
+                        citing_doi, citing_result, 
+                        citation_graph
+                    )
+                    
+                    relationships.append(analysis)
+        
         return sorted(relationships, key=lambda x: x['Gift_Citation_Probability'], reverse=True)
     
     def _perform_relationship_analysis(self, analyzed_doi: str, analyzed_result: Dict,
@@ -3592,7 +3490,7 @@ class HierarchicalDataAnalyzer:
                 pass
             
         except Exception as e:
-            st.warning(f"⚠️ Network metrics error for {analyzed_doi}-{citing_doi}: {e}")
+            pass
         
         return metrics
     
@@ -3735,7 +3633,7 @@ class HierarchicalDataAnalyzer:
         return "; ".join(notes)
 
 # ============================================================================
-# 📊 КЛАСС ЭКСПОРТА В EXCEL
+# 📊 КЛАСС ЭКСПОРТА В EXCEL (УЛУЧШЕННЫЙ С НОВЫМИ ФУНКЦИЯМИ)
 # ============================================================================
 
 class ExcelExporter:
@@ -3862,30 +3760,25 @@ class ExcelExporter:
         }
         
         if not self.hierarchical_analyzer:
-            st.warning("⚠️ Hierarchical analyzer not set. Skipping ethical insights.")
             return insights
         
         # Выполняем только выбранные типы анализа
         if analysis_types.get('quick_checks', False):
-            st.info("🔍 Performing Quick Checks analysis...")
             insights['quick_checks'] = self.hierarchical_analyzer.analyze_quick_checks(
                 self.analyzed_results, self.citing_results
             )
         
         if analysis_types.get('medium_insights', False):
-            st.info("🔍 Performing Medium Insights analysis...")
             insights['medium_insights'] = self.hierarchical_analyzer.analyze_medium_insights(
                 self.analyzed_results, self.citing_results
             )
         
         if analysis_types.get('deep_analysis', False):
-            st.info("🔍 Performing Deep Analysis...")
             insights['deep_analysis'] = self.hierarchical_analyzer.analyze_deep_analysis(
                 self.analyzed_results, self.citing_results, self.ref_results
             )
         
         if analysis_types.get('analyzed_citing_relationships', False):
-            st.info("🔍 Performing Analyzed-Citing Relationships analysis...")
             insights['analyzed_citing_relationships'] = self.hierarchical_analyzer.analyze_citing_relationships(
                 self.analyzed_results, self.citing_results
             )
@@ -3896,13 +3789,11 @@ class ExcelExporter:
                                    ref_results: Dict[str, Dict] = None,
                                    citing_results: Dict[str, Dict] = None,
                                    analysis_types: Dict[str, bool] = None,
-                                   filename: str = None) -> str:
+                                   progress_bar=None) -> bytes:
         
-        if filename is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"articles_analysis_comprehensive_{timestamp}.xlsx"
-        
-        st.info(f"📊 Creating comprehensive report: {filename}")
+        if progress_bar:
+            progress_bar.text("📊 Создание комплексного отчета...")
+            progress_bar.progress(0)
         
         # Устанавливаем типы анализа по умолчанию, если не указаны
         if analysis_types is None:
@@ -3919,217 +3810,226 @@ class ExcelExporter:
         
         self._prepare_summary_data()
         
-        # Generate ethical insights
-        with st.spinner("🔍 Generating ethical insights..."):
-            ethical_insights = self._analyze_ethical_insights(analysis_types)
+        if progress_bar:
+            progress_bar.progress(0.1)
         
-        # Создаем Excel файл в памяти
+        # Generate ethical insights
+        ethical_insights = self._analyze_ethical_insights(analysis_types)
+        
+        if progress_bar:
+            progress_bar.progress(0.2)
+        
+        # Создаем байтовый объект для Excel
         output = io.BytesIO()
         
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            st.info("📑 Generating sheets...")
+            if progress_bar:
+                progress_bar.text("📑 Генерация листов...")
             
-            # Создаем progress bar для отслеживания создания листов
-            sheet_progress = st.progress(0)
-            total_sheets = 21 + sum(1 for v in analysis_types.values() if v)
-            current_sheet = 0
+            progress_increment = 0.6 / 25  # Примерно 25 листов
             
-            def update_progress():
-                nonlocal current_sheet
-                current_sheet += 1
-                sheet_progress.progress(current_sheet / total_sheets)
-            
-            st.text("  1. Article_Analyzed...")
+            # Article_Analyzed
             analyzed_data = self._prepare_analyzed_articles(analyzed_results)
             if analyzed_data:
                 df = pd.DataFrame(analyzed_data)
                 df.to_excel(writer, sheet_name='Article_Analyzed', index=False)
-            update_progress()
+            if progress_bar:
+                progress_bar.progress(progress_bar.progress(0) + progress_increment)
             
-            st.text("  2. Author freq_analyzed...")
+            # Author freq_analyzed
             author_data = self._prepare_author_frequency(analyzed_results, "analyzed")
             if author_data:
                 df = pd.DataFrame(author_data)
                 df.to_excel(writer, sheet_name='Author freq_analyzed', index=False)
-            update_progress()
+            if progress_bar:
+                progress_bar.progress(progress_bar.progress(0) + progress_increment)
             
-            st.text("  3. Journal freq_analyzed...")
+            # Journal freq_analyzed
             journal_data = self._prepare_journal_frequency(analyzed_results, "analyzed")
             if journal_data:
                 df = pd.DataFrame(journal_data)
                 df.to_excel(writer, sheet_name='Journal freq_analyzed', index=False)
-            update_progress()
+            if progress_bar:
+                progress_bar.progress(progress_bar.progress(0) + progress_increment)
             
-            st.text("  4. Affiliation freq_analyzed...")
+            # Affiliation freq_analyzed
             affiliation_data = self._prepare_affiliation_frequency(analyzed_results, "analyzed")
             if affiliation_data:
                 df = pd.DataFrame(affiliation_data)
                 df.to_excel(writer, sheet_name='Affiliation freq_analyzed', index=False)
-            update_progress()
+            if progress_bar:
+                progress_bar.progress(progress_bar.progress(0) + progress_increment)
             
-            st.text("  5. Country freq_analyzed...")
+            # Country freq_analyzed
             country_data = self._prepare_country_frequency(analyzed_results, "analyzed")
             if country_data:
                 df = pd.DataFrame(country_data)
                 df.to_excel(writer, sheet_name='Country freq_analyzed', index=False)
-            update_progress()
+            if progress_bar:
+                progress_bar.progress(progress_bar.progress(0) + progress_increment)
             
-            st.text("  6. Article_ref...")
+            # Article_ref
             ref_data = self._prepare_article_ref()
             if ref_data:
                 df = pd.DataFrame(ref_data)
                 df.to_excel(writer, sheet_name='Article_ref', index=False)
-            update_progress()
+            if progress_bar:
+                progress_bar.progress(progress_bar.progress(0) + progress_increment)
             
             if ref_results:
-                st.text("  7. Author freq_ref...")
+                # Author freq_ref
                 author_ref_data = self._prepare_author_frequency(ref_results, "ref")
                 if author_ref_data:
                     df = pd.DataFrame(author_ref_data)
                     df.to_excel(writer, sheet_name='Author freq_ref', index=False)
-                update_progress()
+                if progress_bar:
+                    progress_bar.progress(progress_bar.progress(0) + progress_increment)
                 
-                st.text("  8. Journal freq_ref...")
+                # Journal freq_ref
                 journal_ref_data = self._prepare_journal_frequency(ref_results, "ref")
                 if journal_ref_data:
                     df = pd.DataFrame(journal_ref_data)
                     df.to_excel(writer, sheet_name='Journal freq_ref', index=False)
-                update_progress()
+                if progress_bar:
+                    progress_bar.progress(progress_bar.progress(0) + progress_increment)
                 
-                st.text("  9. Affiliation freq_ref...")
+                # Affiliation freq_ref
                 affiliation_ref_data = self._prepare_affiliation_frequency(ref_results, "ref")
                 if affiliation_ref_data:
                     df = pd.DataFrame(affiliation_ref_data)
                     df.to_excel(writer, sheet_name='Affiliation freq_ref', index=False)
-                update_progress()
+                if progress_bar:
+                    progress_bar.progress(progress_bar.progress(0) + progress_increment)
                 
-                st.text("  10. Country freq_ref...")
+                # Country freq_ref
                 country_ref_data = self._prepare_country_frequency(ref_results, "ref")
                 if country_ref_data:
                     df = pd.DataFrame(country_ref_data)
                     df.to_excel(writer, sheet_name='Country freq_ref', index=False)
-                update_progress()
+                if progress_bar:
+                    progress_bar.progress(progress_bar.progress(0) + progress_increment)
             
-            st.text("  11. Article_citing...")
+            # Article_citing
             citing_data = self._prepare_article_citing()
             if citing_data:
                 df = pd.DataFrame(citing_data)
                 df.to_excel(writer, sheet_name='Article_citing', index=False)
-            update_progress()
+            if progress_bar:
+                progress_bar.progress(progress_bar.progress(0) + progress_increment)
             
             if citing_results:
-                st.text("  12. Author freq_citing...")
+                # Author freq_citing
                 author_citing_data = self._prepare_author_frequency(citing_results, "citing")
                 if author_citing_data:
                     df = pd.DataFrame(author_citing_data)
                     df.to_excel(writer, sheet_name='Author freq_citing', index=False)
-                update_progress()
+                if progress_bar:
+                    progress_bar.progress(progress_bar.progress(0) + progress_increment)
                 
-                st.text("  13. Journal freq_citing...")
+                # Journal freq_citing
                 journal_citing_data = self._prepare_journal_frequency(citing_results, "citing")
                 if journal_citing_data:
                     df = pd.DataFrame(journal_citing_data)
                     df.to_excel(writer, sheet_name='Journal freq_citing', index=False)
-                update_progress()
+                if progress_bar:
+                    progress_bar.progress(progress_bar.progress(0) + progress_increment)
                 
-                st.text("  14. Affiliation freq_citing...")
+                # Affiliation freq_citing
                 affiliation_citing_data = self._prepare_affiliation_frequency(citing_results, "citing")
                 if affiliation_citing_data:
                     df = pd.DataFrame(affiliation_citing_data)
                     df.to_excel(writer, sheet_name='Affiliation freq_citing', index=False)
-                update_progress()
+                if progress_bar:
+                    progress_bar.progress(progress_bar.progress(0) + progress_increment)
                 
-                st.text("  15. Country freq_citing...")
+                # Country freq_citing
                 country_citing_data = self._prepare_country_frequency(citing_results, "citing")
                 if country_citing_data:
                     df = pd.DataFrame(country_citing_data)
                     df.to_excel(writer, sheet_name='Country freq_citing', index=False)
-                update_progress()
+                if progress_bar:
+                    progress_bar.progress(progress_bar.progress(0) + progress_increment)
             
-            st.text("  16. Author_summary...")
+            # Author_summary
             author_summary_data = self._prepare_author_summary()
             if author_summary_data:
                 df = pd.DataFrame(author_summary_data)
                 df.to_excel(writer, sheet_name='Author_summary', index=False)
-            update_progress()
+            if progress_bar:
+                progress_bar.progress(progress_bar.progress(0) + progress_increment)
             
-            st.text("  17. Affiliation_summary...")
+            # Affiliation_summary
             affiliation_summary_data = self._prepare_affiliation_summary()
             if affiliation_summary_data:
                 df = pd.DataFrame(affiliation_summary_data)
                 df.to_excel(writer, sheet_name='Affiliation_summary', index=False)
-            update_progress()
+            if progress_bar:
+                progress_bar.progress(progress_bar.progress(0) + progress_increment)
             
-            st.text("  18. Time (Ref,analyzed)_connections...")
+            # Time (Ref,analyzed)_connections
             time_ref_analyzed_data = self._prepare_time_ref_analyzed_connections()
             if time_ref_analyzed_data:
                 df = pd.DataFrame(time_ref_analyzed_data)
                 df.to_excel(writer, sheet_name='Time (Ref,analyzed)_connections', index=False)
-            update_progress()
+            if progress_bar:
+                progress_bar.progress(progress_bar.progress(0) + progress_increment)
             
-            st.text("  19. Time (analyzed,citing)_connections...")
+            # Time (analyzed,citing)_connections
             time_analyzed_citing_data = self._prepare_time_analyzed_citing_connections()
             if time_analyzed_citing_data:
                 df = pd.DataFrame(time_analyzed_citing_data)
                 df.to_excel(writer, sheet_name='Time (analyzed,citing)_connections', index=False)
-            update_progress()
+            if progress_bar:
+                progress_bar.progress(progress_bar.progress(0) + progress_increment)
             
-            st.text("  20. Failed_DOI...")
+            # Failed_DOI
             failed_data = self.failed_tracker.get_failed_for_excel()
             if failed_data:
                 df = pd.DataFrame(failed_data)
                 df.to_excel(writer, sheet_name='Failed_DOI', index=False)
-            update_progress()
+            if progress_bar:
+                progress_bar.progress(progress_bar.progress(0) + progress_increment)
             
-            st.text("  21. Analysis_Stats...")
+            # Analysis_Stats
             stats_data = self._prepare_analysis_stats(analyzed_results, ref_results, citing_results)
             if stats_data:
                 df = pd.DataFrame(stats_data)
                 df.to_excel(writer, sheet_name='Analysis_Stats', index=False)
-            update_progress()
+            if progress_bar:
+                progress_bar.progress(progress_bar.progress(0) + progress_increment)
             
             # Ethical Insights Sheets (только если выбран соответствующий анализ)
             if analysis_types.get('quick_checks', False) and ethical_insights['quick_checks']:
-                st.text("  22. Quick_Checks...")
                 df = pd.DataFrame(ethical_insights['quick_checks'])
                 df.to_excel(writer, sheet_name='Quick_Checks', index=False)
-                update_progress()
+                if progress_bar:
+                    progress_bar.progress(progress_bar.progress(0) + progress_increment)
             
             if analysis_types.get('medium_insights', False) and ethical_insights['medium_insights']:
-                st.text("  23. Medium_Insights...")
                 df = pd.DataFrame(ethical_insights['medium_insights'])
                 df.to_excel(writer, sheet_name='Medium_Insights', index=False)
-                update_progress()
+                if progress_bar:
+                    progress_bar.progress(progress_bar.progress(0) + progress_increment)
             
             if analysis_types.get('deep_analysis', False) and ethical_insights['deep_analysis']:
-                st.text("  24. Deep_Analysis...")
                 df = pd.DataFrame(ethical_insights['deep_analysis'])
                 df.to_excel(writer, sheet_name='Deep_Analysis', index=False)
-                update_progress()
+                if progress_bar:
+                    progress_bar.progress(progress_bar.progress(0) + progress_increment)
             
             if analysis_types.get('analyzed_citing_relationships', False) and ethical_insights['analyzed_citing_relationships']:
-                st.text("  25. Analyzed_Citing_Relationships...")
                 df = pd.DataFrame(ethical_insights['analyzed_citing_relationships'])
                 df.to_excel(writer, sheet_name='Analyzed_Citing_Relationships', index=False)
-                update_progress()
+                if progress_bar:
+                    progress_bar.progress(progress_bar.progress(0) + progress_increment)
         
-        sheet_progress.empty()
+        if progress_bar:
+            progress_bar.progress(1.0)
         
         output.seek(0)
-        
-        # Сохраняем файл
-        with open(filename, 'wb') as f:
-            f.write(output.getvalue())
-        
-        st.success(f"✅ Report created: {filename}")
-        
-        self._print_summary(analyzed_results, ref_results, citing_results, analysis_types)
-        
-        return filename
+        return output.getvalue()
     
     def _prepare_summary_data(self):
-        st.text("   🔍 Preparing data for summary tables...")
-        
         total_analyzed_articles = len([r for r in self.analyzed_results.values() if r.get('status') == 'success'])
         total_ref_articles = len([r for r in self.ref_results.values() if r.get('status') == 'success'])
         total_citing_articles = len([r for r in self.citing_results.values() if r.get('status') == 'success'])
@@ -4290,24 +4190,13 @@ class ExcelExporter:
                 self.affiliation_stats[affiliation]['normalized_citing'] += normalized_aff_value
                 self.affiliation_stats[affiliation]['total_count'] += normalized_aff_value
         
-        st.text("   🔍 Getting ROR data for affiliation summary...")
         affiliations_list = list(self.affiliation_stats.keys())
         
-        if affiliations_list:
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            for idx, aff in enumerate(affiliations_list):
-                progress_bar.progress((idx + 1) / len(affiliations_list))
-                status_text.text(f"Processing ROR for affiliation {idx + 1}/{len(affiliations_list)}")
-                
-                ror_info = self.ror_client.search_organization(aff, category="summary")
-                if ror_info.get('ror_id'):
-                    self.affiliation_stats[aff]['colab_id'] = ror_info.get('ror_id', '')
-                    self.affiliation_stats[aff]['website'] = ror_info.get('website', '')
-            
-            progress_bar.empty()
-            status_text.empty()
+        for aff in affiliations_list:
+            ror_info = self.ror_client.search_organization(aff, category="summary")
+            if ror_info.get('ror_id'):
+                self.affiliation_stats[aff]['colab_id'] = ror_info.get('ror_id', '')
+                self.affiliation_stats[aff]['website'] = ror_info.get('website', '')
     
     def _prepare_analyzed_articles(self, results: Dict[str, Dict]) -> List[Dict]:
         return self._prepare_article_sheet(results, "analyzed")
@@ -4884,22 +4773,12 @@ class ExcelExporter:
         
         affiliation_data = []
         
-        if unique_affiliations:
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            for idx, aff in enumerate(unique_affiliations):
-                progress_bar.progress((idx + 1) / len(unique_affiliations))
-                status_text.text(f"Processing affiliation {idx + 1}/{len(unique_affiliations)} ({source_type})")
-                
-                row = {
-                    'Affiliation': aff,
-                    'Count': affiliation_counter[aff]
-                }
-                affiliation_data.append(row)
-            
-            progress_bar.empty()
-            status_text.empty()
+        for aff in unique_affiliations:
+            row = {
+                'Affiliation': aff,
+                'Count': affiliation_counter[aff]
+            }
+            affiliation_data.append(row)
         
         affiliation_data.sort(key=lambda x: x['Count'], reverse=True)
         return affiliation_data
@@ -4996,48 +4875,6 @@ class ExcelExporter:
         
         return stats
     
-    def _print_summary(self, analyzed_results: Dict[str, Dict], 
-                      ref_results: Dict[str, Dict], 
-                      citing_results: Dict[str, Dict],
-                      analysis_types: Dict[str, bool] = None):
-        
-        analyzed_success = sum(1 for r in analyzed_results.values() if r.get('status') == 'success')
-        
-        if analyzed_success > 0:
-            total_authors = sum(len(r.get('authors', [])) for r in analyzed_results.values() if r.get('status') == 'success')
-            total_refs = sum(len(r.get('references', [])) for r in analyzed_results.values() if r.get('status') == 'success')
-            total_cites = sum(len(r.get('citations', [])) for r in analyzed_results.values() if r.get('status') == 'success')
-            
-            st.info(f"""
-            **📊 ANALYSIS SUMMARY:**
-            
-            **📚 Analyzed articles:** {analyzed_success}/{len(analyzed_results)} successful
-            - **👥 Authors:** {total_authors}
-            - **📎 References:** {total_refs}
-            - **🔗 Citations:** {total_cites}
-            """)
-        
-        if ref_results:
-            ref_success = sum(1 for r in ref_results.values() if r.get('status') == 'success')
-            st.info(f"**📎 Reference articles:** {ref_success}/{len(ref_results)} successful")
-        
-        if citing_results:
-            cite_success = sum(1 for r in citing_results.values() if r.get('status') == 'success')
-            st.info(f"**🔗 Citation articles:** {cite_success}/{len(citing_results)} successful")
-        
-        if analysis_types:
-            analysis_types_str = "\n".join([f"- {analysis_type.replace('_', ' ').title()}: {'✅ ENABLED' if enabled else '❌ DISABLED'}" 
-                                          for analysis_type, enabled in analysis_types.items()])
-            st.info(f"**🔍 Ethical Analysis Types:**\n{analysis_types_str}")
-        
-        failed_stats = self.failed_tracker.get_stats()
-        st.warning(f"""
-        **❌ Failed DOI:** {failed_stats['total_failed']}
-        - From analyzed: {failed_stats['analyzed_failed']}
-        - From references: {failed_stats['ref_failed']}
-        - From citations: {failed_stats['citing_failed']}
-        """)
-    
     def update_counters(self, references: List[str], citations: List[str], source_type: str = "analyzed"):
         if source_type == "analyzed":
             counter_ref = self.references_counter
@@ -5061,22 +4898,19 @@ class ExcelExporter:
                 counter_cite[cite] += 1
 
 # ============================================================================
-# 🚀 ГЛАВНЫЙ КЛАСС СИСТЕМЫ ДЛЯ STREAMLIT
+# 🏃‍♂️ ГЛАВНЫЙ КЛАСС СИСТЕМЫ ДЛЯ STREAMLIT
 # ============================================================================
 
-class ArticleAnalyzerSystem:
+class ArticleAnalyzerSystemStreamlit:
     def __init__(self):
-        # Инициализация менеджеров
         self.cache_manager = SmartCacheManager()
         self.delay_manager = AdaptiveDelayManager()
         self.failed_tracker = FailedDOITracker()
         
-        # Инициализация клиентов API
         self.crossref_client = CrossrefClient(self.cache_manager, self.delay_manager)
         self.openalex_client = OpenAlexClient(self.cache_manager, self.delay_manager)
         self.ror_client = RORClient(self.cache_manager)
         
-        # Инициализация процессоров
         self.data_processor = DataProcessor(self.cache_manager)
         self.doi_processor = OptimizedDOIProcessor(
             self.cache_manager, self.delay_manager, 
@@ -5088,7 +4922,6 @@ class ArticleAnalyzerSystem:
         self.excel_exporter = ExcelExporter(self.data_processor, self.ror_client, self.failed_tracker)
         self.excel_exporter.set_hierarchical_analyzer(self.hierarchical_analyzer)
         
-        # Инициализация состояния
         self.system_stats = {
             'total_dois_processed': 0,
             'total_successful': 0,
@@ -5102,21 +4935,8 @@ class ArticleAnalyzerSystem:
         self.analyzed_results = {}
         self.ref_results = {}
         self.citing_results = {}
-        
-        # Инициализация сессионного состояния
-        if 'workers' not in st.session_state:
-            st.session_state.workers = Config.DEFAULT_WORKERS
-        
-        if 'analysis_types' not in st.session_state:
-            st.session_state.analysis_types = {
-                'quick_checks': True,
-                'medium_insights': True,
-                'deep_analysis': False,
-                'analyzed_citing_relationships': False
-            }
     
     def _parse_dois(self, input_text: str) -> List[str]:
-        """Парсит DOI из текстового ввода"""
         if not input_text:
             return []
         
@@ -5138,7 +4958,6 @@ class ArticleAnalyzerSystem:
         return list(set(dois))
     
     def _clean_doi(self, doi: str) -> str:
-        """Очищает DOI от префиксов"""
         if not doi or not isinstance(doi, str):
             return ""
         
@@ -5152,88 +4971,60 @@ class ArticleAnalyzerSystem:
         
         return doi.strip()
     
-    def process_dois(self, dois: List[str], process_refs: bool = True, process_cites: bool = True):
-        """Основной метод обработки DOI"""
+    def process_dois(self, dois: List[str], num_workers: int, 
+                    analysis_types: Dict[str, bool], progress_bar=None) -> Dict[str, Any]:
         
-        if not dois:
-            st.error("❌ Не найдено валидных DOI")
-            return
+        if progress_bar:
+            progress_bar.text("🔄 Обработка DOI...")
+            progress_bar.progress(0)
         
-        st.info(f"🔄 Обработка {len(dois)} DOI...")
+        start_time = time.time()
         
-        # Создаем контейнеры для прогресса
-        progress_container = st.container()
+        if progress_bar:
+            progress_bar.progress(0.1)
         
         # Обработка оригинальных DOI
-        with st.spinner("📚 Обработка оригинальных DOI..."):
-            self.analyzed_results = self.doi_processor.process_doi_batch(
-                dois, "analyzed", None, True, True,
-                progress_container=progress_container
-            )
+        self.analyzed_results = self.doi_processor.process_doi_batch(
+            dois, "analyzed", None, True, True, progress_bar=progress_bar
+        )
         
-        # Обновляем счетчики
-        for doi, result in self.analyzed_results.items():
-            if result.get('status') == 'success':
-                self.excel_exporter.update_counters(
-                    result.get('references', []), 
-                    result.get('citations', []),
-                    "analyzed"
-                )
+        if progress_bar:
+            progress_bar.progress(0.4)
+            progress_bar.text("📎 Сбор reference DOI...")
         
-        # Сбор и обработка reference DOI
+        # Сбор reference DOI
         all_ref_dois = self.doi_processor.collect_all_references(self.analyzed_results)
         self.system_stats['total_ref_dois'] = len(all_ref_dois)
         
-        if all_ref_dois and process_refs:
-            # Ограничиваем количество reference DOI для анализа
-            ref_dois_to_analyze = all_ref_dois[:Config.MAX_REFERENCE_ARTICLES]
+        if all_ref_dois:
+            ref_dois_to_analyze = all_ref_dois[:10000]  # Ограничиваем для производительности
             
-            st.info(f"📎 Найдено {len(all_ref_dois)} reference DOI, анализирую {len(ref_dois_to_analyze)}...")
-            
-            with st.spinner("🔍 Анализ reference DOI..."):
-                self.ref_results = self.doi_processor.process_doi_batch(
-                    ref_dois_to_analyze, "ref", None, True, True,
-                    progress_container=progress_container
-                )
-            
-            # Обновляем счетчики
-            for doi, result in self.ref_results.items():
-                if result.get('status') == 'success':
-                    self.excel_exporter.update_counters(
-                        result.get('references', []), 
-                        result.get('citations', []),
-                        "ref"
-                    )
+            self.ref_results = self.doi_processor.process_doi_batch(
+                ref_dois_to_analyze, "ref", None, True, True, progress_bar=progress_bar
+            )
         
-        # Сбор и обработка citation DOI
+        if progress_bar:
+            progress_bar.progress(0.7)
+            progress_bar.text("🔗 Сбор citation DOI...")
+        
+        # Сбор citation DOI
         all_cite_dois = self.doi_processor.collect_all_citations(self.analyzed_results)
         self.system_stats['total_cite_dois'] = len(all_cite_dois)
         
-        if all_cite_dois and process_cites:
-            # Ограничиваем количество citation DOI для анализа
-            cite_dois_to_analyze = all_cite_dois[:Config.MAX_CITING_ARTICLES]
+        if all_cite_dois:
+            cite_dois_to_analyze = all_cite_dois[:10000]  # Ограничиваем для производительности
             
-            st.info(f"🔗 Найдено {len(all_cite_dois)} citation DOI, анализирую {len(cite_dois_to_analyze)}...")
-            
-            with st.spinner("🔍 Анализ citation DOI..."):
-                self.citing_results = self.doi_processor.process_doi_batch(
-                    cite_dois_to_analyze, "citing", None, True, True,
-                    progress_container=progress_container
-                )
-            
-            # Обновляем счетчики
-            for doi, result in self.citing_results.items():
-                if result.get('status') == 'success':
-                    self.excel_exporter.update_counters(
-                        result.get('references', []), 
-                        result.get('citations', []),
-                        "citing"
-                    )
+            self.citing_results = self.doi_processor.process_doi_batch(
+                cite_dois_to_analyze, "citing", None, True, True, progress_bar=progress_bar
+            )
+        
+        if progress_bar:
+            progress_bar.progress(0.9)
+            progress_bar.text("🔄 Повторная обработка неудачных DOI...")
         
         # Повторная обработка неудачных DOI
         failed_stats = self.failed_tracker.get_stats()
         if failed_stats['total_failed'] > 0:
-            st.info(f"🔄 Проверка неудачных DOI для повторной обработки...")
             retry_results = self.doi_processor.retry_failed_dois(self.failed_tracker)
             
             for doi, result in retry_results.items():
@@ -5241,781 +5032,361 @@ class ArticleAnalyzerSystem:
                     source_type = self.failed_tracker.sources.get(doi, 'retry')
                     if source_type == 'analyzed' and doi in self.failed_tracker.failed_dois:
                         self.analyzed_results[doi] = result
-                        st.success(f"   ✅ Повторно обработан analyzed DOI: {doi}")
                     elif source_type == 'ref' and doi in self.failed_tracker.failed_dois:
                         self.ref_results[doi] = result
-                        st.success(f"   ✅ Повторно обработан ref DOI: {doi}")
                     elif source_type == 'citing' and doi in self.failed_tracker.failed_dois:
                         self.citing_results[doi] = result
-                        st.success(f"   ✅ Повторно обработан citing DOI: {doi}")
         
-        # Отображение результатов
-        self._display_results()
+        processing_time = time.time() - start_time
+        
+        if progress_bar:
+            progress_bar.progress(1.0)
+            progress_bar.text("✅ Обработка завершена")
         
         # Обновление статистики
-        successful = sum(1 for r in self.analyzed_results.values() if r.get('status') == 'success')
-        failed = len(dois) - successful
-        
         self.system_stats['total_dois_processed'] += len(dois)
+        successful = sum(1 for r in self.analyzed_results.values() if r.get('status') == 'success')
         self.system_stats['total_successful'] += successful
-        self.system_stats['total_failed'] += failed
+        self.system_stats['total_failed'] += len(dois) - successful
         
+        # Сбор статистики по авторам
+        total_authors = 0
+        for result in self.analyzed_results.values():
+            if result.get('status') == 'success':
+                total_authors += len(result.get('authors', []))
+        self.system_stats['total_authors'] = total_authors
+        
+        # Статистика кэша и задержек
         cache_stats = self.cache_manager.get_stats()
         delay_stats = self.delay_manager.get_stats()
         doi_stats = self.doi_processor.get_stats()
         
-        # Отображение статистики
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.metric("📊 Обработано DOI", len(dois))
-            st.metric("✅ Успешно", successful)
-            st.metric("❌ Ошибок", failed)
-        
-        with col2:
-            st.metric("📎 Reference DOI", self.system_stats['total_ref_dois'])
-            st.metric("🔗 Citation DOI", self.system_stats['total_cite_dois'])
-            st.metric("⚡ Задержка", f"{delay_stats['current_delay']:.3f} сек")
-        
-        with col3:
-            st.metric("💾 Кэш хиты", f"{cache_stats['hit_ratio']}%")
-            st.metric("🔄 API сохранено", cache_stats['api_calls_saved'])
-            st.metric("👥 Потоков", st.session_state.workers)
-        
-        st.success("✅ Обработка завершена! Можете экспортировать в Excel.")
+        return {
+            'analyzed_results': self.analyzed_results,
+            'ref_results': self.ref_results,
+            'citing_results': self.citing_results,
+            'processing_time': processing_time,
+            'successful_count': successful,
+            'failed_count': len(dois) - successful,
+            'cache_stats': cache_stats,
+            'delay_stats': delay_stats,
+            'doi_stats': doi_stats,
+            'failed_stats': self.failed_tracker.get_stats(),
+            'total_refs_found': len(all_ref_dois),
+            'total_cites_found': len(all_cite_dois)
+        }
     
-    def _display_results(self):
-        """Отображает результаты обработки"""
-        successful_count = 0
-        failed_count = 0
-        
-        # Создаем аккордеон для результатов
-        with st.expander("📋 Результаты обработки", expanded=True):
-            for doi, result in self.analyzed_results.items():
-                if result.get('status') == 'success':
-                    self._display_success_result(result, "analyzed")
-                    successful_count += 1
-                else:
-                    self._display_error_result(doi, result, "analyzed")
-                    failed_count += 1
-        
-        # Отображение итоговой статистики
-        st.info(f"**ИТОГО АНАЛИЗИРОВАННЫХ DOI:** Успешно - {successful_count}, Ошибок - {failed_count}")
-        
-        if successful_count > 0:
-            total_authors = sum(len(r.get('authors', [])) for r in self.analyzed_results.values() if r.get('status') == 'success')
-            total_refs = sum(len(r.get('references', [])) for r in self.analyzed_results.values() if r.get('status') == 'success')
-            total_cites = sum(len(r.get('citations', [])) for r in self.analyzed_results.values() if r.get('status') == 'success')
-            
-            st.info(f"""
-            **📚 Собрано данных:**
-            - Всего авторов: {total_authors}
-            - Всего ссылок (references): {total_refs}
-            - Всего цитирований (citations): {total_cites}
-            - Уникальных reference DOI: {len(self.excel_exporter.references_counter)}
-            - Уникальных citation DOI: {len(self.excel_exporter.citations_counter)}
-            """)
-        
-        if self.ref_results:
-            ref_success = sum(1 for r in self.ref_results.values() if r.get('status') == 'success')
-            st.info(f"**📎 REFERENCE DOI:** {ref_success}/{len(self.ref_results)} успешно проанализировано")
-        
-        if self.citing_results:
-            cite_success = sum(1 for r in self.citing_results.values() if r.get('status') == 'success')
-            st.info(f"**🔗 CITATION DOI:** {cite_success}/{len(self.citing_results)} успешно проанализировано")
-        
-        failed_stats = self.failed_tracker.get_stats()
-        if failed_stats['total_failed'] > 0:
-            st.warning(f"""
-            **❌ НЕУДАЧНЫЕ DOI:** {failed_stats['total_failed']}
-            - Из analyzed: {failed_stats['analyzed_failed']}
-            - Из references: {failed_stats['ref_failed']}
-            - Из citations: {failed_stats['citing_failed']}
-            """)
-    
-    def _display_success_result(self, result: Dict, source_type: str):
-        """Отображает успешный результат"""
-        pub_info = result['publication_info']
-        source_badge = {
-            "analyzed": ("📚", "#4CAF50"),
-            "ref": ("📎", "#2196F3"),
-            "citing": ("🔗", "#9C27B0")
-        }.get(source_type, ("📄", "#666"))
-        
-        quick_insights = result.get('quick_insights', {})
-        insight_badge = ""
-        if quick_insights:
-            citation_velocity = quick_insights.get('citation_velocity', 0)
-            if citation_velocity > 20:
-                insight_badge = " ⚠️"
-            elif citation_velocity > 10:
-                insight_badge = " ℹ️"
-        
-        st.markdown(f"""
-        <div style="background: #e8f5e9; padding: 12px; border-radius: 6px; margin: 8px 0; border-left: 4px solid {source_badge[1]};">
-            <div style="display: flex; justify-content: space-between; align-items: flex-start;">
-                <div style="flex: 1;">
-                    <h4 style="margin: 0 0 8px 0; color: #2e7d32; font-size: 14px;">
-                        {source_badge[0]} {pub_info.get('title', '')[:70]}{'...' if len(pub_info.get('title', '')) > 70 else ''}{insight_badge}
-                    </h4>
-                    <div style="font-size: 12px; color: #555; line-height: 1.4;">
-                        <strong>DOI:</strong> {result['doi']}<br>
-                        <strong>Журнал:</strong> {pub_info.get('journal', '')[:50]}{'...' if len(pub_info.get('journal', '')) > 50 else ''}<br>
-                        <strong>Год:</strong> {pub_info.get('year', '')} | 
-                        <strong>Авторов:</strong> {len(result.get('authors', []))}<br>
-                        <strong>Цитирования:</strong> 
-                        <span style="color: {'green' if pub_info.get('citation_count_crossref', 0) > 0 else '#999'}">Crossref: {pub_info.get('citation_count_crossref', 0)}</span> | 
-                        <span style="color: {'green' if pub_info.get('citation_count_openalex', 0) > 0 else '#999'}">OpenAlex: {pub_info.get('citation_count_openalex', 0)}</span>
-                    </div>
-                </div>
-                <span style="background: {source_badge[1]}; color: white; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: bold;">
-                    {source_type.upper()}
-                </span>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    def _display_error_result(self, doi: str, result: Dict, source_type: str):
-        """Отображает результат с ошибкой"""
-        source_badge = {
-            "analyzed": ("📚", "#f44336"),
-            "ref": ("📎", "#f44336"),
-            "citing": ("🔗", "#f44336")
-        }.get(source_type, ("📄", "#f44336"))
-        
-        st.markdown(f"""
-        <div style="background: #ffebee; padding: 12px; border-radius: 6px; margin: 8px 0; border-left: 4px solid {source_badge[1]};">
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-                <div>
-                    <h4 style="margin: 0 0 4px 0; color: #c62828; font-size: 14px;">{source_badge[0]} ❌ Ошибка обработки</h4>
-                    <div style="font-size: 12px; color: #555;">
-                        <strong>DOI:</strong> {doi}
-                    </div>
-                </div>
-                <span style="background: {source_badge[1]}; color: white; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: bold;">
-                    {source_type.upper()}
-                </span>
-            </div>
-            
-            <div style="margin-top: 8px; padding: 8px; background: #ffcdd2; border-radius: 4px; font-size: 11px;">
-                <strong>Причина:</strong> {result.get('error', 'Неизвестная ошибка')}
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    def export_to_excel(self):
-        """Экспортирует результаты в Excel"""
-        if not self.analyzed_results:
-            st.error("⚠️ Нет данных для экспорта")
-            return
-        
-        # Получаем выбранные типы анализа
-        analysis_types = st.session_state.analysis_types
-        
-        with st.spinner("📊 Создание комплексного Excel отчета..."):
-            try:
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"articles_analysis_comprehensive_{timestamp}.xlsx"
-                
-                filename = self.excel_exporter.create_comprehensive_report(
-                    self.analyzed_results,
-                    self.ref_results,
-                    self.citing_results,
-                    analysis_types,
-                    filename
-                )
-                
-                # Читаем файл для скачивания
-                with open(filename, 'rb') as f:
-                    excel_data = f.read()
-                
-                # Предлагаем скачать файл
-                st.success(f"✅ Excel отчет создан: {filename}")
-                
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    st.download_button(
-                        label="📥 Скачать Excel файл",
-                        data=excel_data,
-                        file_name=filename,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        help="Скачать комплексный отчет в формате Excel"
-                    )
-                
-                with col2:
-                    if st.button("🗑️ Удалить файл с сервера"):
-                        try:
-                            os.remove(filename)
-                            st.success("Файл удален с сервера")
-                        except:
-                            st.error("Ошибка удаления файла")
-                
-                # Отображение статистики
-                analyzed_success = sum(1 for r in self.analyzed_results.values() if r.get('status') == 'success')
-                ref_success = sum(1 for r in self.ref_results.values() if r.get('status') == 'success') if self.ref_results else 0
-                cite_success = sum(1 for r in self.citing_results.values() if r.get('status') == 'success') if self.citing_results else 0
-                
-                cache_stats = self.cache_manager.get_stats()
-                
-                # Собираем информацию о включенных листах
-                enabled_sheets = []
-                enabled_sheets.append(f"- **Article_Analyzed** - {analyzed_success} статей")
-                enabled_sheets.append("- **Author freq_analyzed** - частота авторов")
-                enabled_sheets.append("- **Journal freq_analyzed** - частота журналов")
-                enabled_sheets.append("- **Affiliation freq_analyzed** - частота аффилиаций")
-                enabled_sheets.append("- **Country freq_analyzed** - частота стран (коды)")
-                
-                if self.ref_results:
-                    enabled_sheets.append(f"- **Article_ref** - {len(self.excel_exporter.references_counter)} ссылок")
-                    enabled_sheets.append(f"- **Author freq_ref** - {ref_success} статей")
-                    enabled_sheets.append("- **Journal freq_ref** - журналы референсов")
-                    enabled_sheets.append("- **Affiliation freq_ref** - аффилиации референсов")
-                    enabled_sheets.append("- **Country freq_ref** - страны референсов")
-                
-                if self.citing_results:
-                    enabled_sheets.append(f"- **Article_citing** - {len(self.excel_exporter.citations_counter)} цитирований")
-                    enabled_sheets.append(f"- **Author freq_citing** - {cite_success} статей")
-                    enabled_sheets.append("- **Journal freq_citing** - журналы цитирований")
-                    enabled_sheets.append("- **Affiliation freq_citing** - аффилиации цитирований")
-                    enabled_sheets.append("- **Country freq_citing** - страны цитирований")
-                
-                enabled_sheets.append("- **Author_summary** - сводная по авторам с оценкой этичности")
-                enabled_sheets.append("- **Affiliation_summary** - сводная по аффилиациям")
-                enabled_sheets.append("- **Time (Ref,analyzed)_connections** - временные связи ссылок")
-                enabled_sheets.append("- **Time (analyzed,citing)_connections** - временные связи цитирований")
-                enabled_sheets.append("- **Failed_DOI** - неудачные DOI с детализацией")
-                enabled_sheets.append("- **Analysis_Stats** - статистика анализа")
-                
-                # Добавляем листы анализа неэтичных практик если они включены
-                if analysis_types.get('quick_checks', False):
-                    enabled_sheets.append("- **Quick_Checks** - быстрые проверки (5-10 сек)")
-                if analysis_types.get('medium_insights', False):
-                    enabled_sheets.append("- **Medium_Insights** - средние инсайты (15-30 сек)")
-                if analysis_types.get('deep_analysis', False):
-                    enabled_sheets.append("- **Deep_Analysis** - глубокий анализ (60-120 сек)")
-                if analysis_types.get('analyzed_citing_relationships', False):
-                    enabled_sheets.append("- **Analyzed_Citing_Relationships** - связи анализируемые ↔ цитирующие (30-60 сек)")
-                
-                sheets_count = len(enabled_sheets)
-                
-                st.info(f"""
-                **📊 Содержание отчета ({sheets_count} вкладок):**
-                
-                {chr(10).join(enabled_sheets)}
-                
-                **🏢 Статистика кэширования:**
-                - Эффективность кэша: {cache_stats['hit_ratio']}%
-                - API вызовов сохранено: {cache_stats['api_calls_saved']}
-                - Популярных DOI в кэше: {cache_stats['popular_dois']}
-                - Неудачных DOI запомнено: {cache_stats['failed_cache_size']}
-                """)
-                
-                relationships = self.doi_processor.get_relationships()
-                st.info(f"""
-                **🔗 Отношения между DOI:**
-                - Всего отношений reference: {len(relationships['reference_relationships'])}
-                - Всего отношений citation: {len(relationships['citation_relationships'])}
-                """)
-                
-                # Статистика по выбранным типам анализа
-                if any(analysis_types.values()):
-                    analysis_stats = "\n".join([f"- {analysis_type.replace('_', ' ').title()}: {'✅ ВКЛЮЧЕН' if enabled else '❌ ВЫКЛЮЧЕН'}" 
-                                              for analysis_type, enabled in analysis_types.items()])
-                    st.info(f"**🔍 Анализ неэтичных практик:**\n{analysis_stats}")
-                
-            except Exception as e:
-                st.error(f"❌ Ошибка создания Excel: {str(e)}")
-                import traceback
-                st.code(traceback.format_exc())
+    def create_excel_report(self, analysis_types: Dict[str, bool], progress_bar=None) -> bytes:
+        return self.excel_exporter.create_comprehensive_report(
+            self.analyzed_results,
+            self.ref_results,
+            self.citing_results,
+            analysis_types,
+            progress_bar
+        )
     
     def clear_cache(self):
-        """Очищает кэш"""
         self.cache_manager.clear_all()
-        st.success("🗑️ Кэш очищен")
     
-    def clear_data(self):
-        """Очищает данные"""
+    def reset(self):
         self.analyzed_results = {}
         self.ref_results = {}
         self.citing_results = {}
         self.failed_tracker.clear()
-        st.success("🧹 Данные очищены")
+        self.system_stats = {
+            'total_dois_processed': 0,
+            'total_successful': 0,
+            'total_failed': 0,
+            'total_authors': 0,
+            'total_requests': 0,
+            'total_ref_dois': 0,
+            'total_cite_dois': 0
+        }
 
 # ============================================================================
-# 🎛️ ИНТЕРФЕЙС STREAMLIT
+# 🎛️ STREAMLIT ИНТЕРФЕЙС
 # ============================================================================
 
 def main():
-    # Настройка страницы
     st.set_page_config(
-        page_title=Config.PAGE_TITLE,
-        page_icon=Config.PAGE_ICON,
-        layout=Config.LAYOUT,
-        initial_sidebar_state=Config.INITIAL_SIDEBAR_STATE
+        page_title="📚 Анализатор научных статей по DOI",
+        page_icon="📊",
+        layout="wide",
+        initial_sidebar_state="expanded"
     )
     
-    # Заголовок приложения
+    st.markdown("""
+    <style>
+    .stProgress > div > div > div > div {
+        background-color: #4CAF50;
+    }
+    .stButton > button {
+        width: 100%;
+    }
+    .success-box {
+        background-color: #d4edda;
+        padding: 15px;
+        border-radius: 5px;
+        border-left: 5px solid #28a745;
+        margin: 10px 0;
+    }
+    .info-box {
+        background-color: #d1ecf1;
+        padding: 15px;
+        border-radius: 5px;
+        border-left: 5px solid #17a2b8;
+        margin: 10px 0;
+    }
+    .warning-box {
+        background-color: #fff3cd;
+        padding: 15px;
+        border-radius: 5px;
+        border-left: 5px solid #ffc107;
+        margin: 10px 0;
+    }
+    .error-box {
+        background-color: #f8d7da;
+        padding: 15px;
+        border-radius: 5px;
+        border-left: 5px solid #dc3545;
+        margin: 10px 0;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
     st.title("📚 Анализатор научных статей по DOI")
     st.markdown("""
-    **Полнофункциональная система анализа научных статей с поддержкой:**
-    - 📊 Умного кэширования всех уровней
-    - 🔍 Иерархического анализа данных (4 уровня)
-    - ⚡ Адаптивных задержек запросов
-    - 🎯 Настраиваемого анализа неэтичных практик
-    - 📋 25+ вкладок Excel с полными данными
+    ### Умный кэширование • Адаптивные задержки • Анализ неэтичных практик • Экспорт в Excel
+    
+    Введите один или несколько DOI для анализа. Система автоматически соберет данные из Crossref и OpenAlex,
+    проанализирует ссылки и цитирования, выполнит анализ неэтичных практик и сгенерирует комплексный Excel отчет.
     """)
     
-    # Инициализация системы
-    if 'system' not in st.session_state:
-        st.session_state.system = ArticleAnalyzerSystem()
+    # Инициализация системы в session state
+    if 'analyzer_system' not in st.session_state:
+        st.session_state.analyzer_system = ArticleAnalyzerSystemStreamlit()
     
-    system = st.session_state.system
+    if 'processing_complete' not in st.session_state:
+        st.session_state.processing_complete = False
     
-    # Боковая панель
+    if 'excel_data' not in st.session_state:
+        st.session_state.excel_data = None
+    
+    # Сайдбар с настройками
     with st.sidebar:
         st.header("⚙️ Настройки")
         
-        # Настройка параллельности
-        st.subheader("Параллельность")
-        workers = st.slider(
+        num_workers = st.slider(
             "Количество потоков",
             min_value=Config.MIN_WORKERS,
             max_value=Config.MAX_WORKERS,
-            value=st.session_state.workers,
-            help="Увеличьте для быстрой обработки большого количества DOI"
-        )
-        st.session_state.workers = workers
-        
-        # Настройки анализа
-        st.subheader("🔍 Настройки анализа")
-        
-        st.session_state.analysis_types['quick_checks'] = st.checkbox(
-            "Quick Checks (5-10 сек)",
-            value=st.session_state.analysis_types['quick_checks'],
-            help="Быстрые проверки на неэтичные практики"
+            value=Config.DEFAULT_WORKERS,
+            help="Больше потоков = быстрее обработка, но выше нагрузка на API"
         )
         
-        st.session_state.analysis_types['medium_insights'] = st.checkbox(
-            "Medium Insights (15-30 сек)",
-            value=st.session_state.analysis_types['medium_insights'],
-            help="Средние инсайты и детальный анализ"
-        )
+        st.markdown("---")
+        st.header("🔍 Анализ неэтичных практик")
         
-        st.session_state.analysis_types['deep_analysis'] = st.checkbox(
-            "Deep Analysis (60-120 сек)",
-            value=st.session_state.analysis_types['deep_analysis'],
-            help="Глубокий анализ с ML-моделями"
-        )
+        quick_checks = st.checkbox("Quick Checks (5-10 сек)", value=True,
+                                  help="Быстрые проверки на неэтичные практики")
+        medium_insights = st.checkbox("Medium Insights (15-30 сек)", value=True,
+                                     help="Средние инсайты с анализом паттернов")
+        deep_analysis = st.checkbox("Deep Analysis (60-120 сек)", value=False,
+                                   help="Глубокий анализ с ML и сетевым анализом")
+        citing_relationships = st.checkbox("Analyzed-Citing Relationships (30-60 сек)", value=False,
+                                         help="Анализ связей между анализируемыми и цитирующими статьями")
         
-        st.session_state.analysis_types['analyzed_citing_relationships'] = st.checkbox(
-            "Analyzed-Citing Relationships (30-60 сек)",
-            value=st.session_state.analysis_types['analyzed_citing_relationships'],
-            help="Анализ связей между статьями"
-        )
+        analysis_types = {
+            'quick_checks': quick_checks,
+            'medium_insights': medium_insights,
+            'deep_analysis': deep_analysis,
+            'analyzed_citing_relationships': citing_relationships
+        }
         
-        # Обработка ссылок и цитирований
-        st.subheader("📚 Обработка данных")
-        process_refs = st.checkbox("Анализировать ссылки (references)", value=True)
-        process_cites = st.checkbox("Анализировать цитирования (citations)", value=True)
+        st.markdown("---")
         
-        # Кнопки управления
-        st.subheader("🛠️ Управление")
+        if st.button("🧹 Очистить кэш", use_container_width=True):
+            st.session_state.analyzer_system.clear_cache()
+            st.success("Кэш очищен!")
         
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            if st.button("🗑️ Очистить кэш", help="Очищает все кэшированные данные"):
-                system.clear_cache()
-        
-        with col2:
-            if st.button("🧹 Очистить данные", help="Очищает результаты анализа"):
-                system.clear_data()
-        
-        # Информация о системе
-        st.sidebar.markdown("---")
-        st.sidebar.info("""
-        **Ограничения обработки:**
-        - 📚 Анализируемые статьи: до 100
-        - 📎 Ссылки (references): до 5000
-        - 🔗 Цитирования (citations): до 4000
-        """)
+        if st.button("🔄 Сбросить все данные", use_container_width=True):
+            st.session_state.analyzer_system.reset()
+            st.session_state.processing_complete = False
+            st.session_state.excel_data = None
+            st.rerun()
     
-    # Основной контент
-    tab1, tab2, tab3 = st.tabs(["📝 Ввод DOI", "📊 Результаты", "💾 Экспорт"])
+    # Основная область
+    col1, col2 = st.columns([2, 1])
     
-    with tab1:
-        st.header("Ввод DOI для анализа")
+    with col1:
+        st.header("📝 Ввод DOI")
         
-        # Варианты ввода
-        input_method = st.radio(
-            "Выберите способ ввода:",
-            ["Текстовое поле", "Загрузка файла"],
-            horizontal=True
+        doi_input = st.text_area(
+            "Введите DOI (через запятую, точку с запятой или с новой строки)",
+            height=150,
+            placeholder="Примеры:\n10.1038/nature12373\n10.1126/science.1252914\n10.1016/j.cell.2019.11.017"
         )
         
-        dois = []
-        
-        if input_method == "Текстовое поле":
-            st.markdown("""
-            **Введите один или несколько DOI (через запятую, точку с запятой или новую строки)**
-            
-            **Примеры:**
-            - 10.1038/nature12373
-            - 10.1126/science.1252914, 10.1016/j.cell.2019.11.017
-            """)
-            
-            doi_input = st.text_area(
-                "DOI для анализа:",
-                height=150,
-                placeholder="Введите DOI здесь...",
-                help="Разделяйте DOI запятыми, точками с запятой или новой строкой"
-            )
-            
-            if doi_input:
-                dois = system._parse_dois(doi_input)
-                
-                if dois:
-                    st.success(f"✅ Найдено {len(dois)} валидных DOI")
-                    
-                    # Показываем первые 10 DOI
-                    if len(dois) > 10:
-                        st.info(f"Первые 10 DOI из {len(dois)}:")
-                        for i, doi in enumerate(dois[:10]):
-                            st.text(f"{i+1}. {doi}")
-                        st.info(f"... и еще {len(dois) - 10} DOI")
-                    else:
-                        st.info("DOI для анализа:")
-                        for i, doi in enumerate(dois):
-                            st.text(f"{i+1}. {doi}")
-        
-        else:  # Загрузка файла
-            st.markdown("""
-            **Загрузите файл с DOI**
-            
-            Поддерживаемые форматы:
-            - 📝 Текстовый файл (.txt) - по одному DOI на строку
-            - 📊 CSV файл (.csv) - столбец с DOI
-            - 📋 Excel файл (.xlsx) - столбец с DOI
-            """)
-            
-            uploaded_file = st.file_uploader(
-                "Выберите файл",
-                type=['txt', 'csv', 'xlsx'],
-                help="Загрузите файл с DOI для анализа"
-            )
-            
-            if uploaded_file is not None:
-                try:
-                    if uploaded_file.name.endswith('.txt'):
-                        content = uploaded_file.getvalue().decode('utf-8')
-                        dois = system._parse_dois(content)
-                    
-                    elif uploaded_file.name.endswith('.csv'):
-                        df = pd.read_csv(uploaded_file)
-                        # Ищем столбец с DOI
-                        doi_columns = [col for col in df.columns if 'doi' in col.lower() or 'DOI' in col]
-                        if doi_columns:
-                            doi_values = df[doi_columns[0]].dropna().astype(str).tolist()
-                            dois = system._parse_dois('\n'.join(doi_values))
-                        else:
-                            st.error("❌ Не найден столбец с DOI в CSV файле")
-                    
-                    elif uploaded_file.name.endswith('.xlsx'):
-                        df = pd.read_excel(uploaded_file)
-                        # Ищем столбец с DOI
-                        doi_columns = [col for col in df.columns if 'doi' in col.lower() or 'DOI' in col]
-                        if doi_columns:
-                            doi_values = df[doi_columns[0]].dropna().astype(str).tolist()
-                            dois = system._parse_dois('\n'.join(doi_values))
-                        else:
-                            st.error("❌ Не найден столбец с DOI в Excel файле")
-                    
-                    if dois:
-                        st.success(f"✅ Загружено {len(dois)} DOI из файла")
-                        
-                        if len(dois) > 10:
-                            st.info(f"Первые 10 DOI из {len(dois)}:")
-                            for i, doi in enumerate(dois[:10]):
-                                st.text(f"{i+1}. {doi}")
-                            st.info(f"... и еще {len(dois) - 10} DOI")
-                        
-                        # Сохраняем загруженные DOI в session state
-                        st.session_state.uploaded_dois = dois
-                
-                except Exception as e:
-                    st.error(f"❌ Ошибка чтения файла: {str(e)}")
-        
-        # Кнопка обработки
-        if dois:
-            if len(dois) > Config.MAX_ANALYZED_ARTICLES:
-                st.warning(f"⚠️ Выбрано {len(dois)} DOI, что превышает лимит в {Config.MAX_ANALYZED_ARTICLES} статей. Будут обработаны только первые {Config.MAX_ANALYZED_ARTICLES}.")
-                dois = dois[:Config.MAX_ANALYZED_ARTICLES]
-            
-            if st.button("🚀 Начать обработку", type="primary", use_container_width=True):
-                with st.spinner("Обработка..."):
-                    system.process_dois(dois, process_refs, process_cites)
-        
-        # Примеры DOI
-        with st.expander("📋 Примеры DOI для тестирования"):
-            st.markdown("""
-            **Популярные статьи для тестирования:**
-            
-            1. **Nature** - фундаментальные исследования
-               - 10.1038/nature12373
-               - 10.1038/nature16961
-            
-            2. **Science** - междисциплинарные исследования
-               - 10.1126/science.1252914
-               - 10.1126/science.aac4716
-            
-            3. **Cell** - биомедицинские исследования
-               - 10.1016/j.cell.2019.11.017
-               - 10.1016/j.cell.2020.03.054
-            
-            4. **Physical Review Letters** - физика
-               - 10.1103/PhysRevLett.116.061102
-               - 10.1103/PhysRevLett.119.161101
-            
-            5. **Journal of the American Chemical Society** - химия
-               - 10.1021/jacs.9b13280
-               - 10.1021/jacs.0c09378
-            
-            **Советы:**
-            - Начните с 2-3 DOI для быстрого тестирования
-            - Используйте 5-10 DOI для полного анализа
-            - Для глубокого анализа выберите 1-2 DOI с большим количеством цитирований
-            """)
-    
-    with tab2:
-        st.header("📊 Результаты анализа")
-        
-        if system.analyzed_results:
-            # Статистика
-            successful = sum(1 for r in system.analyzed_results.values() if r.get('status') == 'success')
-            failed = len(system.analyzed_results) - successful
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.metric("📚 Анализируемые", f"{successful}/{len(system.analyzed_results)}")
-            
-            with col2:
-                if system.ref_results:
-                    ref_success = sum(1 for r in system.ref_results.values() if r.get('status') == 'success')
-                    st.metric("📎 Ссылки", f"{ref_success}/{len(system.ref_results)}")
-                else:
-                    st.metric("📎 Ссылки", "Не анализировались")
-            
-            with col3:
-                if system.citing_results:
-                    cite_success = sum(1 for r in system.citing_results.values() if r.get('status') == 'success')
-                    st.metric("🔗 Цитирования", f"{cite_success}/{len(system.citing_results)}")
-                else:
-                    st.metric("🔗 Цитирования", "Не анализировались")
-            
-            # Визуализации
-            st.subheader("📈 Визуализация данных")
-            
-            if successful > 0:
-                # График распределения по годам
-                years = []
-                for result in system.analyzed_results.values():
-                    if result.get('status') == 'success':
-                        year = result.get('publication_info', {}).get('year', '')
-                        if year and year.isdigit():
-                            years.append(int(year))
-                
-                if years:
-                    fig = px.histogram(
-                        x=years,
-                        title="Распределение статей по годам",
-                        labels={'x': 'Год публикации', 'y': 'Количество статей'},
-                        color_discrete_sequence=['#4CAF50']
-                    )
-                    fig.update_layout(bargap=0.1)
-                    st.plotly_chart(fig, use_container_width=True)
-                
-                # График количества авторов
-                author_counts = []
-                for result in system.analyzed_results.values():
-                    if result.get('status') == 'success':
-                        authors = result.get('authors', [])
-                        author_counts.append(len(authors))
-                
-                if author_counts:
-                    fig = px.histogram(
-                        x=author_counts,
-                        title="Распределение по количеству авторов",
-                        labels={'x': 'Количество авторов', 'y': 'Количество статей'},
-                        color_discrete_sequence=['#2196F3']
-                    )
-                    fig.update_layout(bargap=0.1)
-                    st.plotly_chart(fig, use_container_width=True)
-                
-                # Карта стран
-                countries_data = []
-                for result in system.analyzed_results.values():
-                    if result.get('status') == 'success':
-                        countries = result.get('countries', [])
-                        countries_data.extend(countries)
-                
-                if countries_data:
-                    country_counts = Counter(countries_data)
-                    
-                    # Создаем DataFrame для карты
-                    map_data = []
-                    for country_code, count in country_counts.items():
-                        map_data.append({
-                            'country_code': country_code,
-                            'count': count,
-                            'country_name': country_code  # В реальном приложении можно добавить mapping
-                        })
-                    
-                    if map_data:
-                        df_map = pd.DataFrame(map_data)
-                        
-                        # Простая визуализация
-                        fig = px.bar(
-                            df_map.sort_values('count', ascending=False).head(10),
-                            x='country_code',
-                            y='count',
-                            title="Топ-10 стран по количеству статей",
-                            labels={'country_code': 'Код страны', 'count': 'Количество статей'},
-                            color='count',
-                            color_continuous_scale='viridis'
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-            
-            # Детальный просмотр результатов
-            st.subheader("🔍 Детальный просмотр")
-            
-            view_option = st.selectbox(
-                "Выберите тип результатов:",
-                ["Все результаты", "Только успешные", "Только с ошибками"]
-            )
-            
-            results_to_show = []
-            if view_option == "Все результаты":
-                results_to_show = list(system.analyzed_results.items())
-            elif view_option == "Только успешные":
-                results_to_show = [(doi, result) for doi, result in system.analyzed_results.items() 
-                                  if result.get('status') == 'success']
-            else:  # Только с ошибками
-                results_to_show = [(doi, result) for doi, result in system.analyzed_results.items() 
-                                  if result.get('status') != 'success']
-            
-            if results_to_show:
-                for doi, result in results_to_show[:20]:  # Показываем первые 20
-                    if result.get('status') == 'success':
-                        system._display_success_result(result, "analyzed")
-                    else:
-                        system._display_error_result(doi, result, "analyzed")
-                
-                if len(results_to_show) > 20:
-                    st.info(f"Показано 20 из {len(results_to_show)} результатов. Используйте экспорт в Excel для полных данных.")
+        if st.button("🚀 Начать обработку", type="primary", use_container_width=True):
+            if not doi_input.strip():
+                st.error("⚠️ Введите хотя бы один DOI")
             else:
-                st.info("Нет результатов для отображения")
-        
-        else:
-            st.info("📝 Результаты анализа будут отображены здесь после обработки DOI")
+                dois = st.session_state.analyzer_system._parse_dois(doi_input)
+                
+                if not dois:
+                    st.error("❌ Не найдено валидных DOI")
+                else:
+                    st.info(f"🔍 Найдено {len(dois)} валидных DOI")
+                    
+                    # Прогресс-бар для обработки
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    try:
+                        # Обработка DOI
+                        results = st.session_state.analyzer_system.process_dois(
+                            dois, num_workers, analysis_types, progress_bar
+                        )
+                        
+                        st.session_state.processing_complete = True
+                        st.session_state.processing_results = results
+                        
+                        # Отображение результатов
+                        with st.expander("📊 Результаты обработки", expanded=True):
+                            col_a, col_b, col_c = st.columns(3)
+                            
+                            with col_a:
+                                st.metric("Успешно обработано", results['successful_count'])
+                            
+                            with col_b:
+                                st.metric("Найдено ссылок", results['total_refs_found'])
+                            
+                            with col_c:
+                                st.metric("Найдено цитирований", results['total_cites_found'])
+                            
+                            st.metric("Время обработки", f"{results['processing_time']:.1f} сек")
+                            
+                            # Статистика кэша
+                            cache_stats = results['cache_stats']
+                            st.markdown("#### 📈 Статистика кэша")
+                            col_c1, col_c2, col_c3 = st.columns(3)
+                            with col_c1:
+                                st.metric("Эффективность", f"{cache_stats['hit_ratio']}%")
+                            with col_c2:
+                                st.metric("API вызовов сохранено", cache_stats['api_calls_saved'])
+                            with col_c3:
+                                st.metric("Задержка", f"{results['delay_stats']['current_delay']:.3f} сек")
+                        
+                        st.success("✅ Обработка завершена! Можете скачать Excel отчет.")
+                        
+                    except Exception as e:
+                        st.error(f"❌ Ошибка обработки: {str(e)}")
     
-    with tab3:
-        st.header("💾 Экспорт результатов")
+    with col2:
+        st.header("💾 Экспорт")
         
-        if system.analyzed_results:
-            st.markdown("""
-            ### 📊 Комплексный Excel отчет
-            
-            Создайте подробный отчет со следующими разделами:
-            - 📚 Основные данные статей
-            - 👥 Статистика по авторам
-            - 🏢 Статистика по аффилиациям
-            - 🌍 Географическое распределение
-            - ⏱️ Временные связи
-            - 🔍 Анализ неэтичных практик
-            - ❌ Неудачные DOI
-            """)
-            
-            if st.button("📥 Создать Excel отчет", type="primary", use_container_width=True):
-                system.export_to_excel()
-            
-            # Предварительный просмотр данных
-            st.subheader("📋 Предварительный просмотр данных")
-            
-            preview_option = st.selectbox(
-                "Выберите данные для предпросмотра:",
-                ["Анализируемые статьи", "Авторы", "Журналы", "Страны"]
-            )
-            
-            if preview_option == "Анализируемые статьи":
-                data = system.excel_exporter._prepare_analyzed_articles(system.analyzed_results)
-                if data:
-                    df = pd.DataFrame(data)
-                    st.dataframe(df.head(10), use_container_width=True)
-                    st.caption(f"Показано 10 из {len(df)} записей")
-            
-            elif preview_option == "Авторы":
-                data = system.excel_exporter._prepare_author_frequency(system.analyzed_results, "analyzed")
-                if data:
-                    df = pd.DataFrame(data)
-                    st.dataframe(df.head(10), use_container_width=True)
-                    st.caption(f"Показано 10 из {len(df)} авторов")
-            
-            elif preview_option == "Журналы":
-                data = system.excel_exporter._prepare_journal_frequency(system.analyzed_results, "analyzed")
-                if data:
-                    df = pd.DataFrame(data)
-                    st.dataframe(df.head(10), use_container_width=True)
-                    st.caption(f"Показано 10 из {len(df)} журналов")
-            
-            elif preview_option == "Страны":
-                data = system.excel_exporter._prepare_country_frequency(system.analyzed_results, "analyzed")
-                if data:
-                    df = pd.DataFrame(data)
-                    st.dataframe(df.head(10), use_container_width=True)
-                    st.caption(f"Показано 10 из {len(df)} стран")
-        
+        if st.session_state.processing_complete:
+            if st.button("📥 Создать Excel отчет", type="secondary", use_container_width=True):
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                try:
+                    # Создание Excel отчета
+                    excel_data = st.session_state.analyzer_system.create_excel_report(
+                        analysis_types, progress_bar
+                    )
+                    
+                    st.session_state.excel_data = excel_data
+                    
+                    st.success("✅ Excel отчет создан!")
+                    
+                    # Предложение скачать
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filename = f"articles_analysis_{timestamp}.xlsx"
+                    
+                    st.download_button(
+                        label="⬇️ Скачать Excel отчет",
+                        data=excel_data,
+                        file_name=filename,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
+                    
+                except Exception as e:
+                    st.error(f"❌ Ошибка создания отчета: {str(e)}")
         else:
-            st.info("📝 Для экспорта результатов сначала выполните анализ DOI")
+            st.info("ℹ️ Сначала выполните обработку DOI")
+        
+        st.markdown("---")
+        st.header("📊 Статистика")
+        
+        if st.session_state.processing_complete:
+            results = st.session_state.processing_results
+            analyzed_success = results['successful_count']
+            total_dois = analyzed_success + results['failed_count']
+            
+            if total_dois > 0:
+                st.metric("Общий успех", f"{(analyzed_success/total_dois*100):.1f}%")
+            
+            # Дополнительная статистика
+            if 'analyzed_results' in results:
+                total_authors = 0
+                total_refs = 0
+                total_cites = 0
+                
+                for result in results['analyzed_results'].values():
+                    if result.get('status') == 'success':
+                        total_authors += len(result.get('authors', []))
+                        total_refs += len(result.get('references', []))
+                        total_cites += len(result.get('citations', []))
+                
+                col_s1, col_s2 = st.columns(2)
+                with col_s1:
+                    st.metric("Всего авторов", total_authors)
+                with col_s2:
+                    st.metric("Всего ссылок", total_refs)
+                
+                st.metric("Всего цитирований", total_cites)
     
-    # Футер
+    # Информация о системе внизу
     st.markdown("---")
     st.markdown("""
-    <div style="text-align: center; color: #666; font-size: 0.9em;">
-        <p>📚 Анализатор научных статей по DOI • Версия 3.0 • Поддержка до 100 статей, 5000 ссылок и 4000 цитирований</p>
-        <p>⚡ Умное кэширование • 🔍 Иерархический анализ • 📊 25+ вкладок Excel</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-# ============================================================================
-# 🏃‍♂️ ЗАПУСК ПРИЛОЖЕНИЯ
-# ============================================================================
+    ### 📋 Функционал системы:
+    
+    **✅ Умное кэширование:**
+    - Многоуровневый кэш (память, файл, запросы)
+    - Автоматическая очистка устаревших данных
+    - Адаптивные задержки (0.1-1.0 секунды)
+    
+    **✅ Параллельная обработка:**
+    - Настраиваемое количество потоков (1-10)
+    - Batch-обработка по 50 DOI
+    - Автоматический retry при ошибках
+    
+    **✅ Полный анализ данных:**
+    - Метаданные статей (авторы, журналы, страны)
+    - Сбор всех ссылок (references)
+    - Сбор всех цитирований (citations)
+    - ROR поиск аффилиаций
+    
+    **✅ Анализ неэтичных практик:**
+    - Quick Checks: быстрые проверки (5-10 сек на статью)
+    - Medium Insights: средние инсайты (15-30 сек на статью)
+    - Deep Analysis: глубокий анализ (60-120 сек на статью)
+    - Analyzed-Citing Relationships: связи (30-60 сек на пару)
+    
+    **✅ Комплексный Excel отчет:**
+    - 25+ вкладок с полными данными
+    - Сводные таблицы по авторам и аффилиациям
+    - Временные связи между статьями
+    - Детальная статистика
+    
+    **💡 Примеры DOI для тестирования:**
+    - `10.1038/nature12373`
+    - `10.1126/science.1252914`
+    - `10.1016/j.cell.2019.11.017`
+    - `10.1103/PhysRevLett.116.061102`
+    """)
 
 if __name__ == "__main__":
-    # Проверка зависимостей
-    try:
-        main()
-    except Exception as e:
-        st.error(f"❌ Ошибка запуска приложения: {str(e)}")
-        import traceback
-        st.code(traceback.format_exc())
-        
-        st.info("""
-        **Возможные решения:**
-        
-        1. **Проверьте установку зависимостей:**
-           ```bash
-           pip install -r requirements.txt
-           ```
-        
-        2. **Проверьте доступ к интернету** - приложению нужен доступ к API Crossref и OpenAlex
-        
-        3. **Очистите кэш Streamlit:**
-           ```bash
-           rm -rf ~/.streamlit
-           ```
-        
-        4. **Перезапустите приложение** - нажмите кнопку "Rerun" вверху страницы
-        """)
-
+    main()
