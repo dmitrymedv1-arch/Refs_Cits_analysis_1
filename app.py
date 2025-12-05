@@ -5120,7 +5120,10 @@ class StreamlitInterfaceManager:
             return
         
         st.info(f"📚 Найдено {len(dois)} DOI для обработки")
-        
+
+        # Get workers from session_state (а не вызывая render_sidebar снова)
+        workers = st.session_state.get('workers', Config.DEFAULT_WORKERS)
+    
         # Create progress containers
         progress_container = st.container()
         results_container = st.container()
@@ -5520,3 +5523,4 @@ if __name__ == "__main__":
     # Create and run the system
     system = ArticleAnalyzerSystem()
     system.run()
+
