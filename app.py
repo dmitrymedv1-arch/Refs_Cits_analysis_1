@@ -5465,9 +5465,17 @@ def main():
                 st.warning("Кэш еще не инициализирован")
         
         # Показать статистику кэша
-        cache_stats = st.session_state.cache_manager.get_stats()
-        st.caption(f"Эффективность: {cache_stats['hit_ratio']}%")
-        st.caption(f"API сохранено: {cache_stats['api_calls_saved']}")
+        cache_stats = {}
+        if hasattr(st.session_state, 'cache_manager') and st.session_state.cache_manager:
+            try:
+                cache_stats = st.session_state.cache_manager.get_stats()
+            except:
+                cache_stats = {'hit_ratio': 0, 'api_calls_saved': 0, 'memory_items': 0}
+        else:
+            cache_stats = {'hit_ratio': 0, 'api_calls_saved': 0, 'memory_items': 0}
+        
+        st.caption(f"Эффективность: {cache_stats.get('hit_ratio', 0)}%")
+        st.caption(f"API сохранено: {cache_stats.get('api_calls_saved', 0)}")
         
         st.divider()
         
@@ -5591,5 +5599,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
