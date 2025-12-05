@@ -5099,21 +5099,20 @@ class StreamlitInterfaceManager:
             # Используем expander без параметра key
             with st.expander("Статистика кэша"):
                 # Используем дельты или статические значения для метрик
+                # Убираем параметр key из st.metric
                 st.metric(
                     "Эффективность", 
                     f"{cache_stats['hit_ratio']}%",
                     delta=None,  # Явно указываем delta=None
                     delta_color="normal",
-                    help=f"Хит-рейт кэша: {cache_stats['hits']} / {cache_stats['hits'] + cache_stats['misses']}",
-                    key="metric_efficiency"
+                    help=f"Хит-рейт кэша: {cache_stats['hits']} / {cache_stats['hits'] + cache_stats['misses']}"
                 )
                 
                 st.metric(
                     "Сохранено API вызовов", 
-                    cache_stats['api_calls_saved'],
+                    f"{cache_stats['api_calls_saved']:,}",
                     delta=None,
-                    delta_color="normal",
-                    key="metric_api_saved"
+                    delta_color="normal"
                 )
                 
                 st.metric(
@@ -5121,8 +5120,7 @@ class StreamlitInterfaceManager:
                     f"{cache_stats['cache_size_mb']} MB",
                     delta=None,
                     delta_color="normal",
-                    help=f"Элементов в памяти: {cache_stats['memory_items']}",
-                    key="metric_cache_size"
+                    help=f"Элементов в памяти: {cache_stats['memory_items']}"
                 )
             
             return workers
@@ -5588,6 +5586,7 @@ if __name__ == "__main__":
     # Create and run the system
     system = ArticleAnalyzerSystem()
     system.run()
+
 
 
 
