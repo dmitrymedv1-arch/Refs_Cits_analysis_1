@@ -5027,7 +5027,7 @@ class StreamlitInterfaceManager:
                 max_value=Config.MAX_WORKERS,
                 value=st.session_state.workers,
                 help="Количество параллельных потоков для обработки DOI",
-                key="workers_slider_sidebar"  # Уникальный ключ
+                key="workers_slider_sidebar"
             )
             
             # Сохраняем значение в session_state
@@ -5096,8 +5096,8 @@ class StreamlitInterfaceManager:
             # Display cache stats
             cache_stats = self.system.cache_manager.get_stats()
             
-            # Используем expander с уникальным ключом
-            with st.expander("Статистика кэша", key="cache_stats_expander"):
+            # Используем expander без параметра key
+            with st.expander("Статистика кэша"):
                 # Используем дельты или статические значения для метрик
                 st.metric(
                     "Эффективность", 
@@ -5588,6 +5588,7 @@ if __name__ == "__main__":
     # Create and run the system
     system = ArticleAnalyzerSystem()
     system.run()
+
 
 
 
