@@ -5234,6 +5234,14 @@ class ArticleAnalyzerSystem:
     def _process_dois_background(self, dois: List[str], num_workers: int, analysis_types: Dict[str, bool]):
         """Фоновая обработка DOI"""
         try:
+            # Создаем новый контекст выполнения для фонового потока
+            from streamlit.runtime.scriptrunner import get_script_run_ctx, add_script_run_ctx
+            
+            ctx = get_script_run_ctx()
+            if ctx:
+                import threading
+                threading.current_thread()._script_run_ctx = ctx
+            
             self._update_progress('main', 10)
             self._update_progress('analyzed', 0)
             
@@ -5551,21 +5559,38 @@ class ArticleAnalyzerSystem:
                 if not dois:
                     st.error("Не найдено валидных DOI")
                 else:
-                    st.info(f"Найдено {len(dois)} DOI для обработки")
-                    
-                    # Запуск фоновой обработки
-                    st.session_state.processing_active = True
-                    
-                    # Запуск в отдельном потоке
-                    import threading
-                    thread = threading.Thread(
-                        target=self._process_dois_background,
-                        args=(dois, num_workers, analysis_types)
-                    )
-                    thread.daemon = True
-                    thread.start()
-                    
-                    st.success(f"Обработка {len(dois)} DOI начата...")
+                    # Проверяем, не выполняется ли уже обработка
+                    if st.session_state.processing_active:
+                        st.warning("⚠️ Обработка уже выполняется. Дождитесь завершения.")
+                    else:
+                        st.info(f"Найдено {len(dois)} DOI для обработки")
+                        
+                        # Запуск фоновой обработки с контекстом
+                        st.session_state.processing_active = True
+                        
+                        # Запуск в отдельном потоке с передачей контекста
+                        import threading
+                        from streamlit.runtime.scriptrunner import get_script_run_ctx, add_script_run_ctx
+                        
+                        ctx = get_script_run_ctx()
+                        
+                        def run_with_context():
+                            if ctx:
+                                import threading
+                                threading.current_thread()._script_run_ctx = ctx
+                            self._process_dois_background(dois, num_workers, analysis_types)
+                        
+                        thread = threading.Thread(target=run_with_context)
+                        thread.daemon = True
+                        
+                        # Добавляем контекст выполнения к потоку
+                        if ctx:
+                            add_script_run_ctx(thread, ctx)
+                        
+                        thread.start()
+                        
+                        st.success(f"✅ Обработка {len(dois)} DOI начата...")
+                        st.rerun()  # Обновляем интерфейс
             
             if export_btn and st.session_state.analyzed_results:
                 self._export_to_excel(analysis_types)
@@ -5706,4 +5731,5 @@ if __name__ == "__main__":
     except Exception as e:
         st.error(f"❌ Ошибка запуска системы: {str(e)}")
         st.code(traceback.format_exc())
+
 
