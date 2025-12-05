@@ -1211,7 +1211,7 @@ class RORClient:
 class DataProcessor:
     def __init__(self, cache_manager: SmartCacheManager):
         self.cache = cache_manager
-        self.country_codes = Config.COUNTRY_CODES
+        self.country_codes = Config().COUNTRY_CODES
     
     def extract_article_info(self, crossref_data: Dict, openalex_data: Dict, 
                            doi: str, references: List[str], citations: List[str]) -> Dict:
@@ -6018,3 +6018,4 @@ if __name__ == "__main__":
         
         4. **Перезапустите приложение** - нажмите кнопку "Rerun" вверху страницы
         """)
+
