@@ -5060,7 +5060,7 @@ class StreamlitInterfaceManager:
             
             # Display cache stats
             cache_stats = self.system.cache_manager.get_stats()
-            with st.expander("Статистика кэша", key="unique_cache_stats_expander"):  # ← Добавлено
+            with st.expander("Статистика кэша"):  # ← Добавлено
                 st.metric("Эффективность", f"{cache_stats['hit_ratio']}%", key="unique_metric_efficiency")
                 st.metric("Сохранено API вызовов", cache_stats['api_calls_saved'], key="unique_metric_api_saved")
                 st.metric("Размер кэша", f"{cache_stats['cache_size_mb']} MB", key="unique_metric_cache_size")
@@ -5528,5 +5528,6 @@ if __name__ == "__main__":
     # Create and run the system
     system = ArticleAnalyzerSystem()
     system.run()
+
 
 
