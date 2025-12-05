@@ -1603,9 +1603,10 @@ class OptimizedDOIProcessor:
         self.data_processor = data_processor
         self.failed_tracker = failed_tracker
         
-        self.crossref_client = CrossrefClient(cache_manager, delay_manager)
-        self.openalex_client = OpenAlexClient(cache_manager, delay_manager)
-        self.ror_client = RORClient(cache_manager)
+        # Инициализируем клиенты позже - они будут установлены извне
+        self.crossref_client = None
+        self.openalex_client = None
+        self.ror_client = None
         
         self.processed_dois = {}
         self.reference_relationships = defaultdict(list)
@@ -4997,6 +4998,22 @@ class StreamlitArticleAnalyzer:
         if 'data_processor' not in st.session_state:
             st.session_state.data_processor = DataProcessor(st.session_state.cache_manager)
         
+        # Обновляем инициализацию клиентов
+        if 'crossref_client' not in st.session_state:
+            st.session_state.crossref_client = CrossrefClient(
+                st.session_state.cache_manager, 
+                st.session_state.delay_manager
+            )
+        
+        if 'openalex_client' not in st.session_state:
+            st.session_state.openalex_client = OpenAlexClient(
+                st.session_state.cache_manager,
+                st.session_state.delay_manager
+            )
+        
+        if 'ror_client' not in st.session_state:
+            st.session_state.ror_client = RORClient(st.session_state.cache_manager)
+        
         if 'doi_processor' not in st.session_state:
             st.session_state.doi_processor = OptimizedDOIProcessor(
                 st.session_state.cache_manager,
@@ -5004,6 +5021,11 @@ class StreamlitArticleAnalyzer:
                 st.session_state.data_processor,
                 st.session_state.failed_tracker
             )
+            
+            # Устанавливаем клиенты для процессора
+            st.session_state.doi_processor.crossref_client = st.session_state.crossref_client
+            st.session_state.doi_processor.openalex_client = st.session_state.openalex_client
+            st.session_state.doi_processor.ror_client = st.session_state.ror_client
         
         if 'hierarchical_analyzer' not in st.session_state:
             st.session_state.hierarchical_analyzer = HierarchicalDataAnalyzer(
@@ -5011,9 +5033,6 @@ class StreamlitArticleAnalyzer:
                 st.session_state.data_processor,
                 st.session_state.doi_processor
             )
-        
-        if 'ror_client' not in st.session_state:
-            st.session_state.ror_client = RORClient(st.session_state.cache_manager)
         
         if 'excel_exporter' not in st.session_state:
             st.session_state.excel_exporter = ExcelExporter(
@@ -5255,7 +5274,15 @@ class StreamlitArticleAnalyzer:
         cite_success = sum(1 for r in st.session_state.citing_results.values() if r.get('status') == 'success') if st.session_state.citing_results else 0
         
         # Безопасное получение статистики кэша
-        cache_stats = st.session_state.get('cache_manager', {}).get_stats() if hasattr(st.session_state, 'cache_manager') and st.session_state.cache_manager else {'hit_ratio': 0, 'api_calls_saved': 0}
+        cache_stats = {}
+        if hasattr(st.session_state, 'cache_manager') and st.session_state.cache_manager is not None:
+            try:
+                cache_stats = st.session_state.cache_manager.get_stats()
+            except:
+                cache_stats = {'hit_ratio': 0, 'api_calls_saved': 0}
+        else:
+            cache_stats = {'hit_ratio': 0, 'api_calls_saved': 0}
+        
         st.caption(f"Эффективность: {cache_stats.get('hit_ratio', 0)}%")
         st.caption(f"API сохранено: {cache_stats.get('api_calls_saved', 0)}")
         
@@ -5468,7 +5495,17 @@ def main():
         cache_stats = {}
         if hasattr(st.session_state, 'cache_manager') and st.session_state.cache_manager:
             try:
-                cache_stats = st.session_state.cache_manager.get_stats()
+                cache_stats = {}
+                if hasattr(st.session_state, 'cache_manager') and st.session_state.cache_manager is not None:
+                    try:
+                        cache_stats = st.session_state.cache_manager.get_stats()
+                    except Exception as e:
+                        cache_stats = {'hit_ratio': 0, 'api_calls_saved': 0, 'memory_items': 0}
+                else:
+                    cache_stats = {'hit_ratio': 0, 'api_calls_saved': 0, 'memory_items': 0}
+                
+                st.caption(f"Эффективность: {cache_stats.get('hit_ratio', 0)}%")
+                st.caption(f"API сохранено: {cache_stats.get('api_calls_saved', 0)}")
             except:
                 cache_stats = {'hit_ratio': 0, 'api_calls_saved': 0, 'memory_items': 0}
         else:
@@ -5599,6 +5636,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
