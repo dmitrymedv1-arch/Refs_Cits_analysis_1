@@ -5021,7 +5021,8 @@ class StreamlitInterfaceManager:
                 min_value=Config.MIN_WORKERS,
                 max_value=Config.MAX_WORKERS,
                 value=Config.DEFAULT_WORKERS,
-                help="Количество параллельных потоков для обработки DOI"
+                help="Количество параллельных потоков для обработки DOI",
+                key="unique_workers_slider"  # ← Добавлено
             )
             
             # Analysis types
@@ -5029,36 +5030,40 @@ class StreamlitInterfaceManager:
             st.session_state.analysis_types['quick_checks'] = st.checkbox(
                 "Quick Checks (5-10 сек)", 
                 value=st.session_state.analysis_types['quick_checks'],
-                help="Быстрые проверки на неэтичные практики"
+                help="Быстрые проверки на неэтичные практики",
+                key="unique_checkbox_quick_checks"  # ← Добавлено
             )
             st.session_state.analysis_types['medium_insights'] = st.checkbox(
                 "Medium Insights (15-30 сек)", 
                 value=st.session_state.analysis_types['medium_insights'],
-                help="Средние инсайты с детальным анализом"
+                help="Средние инсайты с детальным анализом",
+                key="unique_checkbox_medium_insights"  # ← Добавлено
             )
             st.session_state.analysis_types['deep_analysis'] = st.checkbox(
                 "Deep Analysis (60-120 сек)", 
                 value=st.session_state.analysis_types['deep_analysis'],
-                help="Глубокий анализ с ML и сетевыми метриками"
+                help="Глубокий анализ с ML и сетевыми метриками",
+                key="unique_checkbox_deep_analysis"  # ← Добавлено
             )
             st.session_state.analysis_types['analyzed_citing_relationships'] = st.checkbox(
                 "Analyzed-Citing Relationships (30-60 сек)", 
                 value=st.session_state.analysis_types['analyzed_citing_relationships'],
-                help="Анализ связей между анализируемыми и цитирующими статьями"
+                help="Анализ связей между анализируемыми и цитирующими статьями",
+                key="unique_checkbox_analyzed_citing_relationships"  # ← Добавлено
             )
             
             # Cache controls
             st.subheader("🗂️ Управление кэшем")
-            if st.button("🧹 Очистить кэш", type="secondary"):
+            if st.button("🧹 Очистить кэш", type="secondary", key="unique_clear_cache_btn"):  # ← Добавлено
                 self.system.cache_manager.clear_all()
                 st.success("Кэш очищен!")
             
             # Display cache stats
             cache_stats = self.system.cache_manager.get_stats()
-            with st.expander("Статистика кэша"):
-                st.metric("Эффективность", f"{cache_stats['hit_ratio']}%")
-                st.metric("Сохранено API вызовов", cache_stats['api_calls_saved'])
-                st.metric("Размер кэша", f"{cache_stats['cache_size_mb']} MB")
+            with st.expander("Статистика кэша", key="unique_cache_stats_expander"):  # ← Добавлено
+                st.metric("Эффективность", f"{cache_stats['hit_ratio']}%", key="unique_metric_efficiency")
+                st.metric("Сохранено API вызовов", cache_stats['api_calls_saved'], key="unique_metric_api_saved")
+                st.metric("Размер кэша", f"{cache_stats['cache_size_mb']} MB", key="unique_metric_cache_size")
             
             return workers
     
@@ -5143,7 +5148,7 @@ class StreamlitInterfaceManager:
             excel_progress = st.progress(0, text="Создание Excel")
         
         # Get workers from sidebar
-        workers = self.render_sidebar()
+        workers = st.session_state.get('unique_workers_slider', Config.DEFAULT_WORKERS)
         
         # Update system settings
         self.system.widgets.workers_slider.value = workers
@@ -5523,4 +5528,5 @@ if __name__ == "__main__":
     # Create and run the system
     system = ArticleAnalyzerSystem()
     system.run()
+
 
