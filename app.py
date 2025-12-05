@@ -5459,7 +5459,10 @@ def main():
         st.subheader("🗂️ Управление кэшем")
         
         if st.button("🧹 Очистить кэш", use_container_width=True):
-            analyzer.clear_cache()
+            if hasattr(st.session_state, 'cache_manager') and st.session_state.cache_manager is not None:
+                analyzer.clear_cache()
+            else:
+                st.warning("Кэш еще не инициализирован")
         
         # Показать статистику кэша
         cache_stats = st.session_state.cache_manager.get_stats()
@@ -5588,4 +5591,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
