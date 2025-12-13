@@ -5624,38 +5624,145 @@ class ArticleAnalyzerSystem:
     def _export_to_excel(self, analysis_types: Dict[str, bool]):
         """Экспорт результатов в Excel"""
         try:
+            # Обновляем прогресс экспорта
             self._update_progress('excel', 10)
             
+            # Проверяем, есть ли результаты для экспорта
+            if not st.session_state.analyzed_results:
+                st.error("❌ Нет результатов для экспорта. Сначала обработайте DOI.")
+                self._update_progress('excel', 0)
+                return
+            
+            # Проверяем, были ли успешные результаты
+            successful_results = sum(1 for r in st.session_state.analyzed_results.values() 
+                                   if r.get('status') == 'success')
+            if successful_results == 0:
+                st.warning("⚠️ Нет успешно обработанных статей для экспорта.")
+                self._update_progress('excel', 0)
+                return
+            
+            st.info(f"📊 Начинаем экспорт {successful_results} успешно обработанных статей...")
+            
+            # Обновляем прогресс
+            self._update_progress('excel', 30)
+            
+            # Создаем имя файла с временной меткой
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"articles_analysis_comprehensive_{timestamp}.xlsx"
             
-            filename = self.excel_exporter.create_comprehensive_report(
-                st.session_state.analyzed_results,
-                st.session_state.ref_results,
-                st.session_state.citing_results,
-                analysis_types,
-                filename
-            )
+            st.info(f"📝 Создание отчета: {filename}")
             
-            self._update_progress('excel', 100)
+            # Обновляем прогресс
+            self._update_progress('excel', 50)
+            
+            # Создаем отчет с помощью ExcelExporter
+            try:
+                filename = self.excel_exporter.create_comprehensive_report(
+                    st.session_state.analyzed_results,
+                    st.session_state.ref_results,
+                    st.session_state.citing_results,
+                    analysis_types,
+                    filename
+                )
+                
+                self._update_progress('excel', 80)
+                
+            except Exception as e:
+                st.error(f"❌ Ошибка при создании отчета Excel: {str(e)}")
+                import traceback
+                st.code(traceback.format_exc())
+                self._update_progress('excel', 0)
+                return
             
             # Чтение файла для скачивания
-            with open(filename, "rb") as file:
-                file_bytes = file.read()
+            try:
+                with open(filename, "rb") as file:
+                    file_bytes = file.read()
+                
+                self._update_progress('excel', 90)
+                
+            except Exception as e:
+                st.error(f"❌ Ошибка чтения файла {filename}: {str(e)}")
+                self._update_progress('excel', 0)
+                return
             
-            # Кнопка скачивания
-            st.download_button(
-                label="📥 Скачать Excel отчет",
-                data=file_bytes,
-                file_name=filename,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
-            )
+            # Обновляем прогресс до 100%
+            self._update_progress('excel', 100)
             
-            st.success(f"✅ Отчет создан: {filename}")
+            # Создаем контейнер для кнопки скачивания
+            download_container = st.container()
+            
+            with download_container:
+                st.success(f"✅ Отчет создан: {filename}")
+                st.info(f"📄 Размер файла: {len(file_bytes) / (1024*1024):.2f} MB")
+                
+                # Разделитель
+                st.markdown("---")
+                
+                # Кнопка скачивания
+                st.download_button(
+                    label="📥 Скачать Excel отчет",
+                    data=file_bytes,
+                    file_name=filename,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    type="primary"
+                )
+                
+                # Кнопка для просмотра информации о файле
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("📊 Показать статистику отчета", use_container_width=True):
+                        successful_analyzed = sum(1 for r in st.session_state.analyzed_results.values() 
+                                                if r.get('status') == 'success')
+                        successful_ref = sum(1 for r in st.session_state.ref_results.values() 
+                                            if r.get('status') == 'success') if st.session_state.ref_results else 0
+                        successful_citing = sum(1 for r in st.session_state.citing_results.values() 
+                                               if r.get('status') == 'success') if st.session_state.citing_results else 0
+                        
+                        st.info(f"""
+                        **📈 Статистика отчета:**
+                        - Основные статьи: {successful_analyzed}
+                        - Ссылочные статьи: {successful_ref}
+                        - Цитирующие статьи: {successful_citing}
+                        - Всего статей: {successful_analyzed + successful_ref + successful_citing}
+                        """)
+                
+                with col2:
+                    if st.button("🧹 Создать новый отчет", use_container_width=True):
+                        # Сбрасываем прогресс экспорта
+                        self._update_progress('excel', 0)
+                        st.rerun()
+            
+            # Также предлагаем сохранить информацию о файле
+            st.markdown("---")
+            with st.expander("📋 Информация о созданном отчете"):
+                st.write(f"**Имя файла:** {filename}")
+                st.write(f"**Время создания:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                st.write(f"**Типы анализа в отчете:**")
+                for analysis_type, enabled in analysis_types.items():
+                    status = "✅ Включен" if enabled else "❌ Отключен"
+                    st.write(f"  - {analysis_type.replace('_', ' ').title()}: {status}")
+                
+                # Информация о количестве листов
+                try:
+                    import pandas as pd
+                    xls = pd.ExcelFile(filename)
+                    sheet_count = len(xls.sheet_names)
+                    st.write(f"**Количество листов в файле:** {sheet_count}")
+                    
+                    if sheet_count > 0:
+                        st.write("**Список листов:**")
+                        for i, sheet_name in enumerate(xls.sheet_names, 1):
+                            st.write(f"  {i}. {sheet_name}")
+                except:
+                    pass
             
         except Exception as e:
-            st.error(f"❌ Ошибка создания отчета: {str(e)}")
+            st.error(f"❌ Неожиданная ошибка при экспорте в Excel: {str(e)}")
+            import traceback
+            st.code(traceback.format_exc())
+            self._update_progress('excel', 0)
     
     def _display_results_summary(self):
         """Отображение сводки результатов"""
@@ -5871,10 +5978,22 @@ class ArticleAnalyzerSystem:
                                 st.markdown("### 📈 Прогресс обработки (завершено)")
                                 self._display_progress_bars()
                             
-                            st.success(f"✅ Обработка {len(dois)} DOI завершена!")
+                            # Сбрасываем флаг обработки
+                            st.session_state.processing_active = False
+                            
+                            # Показываем успешное сообщение
+                            successful_count = sum(1 for r in st.session_state.analyzed_results.values() 
+                                                 if r.get('status') == 'success')
+                            st.success(f"✅ Обработка завершена! Успешно обработано: {successful_count} статей")
+                            
+                            # Сразу запускаем экспорт в Excel
+                            st.info("💾 Начинаем экспорт результатов в Excel...")
+                            self._export_to_excel(analysis_types)
                             
                         except Exception as e:
                             st.error(f"❌ Ошибка обработки: {str(e)}")
+                            import traceback
+                            st.code(traceback.format_exc())
                             st.session_state.processing_active = False
             
             if export_btn and st.session_state.analyzed_results and not st.session_state.get('processing_active', False):
@@ -6037,5 +6156,6 @@ if __name__ == "__main__":
     except Exception as e:
         st.error(f"❌ Ошибка запуска системы: {str(e)}")
         st.code(traceback.format_exc())
+
 
 
