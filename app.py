@@ -5362,330 +5362,261 @@ class ArticleAnalyzerSystem:
                     st.session_state[f'last_update_{stage}'] = time.time()
         except:
             pass  # Игнорируем ошибки обновления из фонового потока
-
+            
     def _process_dois_background(self, dois: List[str], num_workers: int, analysis_types: Dict[str, bool]):
         """Фоновая обработка DOI с отображением прогресса"""
         try:
-            # Создаем контейнеры для прогресса
-            progress_container = st.container()
+            # Инициализация счетчиков прогресса в session_state
+            st.session_state.progress_details = {
+                'main_processed': 0,
+                'main_total': len(dois),
+                'refs_processed': 0,
+                'refs_total': 0,
+                'cites_processed': 0,
+                'cites_total': 0
+            }
             
-            with progress_container:
-                # Инициализация счетчиков прогресса в session_state
-                if 'progress_details' not in st.session_state:
-                    st.session_state.progress_details = {
-                        'main_processed': 0,
-                        'main_total': 0,
-                        'refs_processed': 0,
-                        'refs_total': 0,
-                        'cites_processed': 0,
-                        'cites_total': 0
-                    }
+            # Шаг 1: Обработка основных DOI
+            print(f"🚀 Начинаем обработку {len(dois)} DOI...")
+            
+            # Используем ThreadPoolExecutor для многопоточной обработки
+            st.session_state.analyzed_results = {}
+            
+            # Запускаем обработку синхронно, но с callback для обновления UI
+            with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                # Создаем futures для всех DOI
+                future_to_doi = {}
+                for doi in dois:
+                    future = executor.submit(
+                        self.doi_processor._process_single_doi_wrapper,
+                        doi, "analyzed", None, True, True
+                    )
+                    future_to_doi[future] = doi
                 
-                # Шаг 1: Обработка основных DOI
-                st.markdown("### 📚 Обработка основных статей")
-                
-                # Инициализируем счетчики для основных статей
-                st.session_state.progress_details['main_total'] = len(dois)
-                st.session_state.progress_details['main_processed'] = 0
-                
-                main_progress_bar = st.progress(0, text=f"Обработано 0/{len(dois)} статей")
-                main_status = st.empty()
-                
-                self._update_progress('main', 10)
-                self._update_progress('analyzed', 0)
-                
-                # Callback функция для обновления прогресса основных статей
-                def update_main_progress():
-                    st.session_state.progress_details['main_processed'] += 1
-                    processed = st.session_state.progress_details['main_processed']
-                    total = st.session_state.progress_details['main_total']
-                    progress_percent = int(processed / total * 90)
-                    
-                    # Обновляем прогресс-бар
-                    main_progress_bar.progress(progress_percent / 100, 
-                                             text=f"Обработано {processed}/{total} статей")
-                    main_status.text(f"📊 Прогресс: {processed}/{total} статей")
-                    
-                    self._update_progress('analyzed', progress_percent)
-                    self._update_progress('main', 10 + progress_percent * 0.9)
-                    
-                    # Пытаемся обновить интерфейс
+                # Обрабатываем результаты по мере готовности
+                for future in as_completed(future_to_doi):
+                    doi = future_to_doi[future]
                     try:
-                        time.sleep(0.01)  # Минимальная задержка для обновления UI
-                    except:
-                        pass
+                        result = future.result(timeout=60)
+                        st.session_state.analyzed_results[doi] = result
+                        
+                        if result.get('status') == 'success':
+                            # Обновляем счетчики
+                            self.excel_exporter.update_counters(
+                                result.get('references', []), 
+                                result.get('citations', []),
+                                "analyzed"
+                            )
+                        
+                        # Обновляем прогресс
+                        st.session_state.progress_details['main_processed'] += 1
+                        processed = st.session_state.progress_details['main_processed']
+                        total = st.session_state.progress_details['main_total']
+                        
+                        # Обновляем общий прогресс
+                        main_progress_percent = min(100, int(processed / total * 90) if total > 0 else 0)
+                        analyzed_progress_percent = min(100, int(processed / total * 90) if total > 0 else 0)
+                        
+                        st.session_state.current_progress['main'] = 10 + main_progress_percent * 0.9
+                        st.session_state.current_progress['analyzed'] = analyzed_progress_percent
+                        
+                        print(f"📊 Обработано основных статей: {processed}/{total}")
+                        
+                    except Exception as e:
+                        st.session_state.analyzed_results[doi] = {
+                            'doi': doi,
+                            'status': 'failed',
+                            'error': f"Таймаут обработки: {str(e)}"
+                        }
+                        st.session_state.progress_details['main_processed'] += 1
+            
+            successful_count = sum(1 for r in st.session_state.analyzed_results.values() 
+                                 if r.get('status') == 'success')
+            print(f"✅ Основные статьи завершены: {successful_count}/{len(dois)} успешно")
+            
+            # Обновление статистики
+            self.system_stats['total_dois_processed'] += len(dois)
+            self.system_stats['total_successful'] += successful_count
+            self.system_stats['total_failed'] += len(dois) - successful_count
+            
+            # Шаг 2: Сбор и обработка reference DOI
+            all_ref_dois = self.doi_processor.collect_all_references(st.session_state.analyzed_results)
+            self.system_stats['total_ref_dois'] = len(all_ref_dois)
+            
+            if all_ref_dois:
+                print(f"📊 Найдено {len(all_ref_dois)} ссылок")
                 
-                # Используем ThreadPoolExecutor для многопоточной обработки
-                main_status.text(f"🚀 Начинаем многопоточную обработку {len(dois)} DOI...")
+                st.session_state.progress_details['refs_total'] = min(5000, len(all_ref_dois))
+                st.session_state.progress_details['refs_processed'] = 0
                 
-                # Создаем shared state для отслеживания прогресса
-                st.session_state.analyzed_results = {}
+                ref_dois_to_analyze = all_ref_dois[:5000]
+                
+                # Обработка reference DOI в пуле потоков
+                st.session_state.ref_results = {}
                 
                 with ThreadPoolExecutor(max_workers=num_workers) as executor:
-                    # Создаем futures для всех DOI
-                    future_to_doi = {}
-                    for doi in dois:
+                    future_to_ref = {}
+                    for ref_doi in ref_dois_to_analyze:
                         future = executor.submit(
                             self.doi_processor._process_single_doi_wrapper,
-                            doi, "analyzed", None, True, True
+                            ref_doi, "ref", None, True, True
                         )
-                        future_to_doi[future] = doi
+                        future_to_ref[future] = ref_doi
                     
-                    # Обрабатываем результаты по мере готовности
-                    for future in as_completed(future_to_doi):
-                        doi = future_to_doi[future]
+                    for future in as_completed(future_to_ref):
+                        ref_doi = future_to_ref[future]
                         try:
                             result = future.result(timeout=60)
-                            st.session_state.analyzed_results[doi] = result
+                            st.session_state.ref_results[ref_doi] = result
                             
                             if result.get('status') == 'success':
-                                # Обновляем счетчики
                                 self.excel_exporter.update_counters(
                                     result.get('references', []), 
                                     result.get('citations', []),
-                                    "analyzed"
+                                    "ref"
                                 )
                             
-                            # Обновляем прогресс
-                            update_main_progress()
+                            # Обновляем прогресс ссылок
+                            st.session_state.progress_details['refs_processed'] += 1
+                            refs_processed = st.session_state.progress_details['refs_processed']
+                            refs_total = st.session_state.progress_details['refs_total']
+                            
+                            refs_progress_percent = min(100, int(refs_processed / refs_total * 100) if refs_total > 0 else 0)
+                            st.session_state.current_progress['main'] = 70 + refs_progress_percent * 0.2
+                            st.session_state.current_progress['refs'] = refs_progress_percent
+                            
+                            print(f"📎 Ссылки: {refs_processed}/{refs_total}")
                             
                         except Exception as e:
-                            st.session_state.analyzed_results[doi] = {
-                                'doi': doi,
+                            st.session_state.ref_results[ref_doi] = {
+                                'doi': ref_doi,
                                 'status': 'failed',
                                 'error': f"Таймаут обработки: {str(e)}"
                             }
-                            update_main_progress()
+                            st.session_state.progress_details['refs_processed'] += 1
                 
-                main_progress_bar.progress(1.0, text=f"✅ Все основные статьи обработаны!")
+                ref_successful = sum(1 for r in st.session_state.ref_results.values() 
+                                   if r.get('status') == 'success')
+                print(f"📎 Обработано ссылок: {ref_successful} успешно из {len(ref_dois_to_analyze)}")
+            
+            # Шаг 3: Сбор и обработка citation DOI
+            all_cite_dois = self.doi_processor.collect_all_citations(st.session_state.analyzed_results)
+            self.system_stats['total_cite_dois'] = len(all_cite_dois)
+            
+            if all_cite_dois:
+                print(f"📊 Найдено {len(all_cite_dois)} цитирований")
                 
-                successful_count = sum(1 for r in st.session_state.analyzed_results.values() 
-                                     if r.get('status') == 'success')
-                main_status.text(f"✅ Основные статьи завершены: {successful_count}/{len(dois)} успешно")
+                st.session_state.progress_details['cites_total'] = min(5000, len(all_cite_dois))
+                st.session_state.progress_details['cites_processed'] = 0
                 
-                # Обновление статистики
-                self.system_stats['total_dois_processed'] += len(dois)
-                self.system_stats['total_successful'] += successful_count
-                self.system_stats['total_failed'] += len(dois) - successful_count
+                cite_dois_to_analyze = all_cite_dois[:5000]
                 
-                # Шаг 2: Сбор и обработка reference DOI
-                all_ref_dois = self.doi_processor.collect_all_references(st.session_state.analyzed_results)
-                self.system_stats['total_ref_dois'] = len(all_ref_dois)
+                # Обработка citation DOI в пуле потоков
+                st.session_state.citing_results = {}
                 
-                if all_ref_dois:
-                    st.markdown("---")
-                    st.markdown("### 📎 Обработка ссылочных статей")
+                with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                    future_to_cite = {}
+                    for cite_doi in cite_dois_to_analyze:
+                        future = executor.submit(
+                            self.doi_processor._process_single_doi_wrapper,
+                            cite_doi, "citing", None, True, True
+                        )
+                        future_to_cite[future] = cite_doi
                     
-                    # Инициализируем счетчики для ссылочных статей
-                    st.session_state.progress_details['refs_total'] = min(5000, len(all_ref_dois))
-                    st.session_state.progress_details['refs_processed'] = 0
-                    
-                    ref_progress_bar = st.progress(0, text=f"Ссылки: 0/{st.session_state.progress_details['refs_total']}")
-                    ref_status = st.empty()
-                    
-                    ref_dois_to_analyze = all_ref_dois[:5000]
-                    ref_status.text(f"📊 Найдено {len(all_ref_dois)} ссылок, обрабатываем {len(ref_dois_to_analyze)}...")
-                    
-                    # Callback функция для обновления прогресса ссылочных статей
-                    def update_ref_progress():
-                        st.session_state.progress_details['refs_processed'] += 1
-                        processed = st.session_state.progress_details['refs_processed']
-                        total = st.session_state.progress_details['refs_total']
-                        progress_percent = int(processed / total * 100)
-                        
-                        # Обновляем прогресс-бар
-                        ref_progress_bar.progress(progress_percent / 100,
-                                                text=f"Ссылки: {processed}/{total}")
-                        ref_status.text(f"📎 Ссылки: {processed}/{total} обработано")
-                        
-                        self._update_progress('main', 70 + progress_percent * 0.2)
-                        
-                        # Пытаемся обновить интерфейс
+                    for future in as_completed(future_to_cite):
+                        cite_doi = future_to_cite[future]
                         try:
-                            time.sleep(0.01)  # Минимальная задержка для обновления UI
-                        except:
-                            pass
-                    
-                    # Обработка reference DOI в пуле потоков
-                    st.session_state.ref_results = {}
-                    
-                    with ThreadPoolExecutor(max_workers=num_workers) as executor:
-                        future_to_ref = {}
-                        for ref_doi in ref_dois_to_analyze:
-                            future = executor.submit(
-                                self.doi_processor._process_single_doi_wrapper,
-                                ref_doi, "ref", None, True, True
-                            )
-                            future_to_ref[future] = ref_doi
-                        
-                        for future in as_completed(future_to_ref):
-                            ref_doi = future_to_ref[future]
-                            try:
-                                result = future.result(timeout=60)
-                                st.session_state.ref_results[ref_doi] = result
-                                
-                                if result.get('status') == 'success':
-                                    self.excel_exporter.update_counters(
-                                        result.get('references', []), 
-                                        result.get('citations', []),
-                                        "ref"
-                                    )
-                                
-                                update_ref_progress()
-                                
-                            except Exception as e:
-                                st.session_state.ref_results[ref_doi] = {
-                                    'doi': ref_doi,
-                                    'status': 'failed',
-                                    'error': f"Таймаут обработки: {str(e)}"
-                                }
-                                update_ref_progress()
-                    
-                    ref_successful = sum(1 for r in st.session_state.ref_results.values() 
-                                       if r.get('status') == 'success')
-                    ref_progress_bar.progress(1.0, text=f"✅ Ссылки завершены: {ref_successful}/{len(ref_dois_to_analyze)}")
-                    ref_status.text(f"📎 Обработано ссылок: {ref_successful} успешно из {len(ref_dois_to_analyze)}")
+                            result = future.result(timeout=60)
+                            st.session_state.citing_results[cite_doi] = result
+                            
+                            if result.get('status') == 'success':
+                                self.excel_exporter.update_counters(
+                                    result.get('references', []), 
+                                    result.get('citations', []),
+                                    "citing"
+                                )
+                            
+                            # Обновляем прогресс цитирований
+                            st.session_state.progress_details['cites_processed'] += 1
+                            cites_processed = st.session_state.progress_details['cites_processed']
+                            cites_total = st.session_state.progress_details['cites_total']
+                            
+                            cites_progress_percent = min(100, int(cites_processed / cites_total * 100) if cites_total > 0 else 0)
+                            st.session_state.current_progress['main'] = 85 + cites_progress_percent * 0.15
+                            st.session_state.current_progress['cites'] = cites_progress_percent
+                            
+                            print(f"🔗 Цитирования: {cites_processed}/{cites_total}")
+                            
+                        except Exception as e:
+                            st.session_state.citing_results[cite_doi] = {
+                                'doi': cite_doi,
+                                'status': 'failed',
+                                'error': f"Таймаут обработки: {str(e)}"
+                            }
+                            st.session_state.progress_details['cites_processed'] += 1
                 
-                # Шаг 3: Сбор и обработка citation DOI
-                all_cite_dois = self.doi_processor.collect_all_citations(st.session_state.analyzed_results)
-                self.system_stats['total_cite_dois'] = len(all_cite_dois)
+                cite_successful = sum(1 for r in st.session_state.citing_results.values() 
+                                    if r.get('status') == 'success')
+                print(f"🔗 Обработано цитирований: {cite_successful} успешно из {len(cite_dois_to_analyze)}")
+            
+            # Шаг 4: Повторная обработка неудачных DOI
+            failed_stats = self.failed_tracker.get_stats()
+            if failed_stats['total_failed'] > 0:
+                print(f"🔄 Найдено {failed_stats['total_failed']} неудачных DOI, повторяем...")
                 
-                if all_cite_dois:
-                    st.markdown("---")
-                    st.markdown("### 🔗 Обработка цитирующих статей")
+                # Собираем все неудачные DOI
+                retry_dois = list(self.failed_tracker.failed_dois.keys())
+                retry_successful = 0
+                
+                # Обработка повторных попыток в пуле потоков
+                with ThreadPoolExecutor(max_workers=min(num_workers, len(retry_dois))) as executor:
+                    future_to_retry = {}
+                    for doi in retry_dois:
+                        info = self.failed_tracker.failed_dois[doi]
+                        future = executor.submit(
+                            self.doi_processor._process_single_doi_wrapper,
+                            doi, info['source_type'], info.get('original_doi'), True, True
+                        )
+                        future_to_retry[future] = doi
                     
-                    # Инициализируем счетчики для цитирующих статей
-                    st.session_state.progress_details['cites_total'] = min(5000, len(all_cite_dois))
-                    st.session_state.progress_details['cites_processed'] = 0
-                    
-                    cite_progress_bar = st.progress(0, text=f"Цитирования: 0/{st.session_state.progress_details['cites_total']}")
-                    cite_status = st.empty()
-                    
-                    cite_dois_to_analyze = all_cite_dois[:5000]
-                    cite_status.text(f"📊 Найдено {len(all_cite_dois)} цитирований, обрабатываем {len(cite_dois_to_analyze)}...")
-                    
-                    # Callback функция для обновления прогресса цитирующих статей
-                    def update_cite_progress():
-                        st.session_state.progress_details['cites_processed'] += 1
-                        processed = st.session_state.progress_details['cites_processed']
-                        total = st.session_state.progress_details['cites_total']
-                        progress_percent = int(processed / total * 100)
-                        
-                        # Обновляем прогресс-бар
-                        cite_progress_bar.progress(progress_percent / 100,
-                                                 text=f"Цитирования: {processed}/{total}")
-                        cite_status.text(f"🔗 Цитирования: {processed}/{total} обработано")
-                        
-                        self._update_progress('main', 85 + progress_percent * 0.15)
-                        
-                        # Пытаемся обновить интерфейс
+                    for future in as_completed(future_to_retry):
+                        doi = future_to_retry[future]
                         try:
-                            time.sleep(0.01)  # Минимальная задержка для обновления UI
-                        except:
+                            result = future.result(timeout=60)
+                            
+                            if result.get('status') == 'success':
+                                retry_successful += 1
+                                source_type = self.failed_tracker.sources.get(doi, 'retry')
+                                if source_type == 'analyzed':
+                                    st.session_state.analyzed_results[doi] = result
+                                elif source_type == 'ref':
+                                    st.session_state.ref_results[doi] = result
+                                elif source_type == 'citing':
+                                    st.session_state.citing_results[doi] = result
+                            
+                        except Exception:
                             pass
-                    
-                    # Обработка citation DOI в пуле потоков
-                    st.session_state.citing_results = {}
-                    
-                    with ThreadPoolExecutor(max_workers=num_workers) as executor:
-                        future_to_cite = {}
-                        for cite_doi in cite_dois_to_analyze:
-                            future = executor.submit(
-                                self.doi_processor._process_single_doi_wrapper,
-                                cite_doi, "citing", None, True, True
-                            )
-                            future_to_cite[future] = cite_doi
-                        
-                        for future in as_completed(future_to_cite):
-                            cite_doi = future_to_cite[future]
-                            try:
-                                result = future.result(timeout=60)
-                                st.session_state.citing_results[cite_doi] = result
-                                
-                                if result.get('status') == 'success':
-                                    self.excel_exporter.update_counters(
-                                        result.get('references', []), 
-                                        result.get('citations', []),
-                                        "citing"
-                                    )
-                                
-                                update_cite_progress()
-                                
-                            except Exception as e:
-                                st.session_state.citing_results[cite_doi] = {
-                                    'doi': cite_doi,
-                                    'status': 'failed',
-                                    'error': f"Таймаут обработки: {str(e)}"
-                                }
-                                update_cite_progress()
-                    
-                    cite_successful = sum(1 for r in st.session_state.citing_results.values() 
-                                        if r.get('status') == 'success')
-                    cite_progress_bar.progress(1.0, text=f"✅ Цитирования завершены: {cite_successful}/{len(cite_dois_to_analyze)}")
-                    cite_status.text(f"🔗 Обработано цитирований: {cite_successful} успешно из {len(cite_dois_to_analyze)}")
                 
-                # Шаг 4: Повторная обработка неудачных DOI
-                failed_stats = self.failed_tracker.get_stats()
-                if failed_stats['total_failed'] > 0:
-                    st.markdown("---")
-                    st.markdown("### 🔄 Повторная обработка неудачных DOI")
-                    retry_status = st.empty()
-                    retry_status.text(f"🔄 Найдено {failed_stats['total_failed']} неудачных DOI, повторяем...")
-                    
-                    # Собираем все неудачные DOI
-                    retry_dois = list(self.failed_tracker.failed_dois.keys())
-                    retry_successful = 0
-                    
-                    # Обработка повторных попыток в пуле потоков
-                    with ThreadPoolExecutor(max_workers=min(num_workers, len(retry_dois))) as executor:
-                        future_to_retry = {}
-                        for doi in retry_dois:
-                            info = self.failed_tracker.failed_dois[doi]
-                            future = executor.submit(
-                                self.doi_processor._process_single_doi_wrapper,
-                                doi, info['source_type'], info.get('original_doi'), True, True
-                            )
-                            future_to_retry[future] = doi
-                        
-                        for future in as_completed(future_to_retry):
-                            doi = future_to_retry[future]
-                            try:
-                                result = future.result(timeout=60)
-                                
-                                if result.get('status') == 'success':
-                                    retry_successful += 1
-                                    source_type = self.failed_tracker.sources.get(doi, 'retry')
-                                    if source_type == 'analyzed':
-                                        st.session_state.analyzed_results[doi] = result
-                                    elif source_type == 'ref':
-                                        st.session_state.ref_results[doi] = result
-                                    elif source_type == 'citing':
-                                        st.session_state.citing_results[doi] = result
-                                
-                            except Exception:
-                                pass
-                    
-                    retry_status.text(f"✅ Повторно обработано: {retry_successful}/{len(retry_dois)}")
-                
-                # Финальный прогресс
-                self._update_progress('main', 100)
-                self._update_progress('analyzed', 100)
-                
-                # Итоговое сообщение
-                st.success(f"🎉 Обработка завершена! Всего успешно: {successful_count} основных статей")
-                if all_ref_dois:
-                    ref_successful = sum(1 for r in st.session_state.ref_results.values() 
-                                       if r.get('status') == 'success')
-                    st.info(f"📎 Ссылочных статей: {ref_successful} успешно")
-                if all_cite_dois:
-                    cite_successful = sum(1 for r in st.session_state.citing_results.values() 
-                                        if r.get('status') == 'success')
-                    st.info(f"🔗 Цитирующих статей: {cite_successful} успешно")
-                
+                print(f"✅ Повторно обработано: {retry_successful}/{len(retry_dois)}")
+            
+            # Финальный прогресс
+            st.session_state.current_progress['main'] = 100
+            st.session_state.current_progress['analyzed'] = 100
+            
+            print(f"🎉 Обработка завершена! Всего успешно: {successful_count} основных статей")
+            if all_ref_dois:
+                ref_successful = sum(1 for r in st.session_state.ref_results.values() 
+                                   if r.get('status') == 'success')
+                print(f"📎 Ссылочных статей: {ref_successful} успешно")
+            if all_cite_dois:
+                cite_successful = sum(1 for r in st.session_state.citing_results.values() 
+                                    if r.get('status') == 'success')
+                print(f"🔗 Цитирующих статей: {cite_successful} успешно")
+            
         except Exception as e:
-            st.error(f"❌ Ошибка обработки: {str(e)}")
+            print(f"❌ Ошибка обработки: {str(e)}")
             import traceback
-            st.code(traceback.format_exc())
+            print(traceback.format_exc())
         finally:
             # Сбрасываем флаг обработки
             st.session_state.processing_active = False
@@ -5907,7 +5838,7 @@ class ArticleAnalyzerSystem:
                     use_container_width=True,
                     disabled=not st.session_state.analyzed_results or st.session_state.get('processing_active', False)
                 )
-            
+
             if process_btn and doi_input:
                 dois = self._parse_dois(doi_input)
                 
@@ -5923,34 +5854,27 @@ class ArticleAnalyzerSystem:
                         # Устанавливаем флаг обработки
                         st.session_state.processing_active = True
                         
-                        # Запускаем многопоточную обработку
+                        # Запускаем обработку СИНХРОННО
                         try:
-                            # Создаем отдельный поток для обработки
-                            import threading
-                            from streamlit.runtime.scriptrunner import get_script_run_ctx, add_script_run_ctx
+                            # Используем st.empty() для создания контейнера прогресса
+                            progress_container = st.empty()
                             
-                            ctx = get_script_run_ctx()
+                            with progress_container.container():
+                                st.markdown("### 📈 Прогресс обработки")
+                                self._display_progress_bars()
                             
-                            def run_with_context():
-                                if ctx:
-                                    import threading
-                                    threading.current_thread()._script_run_ctx = ctx
-                                self._process_dois_background(dois, num_workers, analysis_types)
+                            # Запускаем обработку - В ЭТОМ ЖЕ ПОТОКЕ
+                            self._process_dois_background(dois, num_workers, analysis_types)
                             
-                            thread = threading.Thread(target=run_with_context)
-                            thread.daemon = True
+                            # Обновляем контейнер прогресса
+                            with progress_container.container():
+                                st.markdown("### 📈 Прогресс обработки (завершено)")
+                                self._display_progress_bars()
                             
-                            # Добавляем контекст выполнения к потоку
-                            if ctx:
-                                add_script_run_ctx(thread, ctx)
-                            
-                            thread.start()
-                            
-                            st.success(f"✅ Обработка {len(dois)} DOI начата...")
-                            st.rerun()
+                            st.success(f"✅ Обработка {len(dois)} DOI завершена!")
                             
                         except Exception as e:
-                            st.error(f"❌ Ошибка запуска обработки: {str(e)}")
+                            st.error(f"❌ Ошибка обработки: {str(e)}")
                             st.session_state.processing_active = False
             
             if export_btn and st.session_state.analyzed_results and not st.session_state.get('processing_active', False):
@@ -6113,4 +6037,5 @@ if __name__ == "__main__":
     except Exception as e:
         st.error(f"❌ Ошибка запуска системы: {str(e)}")
         st.code(traceback.format_exc())
+
 
