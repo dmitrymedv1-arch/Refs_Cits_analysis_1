@@ -4999,7 +4999,7 @@ class ArticleAnalyzerSystem:
         self.system_stats = st.session_state.system_stats
         
         self._setup_streamlit_interface()
-     
+        
     def _init_session_state(self):
         """Инициализация всех переменных session_state"""
         # Инициализация кэша и менеджеров
@@ -5067,7 +5067,7 @@ class ArticleAnalyzerSystem:
         if 'citing_results' not in st.session_state:
             st.session_state.citing_results = {}
         
-        # ВОЗВРАЩАЕМ переменную processing_active
+        # Инициализация состояния прогресса
         if 'processing_active' not in st.session_state:
             st.session_state.processing_active = False
         
@@ -5079,6 +5079,16 @@ class ArticleAnalyzerSystem:
                 'cites': 0,
                 'insights': 0,
                 'excel': 0
+            }
+        
+        if 'progress_details' not in st.session_state:
+            st.session_state.progress_details = {
+                'main_processed': 0,
+                'main_total': 0,
+                'refs_processed': 0,
+                'refs_total': 0,
+                'cites_processed': 0,
+                'cites_total': 0
             }
         
         if 'system_stats' not in st.session_state:
@@ -5211,26 +5221,131 @@ class ArticleAnalyzerSystem:
         """Отображение прогресс-баров"""
         st.markdown("### 📈 Прогресс обработки")
         
-        col1, col2, col3 = st.columns(3)
+        # Создаем контейнер для всех прогресс-баров
+        progress_container = st.container()
         
-        with col1:
-            st.metric("Общий прогресс", f"{st.session_state.current_progress['main']}%")
-            st.progress(st.session_state.current_progress['main'] / 100)
-        
-        with col2:
-            st.metric("Анализ статей", f"{st.session_state.current_progress['analyzed']}%")
-            st.progress(st.session_state.current_progress['analyzed'] / 100)
-        
-        with col3:
-            st.metric("Экспорт Excel", f"{st.session_state.current_progress['excel']}%")
-            st.progress(st.session_state.current_progress['excel'] / 100)
-        
-        # Дополнительная информация о состоянии
-        if st.session_state.get('processing_active', False):
-            if st.session_state.current_progress['analyzed'] < 100:
-                st.info("🔄 Идет обработка основных статей...")
-            elif st.session_state.current_progress['main'] < 100:
-                st.info("🔄 Идет обработка ссылок и цитирований...")
+        with progress_container:
+            # Проверяем наличие данных о прогрессе
+            has_progress_details = 'progress_details' in st.session_state
+            
+            # Основной прогресс
+            st.markdown("#### 🎯 Общий прогресс")
+            col_main1, col_main2 = st.columns([3, 1])
+            with col_main1:
+                overall_progress = st.session_state.current_progress['main']
+                st.progress(overall_progress / 100)
+            with col_main2:
+                st.metric("Общий", f"{overall_progress}%")
+            
+            st.markdown("---")
+            
+            # Раздельные прогресс-бары для каждого типа обработки
+            st.markdown("#### 📊 Детальный прогресс по типам статей")
+            
+            # 1. Основные статьи
+            st.markdown("##### 📚 Основные статьи")
+            if has_progress_details:
+                main_processed = st.session_state.progress_details.get('main_processed', 0)
+                main_total = st.session_state.progress_details.get('main_total', 0)
+                
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    if main_total > 0:
+                        main_progress = min(100, int(main_processed / main_total * 100))
+                        st.progress(main_progress / 100)
+                    else:
+                        st.progress(0)
+                with col2:
+                    if main_total > 0:
+                        st.metric("Обработано", f"{main_processed}/{main_total}", 
+                                 delta=f"{min(100, int(main_processed / main_total * 100))}%")
+                    else:
+                        st.metric("Обработано", "0/0")
+            else:
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    analyzed_progress = st.session_state.current_progress['analyzed']
+                    st.progress(analyzed_progress / 100)
+                with col2:
+                    st.metric("Анализ", f"{analyzed_progress}%")
+            
+            # 2. Ссылочные статьи (если есть данные)
+            if has_progress_details and st.session_state.progress_details.get('refs_total', 0) > 0:
+                st.markdown("##### 📎 Ссылочные статьи")
+                refs_processed = st.session_state.progress_details.get('refs_processed', 0)
+                refs_total = st.session_state.progress_details.get('refs_total', 0)
+                
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    if refs_total > 0:
+                        refs_progress = min(100, int(refs_processed / refs_total * 100))
+                        st.progress(refs_progress / 100)
+                    else:
+                        st.progress(0)
+                with col2:
+                    if refs_total > 0:
+                        st.metric("Ссылки", f"{refs_processed}/{refs_total}", 
+                                 delta=f"{min(100, int(refs_processed / refs_total * 100))}%")
+                    else:
+                        st.metric("Ссылки", "0/0")
+            
+            # 3. Цитирующие статьи (если есть данные)
+            if has_progress_details and st.session_state.progress_details.get('cites_total', 0) > 0:
+                st.markdown("##### 🔗 Цитирующие статьи")
+                cites_processed = st.session_state.progress_details.get('cites_processed', 0)
+                cites_total = st.session_state.progress_details.get('cites_total', 0)
+                
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    if cites_total > 0:
+                        cites_progress = min(100, int(cites_processed / cites_total * 100))
+                        st.progress(cites_progress / 100)
+                    else:
+                        st.progress(0)
+                with col2:
+                    if cites_total > 0:
+                        st.metric("Цитирования", f"{cites_processed}/{cites_total}", 
+                                 delta=f"{min(100, int(cites_processed / cites_total * 100))}%")
+                    else:
+                        st.metric("Цитирования", "0/0")
+            
+            # 4. Экспорт в Excel
+            st.markdown("---")
+            st.markdown("##### 💾 Экспорт в Excel")
+            col_exp1, col_exp2 = st.columns([3, 1])
+            with col_exp1:
+                excel_progress = st.session_state.current_progress['excel']
+                st.progress(excel_progress / 100)
+            with col_exp2:
+                st.metric("Экспорт", f"{excel_progress}%")
+            
+            # Дополнительная информация о состоянии
+            if st.session_state.get('processing_active', False):
+                # Определяем текущий этап обработки на основе прогресса
+                if has_progress_details:
+                    main_total = st.session_state.progress_details.get('main_total', 0)
+                    main_processed = st.session_state.progress_details.get('main_processed', 0)
+                    
+                    if main_total > 0 and main_processed < main_total:
+                        st.info("🔄 Идет обработка основных статей...")
+                    elif st.session_state.progress_details.get('refs_total', 0) > 0 and \
+                         st.session_state.progress_details.get('refs_processed', 0) < \
+                         st.session_state.progress_details.get('refs_total', 0):
+                        st.info("🔄 Идет обработка ссылочных статей...")
+                    elif st.session_state.progress_details.get('cites_total', 0) > 0 and \
+                         st.session_state.progress_details.get('cites_processed', 0) < \
+                         st.session_state.progress_details.get('cites_total', 0):
+                        st.info("🔄 Идет обработка цитирующих статей...")
+                    else:
+                        st.info("🔄 Завершение обработки...")
+                else:
+                    # Резервный вариант, если нет детальных данных
+                    if st.session_state.current_progress['analyzed'] < 100:
+                        st.info("🔄 Идет обработка основных статей...")
+                    elif st.session_state.current_progress['main'] < 100:
+                        st.info("🔄 Идет обработка ссылок и цитирований...")
+                    else:
+                        st.info("🔄 Завершение обработки...")
     
     def _update_progress(self, stage: str, value: float):
         """Обновление прогресса с автоматическим обновлением интерфейса"""
@@ -5247,7 +5362,7 @@ class ArticleAnalyzerSystem:
                     st.session_state[f'last_update_{stage}'] = time.time()
         except:
             pass  # Игнорируем ошибки обновления из фонового потока
-              
+
     def _process_dois_background(self, dois: List[str], num_workers: int, analysis_types: Dict[str, bool]):
         """Фоновая обработка DOI с отображением прогресса"""
         try:
@@ -5255,32 +5370,55 @@ class ArticleAnalyzerSystem:
             progress_container = st.container()
             
             with progress_container:
+                # Инициализация счетчиков прогресса в session_state
+                if 'progress_details' not in st.session_state:
+                    st.session_state.progress_details = {
+                        'main_processed': 0,
+                        'main_total': 0,
+                        'refs_processed': 0,
+                        'refs_total': 0,
+                        'cites_processed': 0,
+                        'cites_total': 0
+                    }
+                
                 # Шаг 1: Обработка основных DOI
                 st.markdown("### 📚 Обработка основных статей")
-                main_progress_bar = st.progress(0, text="Подготовка к обработке...")
+                
+                # Инициализируем счетчики для основных статей
+                st.session_state.progress_details['main_total'] = len(dois)
+                st.session_state.progress_details['main_processed'] = 0
+                
+                main_progress_bar = st.progress(0, text=f"Обработано 0/{len(dois)} статей")
                 main_status = st.empty()
                 
                 self._update_progress('main', 10)
                 self._update_progress('analyzed', 0)
                 
+                # Callback функция для обновления прогресса основных статей
+                def update_main_progress():
+                    st.session_state.progress_details['main_processed'] += 1
+                    processed = st.session_state.progress_details['main_processed']
+                    total = st.session_state.progress_details['main_total']
+                    progress_percent = int(processed / total * 90)
+                    
+                    # Обновляем прогресс-бар
+                    main_progress_bar.progress(progress_percent / 100, 
+                                             text=f"Обработано {processed}/{total} статей")
+                    main_status.text(f"📊 Прогресс: {processed}/{total} статей")
+                    
+                    self._update_progress('analyzed', progress_percent)
+                    self._update_progress('main', 10 + progress_percent * 0.9)
+                    
+                    # Пытаемся обновить интерфейс
+                    try:
+                        time.sleep(0.01)  # Минимальная задержка для обновления UI
+                    except:
+                        pass
+                
                 # Используем ThreadPoolExecutor для многопоточной обработки
                 main_status.text(f"🚀 Начинаем многопоточную обработку {len(dois)} DOI...")
                 
                 # Создаем shared state для отслеживания прогресса
-                processed_count = 0
-                total_count = len(dois)
-                
-                # Функция обратного вызова для обновления прогресса
-                def update_main_progress():
-                    nonlocal processed_count
-                    processed_count += 1
-                    progress_percent = int(processed_count / total_count * 90)
-                    main_progress_bar.progress(progress_percent / 100, 
-                                             text=f"Обработано {processed_count}/{total_count} статей")
-                    self._update_progress('analyzed', progress_percent)
-                    self._update_progress('main', 10 + progress_percent * 0.9)
-                
-                # Обработка в пуле потоков
                 st.session_state.analyzed_results = {}
                 
                 with ThreadPoolExecutor(max_workers=num_workers) as executor:
@@ -5319,16 +5457,16 @@ class ArticleAnalyzerSystem:
                             }
                             update_main_progress()
                 
-                main_progress_bar.progress(1.0, text="✅ Основные статьи обработаны!")
+                main_progress_bar.progress(1.0, text=f"✅ Все основные статьи обработаны!")
                 
                 successful_count = sum(1 for r in st.session_state.analyzed_results.values() 
                                      if r.get('status') == 'success')
-                main_status.text(f"✅ Успешно: {successful_count}/{total_count}")
+                main_status.text(f"✅ Основные статьи завершены: {successful_count}/{len(dois)} успешно")
                 
                 # Обновление статистики
-                self.system_stats['total_dois_processed'] += total_count
+                self.system_stats['total_dois_processed'] += len(dois)
                 self.system_stats['total_successful'] += successful_count
-                self.system_stats['total_failed'] += total_count - successful_count
+                self.system_stats['total_failed'] += len(dois) - successful_count
                 
                 # Шаг 2: Сбор и обработка reference DOI
                 all_ref_dois = self.doi_processor.collect_all_references(st.session_state.analyzed_results)
@@ -5337,23 +5475,36 @@ class ArticleAnalyzerSystem:
                 if all_ref_dois:
                     st.markdown("---")
                     st.markdown("### 📎 Обработка ссылочных статей")
-                    ref_progress_bar = st.progress(0, text="Сбор ссылок...")
+                    
+                    # Инициализируем счетчики для ссылочных статей
+                    st.session_state.progress_details['refs_total'] = min(5000, len(all_ref_dois))
+                    st.session_state.progress_details['refs_processed'] = 0
+                    
+                    ref_progress_bar = st.progress(0, text=f"Ссылки: 0/{st.session_state.progress_details['refs_total']}")
                     ref_status = st.empty()
                     
                     ref_dois_to_analyze = all_ref_dois[:5000]
                     ref_status.text(f"📊 Найдено {len(all_ref_dois)} ссылок, обрабатываем {len(ref_dois_to_analyze)}...")
                     
-                    # Создаем shared state для отслеживания прогресса ссылок
-                    ref_processed_count = 0
-                    ref_total_count = len(ref_dois_to_analyze)
-                    
+                    # Callback функция для обновления прогресса ссылочных статей
                     def update_ref_progress():
-                        nonlocal ref_processed_count
-                        ref_processed_count += 1
-                        progress_percent = int(ref_processed_count / ref_total_count * 100)
+                        st.session_state.progress_details['refs_processed'] += 1
+                        processed = st.session_state.progress_details['refs_processed']
+                        total = st.session_state.progress_details['refs_total']
+                        progress_percent = int(processed / total * 100)
+                        
+                        # Обновляем прогресс-бар
                         ref_progress_bar.progress(progress_percent / 100,
-                                                text=f"Ссылки: {ref_processed_count}/{ref_total_count}")
+                                                text=f"Ссылки: {processed}/{total}")
+                        ref_status.text(f"📎 Ссылки: {processed}/{total} обработано")
+                        
                         self._update_progress('main', 70 + progress_percent * 0.2)
+                        
+                        # Пытаемся обновить интерфейс
+                        try:
+                            time.sleep(0.01)  # Минимальная задержка для обновления UI
+                        except:
+                            pass
                     
                     # Обработка reference DOI в пуле потоков
                     st.session_state.ref_results = {}
@@ -5392,8 +5543,8 @@ class ArticleAnalyzerSystem:
                     
                     ref_successful = sum(1 for r in st.session_state.ref_results.values() 
                                        if r.get('status') == 'success')
-                    ref_progress_bar.progress(1.0, text=f"✅ Ссылки: {ref_successful}/{ref_total_count}")
-                    ref_status.text(f"📎 Обработано ссылок: {ref_successful} успешно")
+                    ref_progress_bar.progress(1.0, text=f"✅ Ссылки завершены: {ref_successful}/{len(ref_dois_to_analyze)}")
+                    ref_status.text(f"📎 Обработано ссылок: {ref_successful} успешно из {len(ref_dois_to_analyze)}")
                 
                 # Шаг 3: Сбор и обработка citation DOI
                 all_cite_dois = self.doi_processor.collect_all_citations(st.session_state.analyzed_results)
@@ -5402,23 +5553,36 @@ class ArticleAnalyzerSystem:
                 if all_cite_dois:
                     st.markdown("---")
                     st.markdown("### 🔗 Обработка цитирующих статей")
-                    cite_progress_bar = st.progress(0, text="Сбор цитирований...")
+                    
+                    # Инициализируем счетчики для цитирующих статей
+                    st.session_state.progress_details['cites_total'] = min(5000, len(all_cite_dois))
+                    st.session_state.progress_details['cites_processed'] = 0
+                    
+                    cite_progress_bar = st.progress(0, text=f"Цитирования: 0/{st.session_state.progress_details['cites_total']}")
                     cite_status = st.empty()
                     
                     cite_dois_to_analyze = all_cite_dois[:5000]
                     cite_status.text(f"📊 Найдено {len(all_cite_dois)} цитирований, обрабатываем {len(cite_dois_to_analyze)}...")
                     
-                    # Создаем shared state для отслеживания прогресса цитирований
-                    cite_processed_count = 0
-                    cite_total_count = len(cite_dois_to_analyze)
-                    
+                    # Callback функция для обновления прогресса цитирующих статей
                     def update_cite_progress():
-                        nonlocal cite_processed_count
-                        cite_processed_count += 1
-                        progress_percent = int(cite_processed_count / cite_total_count * 100)
+                        st.session_state.progress_details['cites_processed'] += 1
+                        processed = st.session_state.progress_details['cites_processed']
+                        total = st.session_state.progress_details['cites_total']
+                        progress_percent = int(processed / total * 100)
+                        
+                        # Обновляем прогресс-бар
                         cite_progress_bar.progress(progress_percent / 100,
-                                                 text=f"Цитирования: {cite_processed_count}/{cite_total_count}")
+                                                 text=f"Цитирования: {processed}/{total}")
+                        cite_status.text(f"🔗 Цитирования: {processed}/{total} обработано")
+                        
                         self._update_progress('main', 85 + progress_percent * 0.15)
+                        
+                        # Пытаемся обновить интерфейс
+                        try:
+                            time.sleep(0.01)  # Минимальная задержка для обновления UI
+                        except:
+                            pass
                     
                     # Обработка citation DOI в пуле потоков
                     st.session_state.citing_results = {}
@@ -5457,8 +5621,8 @@ class ArticleAnalyzerSystem:
                     
                     cite_successful = sum(1 for r in st.session_state.citing_results.values() 
                                         if r.get('status') == 'success')
-                    cite_progress_bar.progress(1.0, text=f"✅ Цитирования: {cite_successful}/{cite_total_count}")
-                    cite_status.text(f"🔗 Обработано цитирований: {cite_successful} успешно")
+                    cite_progress_bar.progress(1.0, text=f"✅ Цитирования завершены: {cite_successful}/{len(cite_dois_to_analyze)}")
+                    cite_status.text(f"🔗 Обработано цитирований: {cite_successful} успешно из {len(cite_dois_to_analyze)}")
                 
                 # Шаг 4: Повторная обработка неудачных DOI
                 failed_stats = self.failed_tracker.get_stats()
@@ -5507,7 +5671,16 @@ class ArticleAnalyzerSystem:
                 self._update_progress('main', 100)
                 self._update_progress('analyzed', 100)
                 
+                # Итоговое сообщение
                 st.success(f"🎉 Обработка завершена! Всего успешно: {successful_count} основных статей")
+                if all_ref_dois:
+                    ref_successful = sum(1 for r in st.session_state.ref_results.values() 
+                                       if r.get('status') == 'success')
+                    st.info(f"📎 Ссылочных статей: {ref_successful} успешно")
+                if all_cite_dois:
+                    cite_successful = sum(1 for r in st.session_state.citing_results.values() 
+                                        if r.get('status') == 'success')
+                    st.info(f"🔗 Цитирующих статей: {cite_successful} успешно")
                 
         except Exception as e:
             st.error(f"❌ Ошибка обработки: {str(e)}")
@@ -5940,3 +6113,4 @@ if __name__ == "__main__":
     except Exception as e:
         st.error(f"❌ Ошибка запуска системы: {str(e)}")
         st.code(traceback.format_exc())
+
