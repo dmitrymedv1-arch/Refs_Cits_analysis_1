@@ -35,6 +35,7 @@ import tempfile
 import base64
 from io import BytesIO
 import joblib
+from fuzzywuzzy import fuzz
 
 # Настройка страницы Streamlit
 st.set_page_config(
@@ -216,6 +217,14 @@ class SmartCacheManager:
             'medium_insights': {},
             'deep_analysis': {},
             'citing_relationships': {}
+        }
+
+        # Кэш для терминологического анализа
+        self.terminology_cache = {
+            'term_networks': {},
+            'emerging_terms': {},
+            'convergence_zones': {},
+            'frontier_predictions': {}
         }
 
         if not os.path.exists(cache_dir):
@@ -483,6 +492,9 @@ class SmartCacheManager:
             self.ethical_analysis_cache = {
                 'quick_checks': {}, 'medium_insights': {}, 'deep_analysis': {}, 'citing_relationships': {}
             }
+            self.terminology_cache = {
+                'term_networks': {}, 'emerging_terms': {}, 'convergence_zones': {}, 'frontier_predictions': {}
+            }
             self.stats = {k: 0 for k in self.stats.keys()}
 
             st.success("✅ Кэш полностью очищен")
@@ -550,6 +562,28 @@ class SmartCacheManager:
         else:
             for analysis in self.ethical_analysis_cache:
                 self.ethical_analysis_cache[analysis].clear()
+
+    # Методы для кэширования терминологического анализа
+    def get_terminology_cache(self, cache_type: str, key: str) -> Optional[Dict]:
+        if cache_type in self.terminology_cache and key in self.terminology_cache[cache_type]:
+            return self.terminology_cache[cache_type][key]
+        return None
+
+    def set_terminology_cache(self, cache_type: str, key: str, data: Dict):
+        if cache_type not in self.terminology_cache:
+            self.terminology_cache[cache_type] = {}
+        self.terminology_cache[cache_type][key] = {
+            'data': data,
+            'timestamp': time.time()
+        }
+
+    def clear_terminology_cache(self, cache_type: str = None):
+        if cache_type:
+            if cache_type in self.terminology_cache:
+                self.terminology_cache[cache_type].clear()
+        else:
+            for cache in self.terminology_cache:
+                self.terminology_cache[cache].clear()
 
 # ============================================================================
 # 🚀 КЛАСС АДАПТИВНЫХ ЗАДЕРЖЕК
@@ -1752,6 +1786,8 @@ class OptimizedDOIProcessor:
         self.doi_author_map = defaultdict(list)
         self.doi_affiliation_map = defaultdict(set)
 
+        self.terminology_analyzer = None  # Будет установлен позже
+
         self.stats = {
             'total_processed': 0,
             'successful': 0,
@@ -1759,6 +1795,10 @@ class OptimizedDOIProcessor:
             'cached_hits': 0,
             'api_calls': 0
         }
+
+    def set_terminology_analyzer(self, terminology_analyzer):
+        """Устанавливает анализатор терминологии"""
+        self.terminology_analyzer = terminology_analyzer
 
     def process_doi_batch(self, dois: List[str], source_type: str = "analyzed",
                          original_doi: str = None, fetch_refs: bool = True,
@@ -1945,6 +1985,22 @@ class OptimizedDOIProcessor:
         result = self.data_processor.extract_article_info(
             crossref_data, openalex_data, doi, references, citations
         )
+
+        # После успешной обработки статьи - извлечение терминов
+        if result.get('status') == 'success' and self.terminology_analyzer:
+            title = result['publication_info'].get('title', '')
+            year = result['publication_info'].get('year', '')
+            if title and year:
+                # Извлечение терминов из названия
+                terms = self.terminology_analyzer.extract_terms_from_title(title)
+                if terms:
+                    # Передача терминов в анализатор
+                    self.terminology_analyzer.process_terms(
+                        doi=doi,
+                        terms=terms,
+                        year=year,
+                        article_type=source_type
+                    )
 
         if result.get('status') == 'success':
             for author in result.get('authors', []):
@@ -3874,6 +3930,861 @@ class HierarchicalDataAnalyzer:
         return "; ".join(notes)
 
 # ============================================================================
+# 🧠 КЛАСС ТЕРМИНОЛОГИЧЕСКОГО АНАЛИЗАТОРА (НОВЫЙ)
+# ============================================================================
+
+class TerminologyAnalyzer:
+    def __init__(self, cache_manager: SmartCacheManager, data_processor: DataProcessor):
+        self.cache = cache_manager
+        self.processor = data_processor
+        
+        # Структуры для хранения терминологических данных
+        self.term_frequency = defaultdict(lambda: defaultdict(int))  # термин -> год -> частота
+        self.term_cooccurrence = defaultdict(set)  # термин -> соседние термины
+        self.term_articles = defaultdict(list)  # термин -> список DOI статей
+        
+        # Сетевые структуры для терминов
+        self.term_network = nx.Graph()
+        
+        # Стоп-слова для фильтрации
+        self.stop_words = set([
+            'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
+            'of', 'with', 'by', 'from', 'as', 'is', 'are', 'was', 'were', 'be',
+            'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will',
+            'would', 'should', 'could', 'can', 'may', 'might', 'must', 'about',
+            'against', 'between', 'into', 'through', 'during', 'before', 'after',
+            'above', 'below', 'under', 'over', 'again', 'further', 'then', 'once',
+            'here', 'there', 'when', 'where', 'why', 'how', 'all', 'any', 'both',
+            'each', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor',
+            'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very', 's', 't',
+            'can', 'will', 'just', 'don', 'should', 'now', 'using', 'based',
+            'study', 'analysis', 'research', 'paper', 'article', 'journal',
+            'approach', 'method', 'framework', 'model', 'system', 'application',
+            'evaluation', 'experiment', 'result', 'conclusion', 'discussion'
+        ])
+        
+        # Статистика терминов
+        self.term_stats = defaultdict(lambda: {
+            'first_year': None,
+            'last_year': None,
+            'total_count': 0,
+            'yearly_growth': {},
+            'related_terms': set(),
+            'article_types': set()
+        })
+        
+        # Предварительно вычисленные результаты
+        self.cached_results = {}
+
+    def extract_terms_from_title(self, title: str) -> List[str]:
+        """Извлекает термины из заголовка статьи"""
+        if not title:
+            return []
+        
+        # Очистка заголовка
+        clean_title = re.sub(r'[^\w\s-]', ' ', title.lower())
+        words = clean_title.split()
+        
+        # Фильтрация стоп-слов
+        filtered_words = [w for w in words if w not in self.stop_words and len(w) > 2]
+        
+        # Извлечение биграмм и триграмм
+        terms = []
+        
+        # Добавляем отдельные слова (если они не слишком короткие)
+        for word in filtered_words:
+            if len(word) > 3 and not word.isdigit():
+                terms.append(word)
+        
+        # Добавляем биграммы
+        if len(filtered_words) >= 2:
+            for i in range(len(filtered_words) - 1):
+                bigram = f"{filtered_words[i]} {filtered_words[i+1]}"
+                terms.append(bigram)
+        
+        # Добавляем триграммы
+        if len(filtered_words) >= 3:
+            for i in range(len(filtered_words) - 2):
+                trigram = f"{filtered_words[i]} {filtered_words[i+1]} {filtered_words[i+2]}"
+                terms.append(trigram)
+        
+        # Убираем дубликаты
+        return list(set(terms))
+
+    def process_terms(self, doi: str, terms: List[str], year: str, article_type: str = "analyzed"):
+        """Обрабатывает термины из статьи"""
+        if not terms or not year:
+            return
+        
+        try:
+            year_int = int(year)
+        except:
+            return
+        
+        for term in terms:
+            # Обновляем частоту термина
+            self.term_frequency[term][year_int] += 1
+            
+            # Обновляем статистику термина
+            term_info = self.term_stats[term]
+            if term_info['first_year'] is None or year_int < term_info['first_year']:
+                term_info['first_year'] = year_int
+            if term_info['last_year'] is None or year_int > term_info['last_year']:
+                term_info['last_year'] = year_int
+            
+            term_info['total_count'] += 1
+            term_info['article_types'].add(article_type)
+            
+            # Добавляем DOI статьи
+            if doi not in self.term_articles[term]:
+                self.term_articles[term].append(doi)
+            
+            # Обновляем со-встречаемость терминов
+            for other_term in terms:
+                if term != other_term:
+                    self.term_cooccurrence[term].add(other_term)
+                    term_info['related_terms'].add(other_term)
+
+    def build_term_network(self):
+        """Строит граф связей между терминами"""
+        for term, co_terms in self.term_cooccurrence.items():
+            for co_term in co_terms:
+                # Вес связи = количество совместных появлений
+                weight = len(set(self.term_articles[term]) & set(self.term_articles[co_term]))
+                if weight > 0:
+                    self.term_network.add_edge(term, co_term, weight=weight)
+
+    def detect_emerging_terms(self, window_years: int = 3) -> List[Dict]:
+        """Обнаружение терминов с экспоненциальным ростом"""
+        cache_key = f"emerging_terms_{window_years}"
+        cached = self.cache.get_terminology_cache('emerging_terms', cache_key)
+        if cached is not None:
+            return cached
+        
+        emerging = []
+        current_year = datetime.now().year
+        
+        for term, year_counts in self.term_frequency.items():
+            if len(year_counts) < 2:
+                continue
+            
+            # Получаем данные за последние window_years лет
+            recent_years = sorted([y for y in year_counts.keys() if y >= current_year - window_years])
+            if len(recent_years) < 2:
+                continue
+            
+            recent_counts = [year_counts[y] for y in recent_years]
+            
+            # Проверяем экспоненциальный рост
+            if self._has_exponential_growth(recent_counts):
+                growth_rate = self._calculate_growth_rate(recent_counts)
+                first_year = min(year_counts.keys())
+                
+                # Рассчитываем метрики
+                total_articles = len(self.term_articles[term])
+                avg_articles_per_year = sum(year_counts.values()) / len(year_counts)
+                
+                # Рассчитываем разнообразие типов статей
+                type_diversity = len(self.term_stats[term]['article_types'])
+                
+                emerging.append({
+                    'Term': term,
+                    'First_Year': first_year,
+                    'Total_Articles': total_articles,
+                    'Avg_Articles_Per_Year': round(avg_articles_per_year, 2),
+                    'Recent_Growth_Rate': round(growth_rate * 100, 1),  # в процентах
+                    'Growth_Factor': round(self._calculate_growth_factor(recent_counts), 2),
+                    'Type_Diversity': type_diversity,
+                    'Network_Centrality': self._calculate_term_centrality(term),
+                    'Maturity_Level': self._determine_maturity_level(year_counts),
+                    'Predicted_Peak_Year': self._predict_peak_year(year_counts),
+                    'Confidence_Score': round(self._calculate_confidence_score(term, year_counts), 1)
+                })
+        
+        # Сортируем по темпу роста
+        emerging_sorted = sorted(emerging, key=lambda x: x['Recent_Growth_Rate'], reverse=True)
+        
+        # Кэшируем результаты
+        self.cache.set_terminology_cache('emerging_terms', cache_key, emerging_sorted)
+        
+        return emerging_sorted
+
+    def _has_exponential_growth(self, counts: List[int]) -> bool:
+        """Проверяет, есть ли экспоненциальный рост"""
+        if len(counts) < 2:
+            return False
+        
+        # Проверяем монотонный рост
+        if not all(counts[i] < counts[i+1] for i in range(len(counts)-1)):
+            return False
+        
+        # Проверяем темп роста (минимум удвоение за период)
+        if counts[-1] / counts[0] < 2:
+            return False
+        
+        # Проверяем ускорение роста (последний прирост больше предыдущего)
+        if len(counts) >= 3:
+            last_increase = counts[-1] - counts[-2]
+            prev_increase = counts[-2] - counts[-3]
+            if last_increase <= prev_increase:
+                return False
+        
+        return True
+
+    def _calculate_growth_rate(self, counts: List[int]) -> float:
+        """Рассчитывает темп роста"""
+        if len(counts) < 2 or counts[0] == 0:
+            return 0.0
+        
+        # Сложный темп роста
+        periods = len(counts) - 1
+        if periods > 0:
+            growth_rate = (counts[-1] / counts[0]) ** (1/periods) - 1
+            return growth_rate
+        return 0.0
+
+    def _calculate_growth_factor(self, counts: List[int]) -> float:
+        """Рассчитывает фактор роста (отношение последнего к первому)"""
+        if len(counts) < 2 or counts[0] == 0:
+            return 1.0
+        return counts[-1] / counts[0]
+
+    def _calculate_term_centrality(self, term: str) -> float:
+        """Рассчитывает центральность термина в сети"""
+        if term not in self.term_network:
+            return 0.0
+        
+        try:
+            # Используем степень центральности
+            degree = self.term_network.degree(term, weight='weight')
+            max_degree = max([d for _, d in self.term_network.degree(weight='weight')], default=1)
+            return degree / max_degree
+        except:
+            return 0.0
+
+    def _determine_maturity_level(self, year_counts: Dict[int, int]) -> str:
+        """Определяет уровень зрелости термина"""
+        years = sorted(year_counts.keys())
+        if len(years) < 2:
+            return "EMERGING"
+        
+        # Анализируем динамику
+        counts = [year_counts[y] for y in years]
+        
+        if len(years) <= 2:
+            if counts[-1] / counts[0] > 3:
+                return "RAPID_GROWTH"
+            else:
+                return "EMERGING"
+        
+        # Проверяем стабилизацию
+        recent_counts = counts[-3:] if len(counts) >= 3 else counts
+        avg_recent = sum(recent_counts) / len(recent_counts)
+        std_recent = np.std(recent_counts) if len(recent_counts) >= 2 else 0
+        
+        if std_recent / avg_recent < 0.2:  # Низкая вариация
+            return "MATURE"
+        elif counts[-1] > 2 * counts[-2]:  # Сильный рост
+            return "RAPID_GROWTH"
+        else:
+            return "GROWING"
+
+    def _predict_peak_year(self, year_counts: Dict[int, int]) -> int:
+        """Предсказывает год пика популярности"""
+        years = sorted(year_counts.keys())
+        if len(years) < 3:
+            return years[-1] + 2 if years else datetime.now().year + 2
+        
+        counts = [year_counts[y] for y in years]
+        
+        try:
+            # Простая экстраполяция
+            x = np.array(years)
+            y = np.array(counts)
+            
+            # Линейная регрессия для прогноза
+            coeffs = np.polyfit(x, y, 1)
+            future_years = np.array([years[-1] + 1, years[-1] + 2, years[-1] + 3])
+            predictions = coeffs[0] * future_years + coeffs[1]
+            
+            # Находим год максимального прогноза
+            peak_idx = np.argmax(predictions)
+            return int(future_years[peak_idx])
+        except:
+            return years[-1] + 2
+
+    def _calculate_confidence_score(self, term: str, year_counts: Dict[int, int]) -> float:
+        """Рассчитывает оценку уверенности в прогнозе"""
+        score = 0.0
+        
+        # Количество лет наблюдения
+        years_count = len(year_counts)
+        if years_count >= 3:
+            score += 30
+        elif years_count == 2:
+            score += 20
+        else:
+            score += 10
+        
+        # Количество статей
+        total_articles = len(self.term_articles[term])
+        if total_articles >= 10:
+            score += 30
+        elif total_articles >= 5:
+            score += 20
+        elif total_articles >= 2:
+            score += 10
+        
+        # Темп роста
+        counts = list(year_counts.values())
+        if len(counts) >= 2:
+            growth_rate = self._calculate_growth_rate(counts)
+            score += min(30, growth_rate * 100)
+        
+        # Сетевая центральность
+        centrality = self._calculate_term_centrality(term)
+        score += centrality * 10
+        
+        return min(100, score)
+
+    def find_convergence_zones(self) -> List[Dict]:
+        """Находит термины, связывающие разные кластеры"""
+        cache_key = "convergence_zones"
+        cached = self.cache.get_terminology_cache('convergence_zones', cache_key)
+        if cached is not None:
+            return cached
+        
+        if not self.term_network.nodes():
+            return []
+        
+        convergence_terms = []
+        
+        try:
+            # Вычисляем betweenness centrality
+            centrality = nx.betweenness_centrality(self.term_network, normalized=True)
+            
+            for term, score in centrality.items():
+                if score > 0.1:  # Пороговое значение
+                    # Проверяем, связывает ли термин разные семантические сообщества
+                    if self._connects_multiple_communities(term):
+                        # Рассчитываем дополнительные метрики
+                        degree = self.term_network.degree(term)
+                        clustering = nx.clustering(self.term_network, term)
+                        
+                        convergence_terms.append({
+                            'Term': term,
+                            'Betweenness_Centrality': round(score, 4),
+                            'Degree_Centrality': degree,
+                            'Clustering_Coefficient': round(clustering, 3),
+                            'Bridge_Score': round(self._calculate_bridge_score(term), 3),
+                            'Community_Connections': len(self._get_connected_communities(term)),
+                            'Semantic_Diversity': self._calculate_semantic_diversity(term),
+                            'Strategic_Importance': self._determine_strategic_importance(term, score)
+                        })
+        except Exception as e:
+            st.warning(f"⚠️ Error finding convergence zones: {e}")
+        
+        # Сортируем по betweenness centrality
+        convergence_sorted = sorted(convergence_terms, key=lambda x: x['Betweenness_Centrality'], reverse=True)
+        
+        # Кэшируем результаты
+        self.cache.set_terminology_cache('convergence_zones', cache_key, convergence_sorted)
+        
+        return convergence_sorted
+
+    def _connects_multiple_communities(self, term: str) -> bool:
+        """Проверяет, связывает ли термин разные сообщества"""
+        if term not in self.term_network:
+            return False
+        
+        try:
+            # Используем алгоритм Louvain для обнаружения сообществ
+            communities = nx.algorithms.community.louvain_communities(self.term_network)
+            
+            # Находим сообщество термина
+            term_community = None
+            for i, community in enumerate(communities):
+                if term in community:
+                    term_community = i
+                    break
+            
+            if term_community is None:
+                return False
+            
+            # Проверяем связи с другими сообществами
+            neighbors = list(self.term_network.neighbors(term))
+            neighbor_communities = set()
+            
+            for neighbor in neighbors:
+                for i, community in enumerate(communities):
+                    if neighbor in community and i != term_community:
+                        neighbor_communities.add(i)
+            
+            return len(neighbor_communities) >= 2
+            
+        except:
+            return False
+
+    def _get_connected_communities(self, term: str) -> Set[int]:
+        """Получает индексы сообществ, с которыми связан термин"""
+        if term not in self.term_network:
+            return set()
+        
+        try:
+            communities = nx.algorithms.community.louvain_communities(self.term_network)
+            
+            # Находим сообщество термина
+            term_community = None
+            for i, community in enumerate(communities):
+                if term in community:
+                    term_community = i
+                    break
+            
+            if term_community is None:
+                return set()
+            
+            # Находим связанные сообщества
+            neighbors = list(self.term_network.neighbors(term))
+            connected_communities = set()
+            
+            for neighbor in neighbors:
+                for i, community in enumerate(communities):
+                    if neighbor in community:
+                        connected_communities.add(i)
+            
+            # Удаляем собственное сообщество
+            connected_communities.discard(term_community)
+            
+            return connected_communities
+            
+        except:
+            return set()
+
+    def _calculate_bridge_score(self, term: str) -> float:
+        """Рассчитывает score мостового термина"""
+        if term not in self.term_network:
+            return 0.0
+        
+        try:
+            # Количество уникальных сообществ, связанных через термин
+            connected_communities = self._get_connected_communities(term)
+            
+            # Средний вес связей с другими сообществами
+            neighbors = list(self.term_network.neighbors(term))
+            inter_community_weights = []
+            
+            for neighbor in neighbors:
+                weight = self.term_network[term][neighbor].get('weight', 1)
+                inter_community_weights.append(weight)
+            
+            if not inter_community_weights:
+                return 0.0
+            
+            avg_weight = sum(inter_community_weights) / len(inter_community_weights)
+            
+            # Общий score
+            bridge_score = len(connected_communities) * avg_weight
+            
+            return bridge_score
+            
+        except:
+            return 0.0
+
+    def _calculate_semantic_diversity(self, term: str) -> float:
+        """Рассчитывает семантическое разнообразие связей термина"""
+        if term not in self.term_network:
+            return 0.0
+        
+        try:
+            neighbors = list(self.term_network.neighbors(term))
+            if len(neighbors) < 2:
+                return 0.0
+            
+            # Разнообразие на основе степеней соседей
+            neighbor_degrees = [self.term_network.degree(n) for n in neighbors]
+            if not neighbor_degrees:
+                return 0.0
+            
+            # Коэффициент вариации степеней соседей
+            mean_degree = np.mean(neighbor_degrees)
+            std_degree = np.std(neighbor_degrees)
+            
+            if mean_degree > 0:
+                cv = std_degree / mean_degree
+                return min(1.0, cv)
+            else:
+                return 0.0
+                
+        except:
+            return 0.0
+
+    def _determine_strategic_importance(self, term: str, betweenness: float) -> str:
+        """Определяет стратегическую важность термина"""
+        if betweenness > 0.3:
+            return "CRITICAL_BRIDGE"
+        elif betweenness > 0.2:
+            return "IMPORTANT_CONNECTOR"
+        elif betweenness > 0.1:
+            return "MODERATE_BRIDGE"
+        else:
+            return "MINOR_CONNECTOR"
+
+    def predict_frontiers(self, top_n: int = 10) -> List[Dict]:
+        """Прогнозирует научные фронтиры"""
+        cache_key = f"frontier_predictions_{top_n}"
+        cached = self.cache.get_terminology_cache('frontier_predictions', cache_key)
+        if cached is not None:
+            return cached
+        
+        frontiers = []
+        emerging_terms = self.detect_emerging_terms()
+        
+        # Берем топ emerging terms
+        top_emerging = emerging_terms[:min(top_n * 2, len(emerging_terms))]
+        
+        for term_info in top_emerging:
+            term = term_info['Term']
+            
+            # Анализируем сетевые характеристики
+            network_metrics = self._analyze_term_network_characteristics(term)
+            
+            # Анализируем временные паттерны
+            temporal_metrics = self._analyze_term_temporal_patterns(term)
+            
+            # Рассчитываем frontier score
+            frontier_score = self._calculate_frontier_score(term_info, network_metrics, temporal_metrics)
+            
+            # Определяем тип фронтира
+            frontier_type = self._determine_frontier_type(term_info, network_metrics, temporal_metrics)
+            
+            # Прогнозируем время до массового принятия
+            time_to_mass = self._predict_time_to_mass_adoption(term_info, temporal_metrics)
+            
+            # Находим ключевые связанные термины
+            key_related_terms = self._get_key_related_terms(term, 5)
+            
+            frontiers.append({
+                'Term': term,
+                'Frontier_Score': round(frontier_score, 1),
+                'Frontier_Type': frontier_type,
+                'Emergence_Level': term_info['Maturity_Level'],
+                'Growth_Rate_Percent': term_info['Recent_Growth_Rate'],
+                'Network_Centrality': term_info['Network_Centrality'],
+                'Time_To_Mass_Adoption_Years': time_to_mass,
+                'Predicted_Peak_Year': term_info['Predicted_Peak_Year'],
+                'Confidence_Score': term_info['Confidence_Score'],
+                'Key_Related_Terms': '; '.join(key_related_terms),
+                'Strategic_Recommendation': self._generate_strategic_recommendation(frontier_type, frontier_score),
+                'Risk_Level': self._determine_frontier_risk_level(term_info, frontier_score),
+                'Opportunity_Size': self._estimate_opportunity_size(term, network_metrics)
+            })
+        
+        # Сортируем по frontier score
+        frontiers_sorted = sorted(frontiers, key=lambda x: x['Frontier_Score'], reverse=True)
+        
+        # Ограничиваем количество
+        frontiers_final = frontiers_sorted[:top_n]
+        
+        # Кэшируем результаты
+        self.cache.set_terminology_cache('frontier_predictions', cache_key, frontiers_final)
+        
+        return frontiers_final
+
+    def _analyze_term_network_characteristics(self, term: str) -> Dict:
+        """Анализирует сетевые характеристики термина"""
+        if term not in self.term_network:
+            return {
+                'degree': 0,
+                'clustering': 0,
+                'eigenvector': 0,
+                'coreness': 0,
+                'structural_holes': 0
+            }
+        
+        try:
+            # Степень
+            degree = self.term_network.degree(term)
+            
+            # Коэффициент кластеризации
+            clustering = nx.clustering(self.term_network, term)
+            
+            # Eigenvector centrality
+            try:
+                eigenvector = nx.eigenvector_centrality_numpy(self.term_network).get(term, 0)
+            except:
+                eigenvector = 0
+            
+            # K-core decomposition
+            try:
+                k_core = nx.core_number(self.term_network).get(term, 0)
+            except:
+                k_core = 0
+            
+            # Structural holes (constraint)
+            try:
+                constraint = nx.constraint(self.term_network).get(term, 1)
+                structural_holes = 1 - constraint
+            except:
+                structural_holes = 0
+            
+            return {
+                'degree': degree,
+                'clustering': round(clustering, 3),
+                'eigenvector': round(eigenvector, 4),
+                'coreness': k_core,
+                'structural_holes': round(structural_holes, 3)
+            }
+            
+        except Exception as e:
+            st.warning(f"⚠️ Network analysis error for term '{term}': {e}")
+            return {
+                'degree': 0,
+                'clustering': 0,
+                'eigenvector': 0,
+                'coreness': 0,
+                'structural_holes': 0
+            }
+
+    def _analyze_term_temporal_patterns(self, term: str) -> Dict:
+        """Анализирует временные паттерны термина"""
+        if term not in self.term_frequency:
+            return {
+                'years_count': 0,
+                'total_count': 0,
+                'growth_acceleration': 0,
+                'seasonality': 0,
+                'diffusion_speed': 0
+            }
+        
+        year_counts = self.term_frequency[term]
+        if len(year_counts) < 2:
+            return {
+                'years_count': len(year_counts),
+                'total_count': sum(year_counts.values()),
+                'growth_acceleration': 0,
+                'seasonality': 0,
+                'diffusion_speed': 0
+            }
+        
+        try:
+            years = sorted(year_counts.keys())
+            counts = [year_counts[y] for y in years]
+            
+            # Ускорение роста (разница между последним и предпоследним приростом)
+            if len(counts) >= 3:
+                last_increase = counts[-1] - counts[-2]
+                prev_increase = counts[-2] - counts[-3]
+                if prev_increase > 0:
+                    growth_acceleration = (last_increase - prev_increase) / prev_increase
+                else:
+                    growth_acceleration = last_increase
+            else:
+                growth_acceleration = counts[-1] - counts[0] if counts[0] > 0 else counts[-1]
+            
+            # Сезонность (вариация по годам)
+            if len(counts) >= 3:
+                cv = np.std(counts) / np.mean(counts) if np.mean(counts) > 0 else 0
+                seasonality = cv
+            else:
+                seasonality = 0
+            
+            # Скорость диффузии (сколько лет от первого появления до текущего)
+            diffusion_years = years[-1] - years[0] + 1
+            total_count = sum(counts)
+            if diffusion_years > 0:
+                diffusion_speed = total_count / diffusion_years
+            else:
+                diffusion_speed = total_count
+            
+            return {
+                'years_count': len(years),
+                'total_count': total_count,
+                'growth_acceleration': round(growth_acceleration, 3),
+                'seasonality': round(seasonality, 3),
+                'diffusion_speed': round(diffusion_speed, 2)
+            }
+            
+        except Exception as e:
+            st.warning(f"⚠️ Temporal analysis error for term '{term}': {e}")
+            return {
+                'years_count': len(year_counts),
+                'total_count': sum(year_counts.values()),
+                'growth_acceleration': 0,
+                'seasonality': 0,
+                'diffusion_speed': 0
+            }
+
+    def _calculate_frontier_score(self, term_info: Dict, network_metrics: Dict, temporal_metrics: Dict) -> float:
+        """Рассчитывает frontier score"""
+        score = 0.0
+        
+        # Темп роста (макс 30)
+        growth_rate = term_info.get('Recent_Growth_Rate', 0)
+        score += min(30, growth_rate * 0.5)
+        
+        # Сетевая центральность (макс 20)
+        centrality = term_info.get('Network_Centrality', 0)
+        score += centrality * 20
+        
+        # Ускорение роста (макс 15)
+        acceleration = temporal_metrics.get('growth_acceleration', 0)
+        if acceleration > 0:
+            score += min(15, acceleration * 5)
+        
+        # Структурные дыры (макс 15)
+        structural_holes = network_metrics.get('structural_holes', 0)
+        score += structural_holes * 15
+        
+        # Количество статей (макс 10)
+        total_articles = term_info.get('Total_Articles', 0)
+        if total_articles >= 10:
+            score += 10
+        elif total_articles >= 5:
+            score += 7
+        elif total_articles >= 2:
+            score += 4
+        else:
+            score += 1
+        
+        # Разнообразие типов статей (макс 10)
+        type_diversity = term_info.get('Type_Diversity', 0)
+        score += min(10, type_diversity * 3)
+        
+        return min(100, score)
+
+    def _determine_frontier_type(self, term_info: Dict, network_metrics: Dict, temporal_metrics: Dict) -> str:
+        """Определяет тип фронтира"""
+        growth_rate = term_info.get('Recent_Growth_Rate', 0)
+        centrality = term_info.get('Network_Centrality', 0)
+        structural_holes = network_metrics.get('structural_holes', 0)
+        
+        if growth_rate > 50 and centrality > 0.7:
+            return "BREAKTHROUGH_HOTSPOT"
+        elif growth_rate > 30 and structural_holes > 0.3:
+            return "INTEGRATION_NEXUS"
+        elif growth_rate > 20:
+            return "EMERGING_TREND"
+        elif centrality > 0.6:
+            return "STRATEGIC_BRIDGE"
+        elif structural_holes > 0.4:
+            return "INNOVATION_GAP"
+        else:
+            return "EARLY_SIGNAL"
+
+    def _predict_time_to_mass_adoption(self, term_info: Dict, temporal_metrics: Dict) -> int:
+        """Прогнозирует время до массового принятия"""
+        growth_rate = term_info.get('Recent_Growth_Rate', 0) / 100  # Конвертируем проценты в долю
+        current_articles = term_info.get('Total_Articles', 0)
+        
+        if growth_rate <= 0 or current_articles <= 0:
+            return 10  # Консервативная оценка по умолчанию
+        
+        # Целевое количество статей для "массового принятия"
+        target_articles = 100
+        
+        # Экспоненциальный рост: N = N0 * (1 + r)^t
+        # Решаем для t: t = log(N/N0) / log(1 + r)
+        try:
+            if current_articles >= target_articles:
+                return 0
+            
+            t = math.log(target_articles / current_articles) / math.log(1 + growth_rate)
+            return max(1, min(15, int(t)))
+        except:
+            return 10
+
+    def _get_key_related_terms(self, term: str, max_terms: int = 5) -> List[str]:
+        """Получает ключевые связанные термины"""
+        if term not in self.term_cooccurrence:
+            return []
+        
+        related_terms = list(self.term_cooccurrence[term])
+        
+        # Сортируем по частоте со-встречаемости
+        sorted_terms = []
+        for related in related_terms:
+            if related in self.term_articles and term in self.term_articles:
+                co_occurrence = len(set(self.term_articles[term]) & set(self.term_articles[related]))
+                sorted_terms.append((related, co_occurrence))
+        
+        sorted_terms.sort(key=lambda x: x[1], reverse=True)
+        
+        # Берем топ термины
+        top_terms = [term for term, _ in sorted_terms[:max_terms]]
+        
+        return top_terms
+
+    def _generate_strategic_recommendation(self, frontier_type: str, frontier_score: float) -> str:
+        """Генерирует стратегические рекомендации"""
+        if frontier_score > 80:
+            if frontier_type == "BREAKTHROUGH_HOTSPOT":
+                return "IMMEDIATE INVESTMENT: High potential breakthrough area"
+            elif frontier_type == "INTEGRATION_NEXUS":
+                return "STRATEGIC POSITIONING: Bridge between established domains"
+            else:
+                return "AGGRESSIVE EXPLORATION: High-growth emerging area"
+        elif frontier_score > 60:
+            return "TARGETED RESEARCH: Promising area with good growth"
+        elif frontier_score > 40:
+            return "MONITOR CLOSELY: Early-stage opportunity"
+        else:
+            return "WATCHLIST: Early signal, needs validation"
+
+    def _determine_frontier_risk_level(self, term_info: Dict, frontier_score: float) -> str:
+        """Определяет уровень риска фронтира"""
+        growth_rate = term_info.get('Recent_Growth_Rate', 0)
+        confidence = term_info.get('Confidence_Score', 0)
+        
+        if frontier_score > 70 and confidence > 70:
+            return "LOW_RISK"
+        elif frontier_score > 50 and confidence > 50:
+            return "MODERATE_RISK"
+        elif growth_rate > 40:
+            return "HIGH_RISK_HIGH_REWARD"
+        else:
+            return "HIGH_RISK"
+
+    def _estimate_opportunity_size(self, term: str, network_metrics: Dict) -> str:
+        """Оценивает размер возможности"""
+        degree = network_metrics.get('degree', 0)
+        eigenvector = network_metrics.get('eigenvector', 0)
+        
+        if degree >= 10 and eigenvector > 0.3:
+            return "LARGE: Connects to established research areas"
+        elif degree >= 5 and eigenvector > 0.1:
+            return "MEDIUM: Growing network of connections"
+        elif degree >= 2:
+            return "SMALL: Niche opportunity"
+        else:
+            return "MICRO: Isolated concept"
+
+    def get_term_statistics(self) -> Dict[str, Any]:
+        """Возвращает статистику по терминам"""
+        total_terms = len(self.term_frequency)
+        total_articles = sum(len(articles) for articles in self.term_articles.values())
+        
+        # Самые частые термины
+        term_freqs = {term: sum(year_counts.values()) for term, year_counts in self.term_frequency.items()}
+        top_terms = sorted(term_freqs.items(), key=lambda x: x[1], reverse=True)[:10]
+        
+        # Динамика по годам
+        yearly_term_counts = defaultdict(int)
+        for year_counts in self.term_frequency.values():
+            for year, count in year_counts.items():
+                yearly_term_counts[year] += count
+        
+        return {
+            'total_terms': total_terms,
+            'total_articles_with_terms': total_articles,
+            'average_terms_per_article': round(total_articles / max(1, len(self.term_articles)), 2),
+            'top_terms': top_terms,
+            'yearly_term_counts': dict(yearly_term_counts),
+            'network_nodes': self.term_network.number_of_nodes(),
+            'network_edges': self.term_network.number_of_edges(),
+            'average_clustering': round(nx.average_clustering(self.term_network), 3) if self.term_network.nodes() else 0
+        }
+
+# ============================================================================
 # 📊 КЛАСС ЭКСПОРТА В EXCEL (УЛУЧШЕННЫЙ С НОВЫМИ ФУНКЦИЯМИ)
 # ============================================================================
 
@@ -3929,12 +4840,17 @@ class ExcelExporter:
         self.affiliation_country_stats = defaultdict(lambda: defaultdict(int))
         self.current_year = datetime.now().year
 
-        # Инициализация анализатора
+        # Инициализация анализаторов
         self.hierarchical_analyzer = None
+        self.terminology_analyzer = None
 
     def set_hierarchical_analyzer(self, hierarchical_analyzer: HierarchicalDataAnalyzer):
         """Устанавливает анализатор для иерархического анализа"""
         self.hierarchical_analyzer = hierarchical_analyzer
+
+    def set_terminology_analyzer(self, terminology_analyzer: TerminologyAnalyzer):
+        """Устанавливает анализатор для терминологического анализа"""
+        self.terminology_analyzer = terminology_analyzer
 
     def _correct_country_for_author(self, author_key: str, affiliation_stats: Dict[str, Any]) -> str:
         """Correct country for author based on affiliation statistics"""
@@ -4035,6 +4951,45 @@ class ExcelExporter:
 
         return insights
 
+    def _analyze_terminology_insights(self, analysis_types: Dict[str, bool], progress_container=None) -> Dict[str, Any]:
+        """Analyze terminology insights from collected data"""
+        insights = {
+            'emerging_terms': [],
+            'convergence_zones': [],
+            'frontier_predictions': [],
+            'term_statistics': {}
+        }
+
+        if not self.terminology_analyzer:
+            st.warning("⚠️ Terminology analyzer not set. Skipping terminology insights.")
+            return insights
+
+        # Строим сеть терминов
+        if progress_container:
+            progress_container.text("🔤 Building term network...")
+        self.terminology_analyzer.build_term_network()
+
+        # Выполняем только выбранные типы анализа
+        if analysis_types.get('emerging_terms', False):
+            if progress_container:
+                progress_container.text("🔤 Detecting emerging terms...")
+            insights['emerging_terms'] = self.terminology_analyzer.detect_emerging_terms()
+
+        if analysis_types.get('convergence_zones', False):
+            if progress_container:
+                progress_container.text("🔤 Finding convergence zones...")
+            insights['convergence_zones'] = self.terminology_analyzer.find_convergence_zones()
+
+        if analysis_types.get('frontier_predictions', False):
+            if progress_container:
+                progress_container.text("🔤 Predicting frontiers...")
+            insights['frontier_predictions'] = self.terminology_analyzer.predict_frontiers()
+
+        # Всегда собираем статистику терминов
+        insights['term_statistics'] = self.terminology_analyzer.get_term_statistics()
+
+        return insights
+
     def create_comprehensive_report(self, analyzed_results: Dict[str, Dict],
                                    ref_results: Dict[str, Dict] = None,
                                    citing_results: Dict[str, Dict] = None,
@@ -4055,7 +5010,10 @@ class ExcelExporter:
                 'quick_checks': True,
                 'medium_insights': True,
                 'deep_analysis': False,
-                'analyzed_citing_relationships': False
+                'analyzed_citing_relationships': False,
+                'emerging_terms': True,
+                'convergence_zones': True,
+                'frontier_predictions': True
             }
 
         self.analyzed_results = analyzed_results
@@ -4065,9 +5023,10 @@ class ExcelExporter:
         self._prepare_summary_data()
 
         # Generate ethical insights
-        if progress_container:
-            progress_container.text("🔍 Generating ethical insights...")
         ethical_insights = self._analyze_ethical_insights(analysis_types, progress_container)
+
+        # Generate terminology insights
+        terminology_insights = self._analyze_terminology_insights(analysis_types, progress_container)
 
         # Создаем Excel файл в памяти
         output = BytesIO()
@@ -4078,13 +5037,13 @@ class ExcelExporter:
 
             # Создаем вкладки Excel
             self._generate_excel_sheets(writer, analyzed_results, ref_results, citing_results, 
-                                      ethical_insights, analysis_types, progress_container)
+                                      ethical_insights, terminology_insights, analysis_types, progress_container)
 
         output.seek(0)
         return output
 
     def _generate_excel_sheets(self, writer, analyzed_results, ref_results, citing_results,
-                             ethical_insights, analysis_types, progress_container):
+                             ethical_insights, terminology_insights, analysis_types, progress_container):
         """Генерирует все вкладки Excel"""
         sheets = [
             ('Article_Analyzed', lambda: self._prepare_analyzed_articles(analyzed_results)),
@@ -4123,6 +5082,20 @@ class ExcelExporter:
         if analysis_types.get('analyzed_citing_relationships', False) and ethical_insights['analyzed_citing_relationships']:
             sheets.append(('Analyzed_Citing_Relationships', lambda: ethical_insights['analyzed_citing_relationships']))
 
+        # Добавляем листы терминологического анализа если они включены
+        if analysis_types.get('emerging_terms', False) and terminology_insights['emerging_terms']:
+            sheets.append(('Emerging_Terms', lambda: terminology_insights['emerging_terms']))
+        
+        if analysis_types.get('convergence_zones', False) and terminology_insights['convergence_zones']:
+            sheets.append(('Convergence_Zones', lambda: terminology_insights['convergence_zones']))
+        
+        if analysis_types.get('frontier_predictions', False) and terminology_insights['frontier_predictions']:
+            sheets.append(('Frontier_Predictions', lambda: terminology_insights['frontier_predictions']))
+        
+        # Всегда добавляем статистику терминов
+        if terminology_insights['term_statistics']:
+            sheets.append(('Term_Statistics', lambda: self._prepare_term_statistics(terminology_insights['term_statistics'])))
+
         for idx, (sheet_name, data_func) in enumerate(sheets):
             if progress_container:
                 progress_container.text(f"  {idx+1}. {sheet_name}...")
@@ -4131,6 +5104,67 @@ class ExcelExporter:
             if data:
                 df = pd.DataFrame(data)
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+    def _prepare_term_statistics(self, term_stats: Dict[str, Any]) -> List[Dict]:
+        """Подготавливает статистику терминов"""
+        data = []
+        
+        # Основная статистика
+        data.append({
+            'Metric': 'Total Terms',
+            'Value': term_stats.get('total_terms', 0),
+            'Description': 'Total unique terms extracted'
+        })
+        
+        data.append({
+            'Metric': 'Articles with Terms',
+            'Value': term_stats.get('total_articles_with_terms', 0),
+            'Description': 'Articles containing extracted terms'
+        })
+        
+        data.append({
+            'Metric': 'Avg Terms per Article',
+            'Value': term_stats.get('average_terms_per_article', 0),
+            'Description': 'Average number of terms per article'
+        })
+        
+        data.append({
+            'Metric': 'Network Nodes',
+            'Value': term_stats.get('network_nodes', 0),
+            'Description': 'Number of nodes in term network'
+        })
+        
+        data.append({
+            'Metric': 'Network Edges',
+            'Value': term_stats.get('network_edges', 0),
+            'Description': 'Number of edges in term network'
+        })
+        
+        data.append({
+            'Metric': 'Average Clustering',
+            'Value': term_stats.get('average_clustering', 0),
+            'Description': 'Average clustering coefficient'
+        })
+        
+        # Топ термины
+        top_terms = term_stats.get('top_terms', [])
+        for i, (term, count) in enumerate(top_terms[:10], 1):
+            data.append({
+                'Metric': f'Top Term #{i}',
+                'Value': term,
+                'Description': f'Frequency: {count} articles'
+            })
+        
+        # Годовая динамика
+        yearly_counts = term_stats.get('yearly_term_counts', {})
+        for year, count in sorted(yearly_counts.items(), key=lambda x: x[0]):
+            data.append({
+                'Metric': f'Year {year}',
+                'Value': count,
+                'Description': f'Terms appeared in {year}'
+            })
+        
+        return data
 
     def _prepare_summary_data(self):
         total_analyzed_articles = len([r for r in self.analyzed_results.values() if r.get('status') == 'success'])
@@ -4334,6 +5368,7 @@ class ExcelExporter:
             row = {
                 'doi': ref_doi,
                 'publication_date': pub_info.get('publication_date', ''),
+                'title': pub_info.get('title', ''),  # НОВАЯ КОЛОНКА
                 'authors': '; '.join([a['name'] for a in authors]),
                 'ORCID ID 1; ORCID ID 2... ORCID ID last': '; '.join(orcid_urls),
                 'author count': len(authors),
@@ -4359,6 +5394,7 @@ class ExcelExporter:
                 row = {
                     'doi': ref_doi,
                     'publication_date': '',
+                    'title': '',  # НОВАЯ КОЛОНКА
                     'authors': '',
                     'ORCID ID 1; ORCID ID 2... ORCID ID last': '',
                     'author count': 0,
@@ -4411,6 +5447,7 @@ class ExcelExporter:
             row = {
                 'doi': cite_doi,
                 'publication_date': pub_info.get('publication_date', ''),
+                'title': pub_info.get('title', ''),  # НОВАЯ КОЛОНКА
                 'authors': '; '.join([a['name'] for a in authors]),
                 'ORCID ID 1; ORCID ID 2... ORCID ID last': '; '.join(orcid_urls),
                 'author count': len(authors),
@@ -4440,6 +5477,7 @@ class ExcelExporter:
                 row = {
                     'doi': cite_doi,
                     'publication_date': '',
+                    'title': '',  # НОВАЯ КОЛОНКА
                     'authors': '',
                     'ORCID ID 1; ORCID ID 2... ORCID ID last': '',
                     'author count': 0,
@@ -5030,8 +6068,15 @@ class ArticleAnalyzerSystem:
         self.hierarchical_analyzer = HierarchicalDataAnalyzer(
             self.cache_manager, self.data_processor, self.doi_processor
         )
+        self.terminology_analyzer = TerminologyAnalyzer(
+            self.cache_manager, self.data_processor
+        )
         self.excel_exporter = ExcelExporter(self.data_processor, self.ror_client, self.failed_tracker)
         self.excel_exporter.set_hierarchical_analyzer(self.hierarchical_analyzer)
+        self.excel_exporter.set_terminology_analyzer(self.terminology_analyzer)
+        
+        # Связываем терминологический анализатор с DOI процессором
+        self.doi_processor.set_terminology_analyzer(self.terminology_analyzer)
 
         # Инициализация данных в состоянии сессии
         if 'analyzed_results' not in st.session_state:
@@ -5221,7 +6266,10 @@ class ArticleAnalyzerSystem:
                 'quick_checks': True,
                 'medium_insights': True,
                 'deep_analysis': False,
-                'analyzed_citing_relationships': False
+                'analyzed_citing_relationships': False,
+                'emerging_terms': True,
+                'convergence_zones': True,
+                'frontier_predictions': True
             }
 
         # Обновляем экспортер данными
@@ -5257,7 +6305,7 @@ def main():
     st.title("📚 Анализатор научных статей по DOI")
     st.markdown("""
     Анализируйте научные статьи по DOI с умным кэшированием, анализом ссылок и цитирований,
-    а также выявлением неэтичных практик цитирования.
+    а также выявлением неэтичных практик цитирования и научных фронтиров.
     """)
 
     # Инициализация системы
@@ -5306,6 +6354,29 @@ def main():
             "Analyzed-Citing Relationships (30-60 сек на пару)",
             value=False,
             help="Анализ связей между анализируемыми и цитирующими статьями"
+        )
+        
+        st.markdown("---")
+        
+        # Настройки анализа фронтиров
+        st.subheader("🧠 Анализ научных фронтиров")
+        
+        emerging_terms = st.checkbox(
+            "Emerging Terms",
+            value=True,
+            help="Выявление появляющихся терминов с экспоненциальным ростом"
+        )
+        
+        convergence_zones = st.checkbox(
+            "Convergence Zones",
+            value=True,
+            help="Нахождение терминов, связывающих разные научные области"
+        )
+        
+        frontier_predictions = st.checkbox(
+            "Frontier Predictions",
+            value=True,
+            help="Прогнозирование научных фронтиров на основе терминологии"
         )
         
         st.markdown("---")
@@ -5380,7 +6451,10 @@ def main():
                     'quick_checks': quick_checks,
                     'medium_insights': medium_insights,
                     'deep_analysis': deep_analysis,
-                    'analyzed_citing_relationships': citing_relationships
+                    'analyzed_citing_relationships': citing_relationships,
+                    'emerging_terms': emerging_terms,
+                    'convergence_zones': convergence_zones,
+                    'frontier_predictions': frontier_predictions
                 }
                 
                 # Запускаем обработку
@@ -5449,7 +6523,10 @@ def main():
                     'quick_checks': quick_checks,
                     'medium_insights': medium_insights,
                     'deep_analysis': deep_analysis,
-                    'analyzed_citing_relationships': citing_relationships
+                    'analyzed_citing_relationships': citing_relationships,
+                    'emerging_terms': emerging_terms,
+                    'convergence_zones': convergence_zones,
+                    'frontier_predictions': frontier_predictions
                 }
                 
                 # Создаем отчет
@@ -5532,6 +6609,13 @@ def main():
             cache_stats = system.cache_manager.get_stats()
             st.write(f"**Эффективность кэша:** {cache_stats['hit_ratio']}%")
             st.write(f"**API вызовов сохранено:** {cache_stats['api_calls_saved']}")
+            
+            # Статистика терминологии
+            if system.terminology_analyzer:
+                term_stats = system.terminology_analyzer.get_term_statistics()
+                st.write(f"**Уникальных терминов:** {term_stats.get('total_terms', 0)}")
+                st.write(f"**Статей с терминами:** {term_stats.get('total_articles_with_terms', 0)}")
+                st.write(f"**Среднее терминов на статью:** {term_stats.get('average_terms_per_article', 0):.2f}")
 
 # ============================================================================
 # 🏃‍♂️ ЗАПУСК ПРИЛОЖЕНИЯ
@@ -5539,8 +6623,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
