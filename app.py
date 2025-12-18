@@ -5204,6 +5204,7 @@ class ArticleAnalyzerSystem:
         failed = len(dois) - successful
 
         st.session_state.processing_complete = True
+        st.rerun()
 
         return {
             'processing_time': processing_time,
@@ -5342,8 +5343,18 @@ def main():
         clear_btn = st.button("🧹 Очистить данные", type="secondary", use_container_width=True)
     
     with col3:
-        export_btn = st.button("💾 Экспорт Excel", type="secondary", use_container_width=True,
-                             disabled=not st.session_state.processing_complete)
+        # Проверяем несколько условий для активации кнопки
+        export_disabled = not (
+            hasattr(st.session_state, 'processing_complete') and 
+            st.session_state.processing_complete and
+            hasattr(st.session_state, 'analyzed_results') and 
+            st.session_state.analyzed_results
+        )
+        
+        export_btn = st.button("💾 Экспорт Excel", 
+                             type="secondary", 
+                             use_container_width=True,
+                             disabled=export_disabled)
     
     # Обработка нажатий кнопок
     if process_btn and doi_input:
@@ -5528,5 +5539,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
