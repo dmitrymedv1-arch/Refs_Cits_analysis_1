@@ -5131,7 +5131,7 @@ class ArticleAnalyzerSystem:
             else:
                 ref_progress = None
 
-            ref_dois_to_analyze = all_ref_dois[:1000]  # Ограничиваем для производительности
+            ref_dois_to_analyze = all_ref_dois[:10000]  # Ограничиваем для производительности
 
             st.session_state.ref_results = self.doi_processor.process_doi_batch(
                 ref_dois_to_analyze, "ref", None, True, True, Config.BATCH_SIZE, progress_container
@@ -5539,6 +5539,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
