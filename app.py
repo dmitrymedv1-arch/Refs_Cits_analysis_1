@@ -5162,7 +5162,7 @@ class ArticleAnalyzerSystem:
             else:
                 cite_progress = None
 
-            cite_dois_to_analyze = all_cite_dois[:1000]  # Ограничиваем для производительности
+            cite_dois_to_analyze = all_cite_dois[:10000]  # Ограничиваем для производительности
 
             st.session_state.citing_results = self.doi_processor.process_doi_batch(
                 cite_dois_to_analyze, "citing", None, True, True, Config.BATCH_SIZE, progress_container
@@ -5539,6 +5539,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
