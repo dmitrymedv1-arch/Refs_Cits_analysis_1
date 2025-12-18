@@ -4996,14 +4996,14 @@ class ExcelExporter:
                                    analysis_types: Dict[str, bool] = None,
                                    filename: str = None,
                                    progress_container=None) -> BytesIO:
-
+    
         if filename is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"articles_analysis_comprehensive_{timestamp}.xlsx"
-
+    
         if progress_container:
             progress_container.text(f"📊 Creating comprehensive report: {filename}")
-
+    
         # Устанавливаем типы анализа по умолчанию, если не указаны
         if analysis_types is None:
             analysis_types = {
@@ -5015,36 +5015,44 @@ class ExcelExporter:
                 'convergence_zones': True,
                 'frontier_predictions': True
             }
-
+    
         self.analyzed_results = analyzed_results
         self.ref_results = ref_results or {}
         self.citing_results = citing_results or {}
-
+    
         self._prepare_summary_data()
-
+    
         # Generate ethical insights
         ethical_insights = self._analyze_ethical_insights(analysis_types, progress_container)
-
+    
         # Generate terminology insights
         terminology_insights = self._analyze_terminology_insights(analysis_types, progress_container)
-
+    
         # Создаем Excel файл в памяти
         output = BytesIO()
         
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            if progress_container:
-                progress_container.text("📑 Generating sheets...")
-
-            # Создаем вкладки Excel
-            self._generate_excel_sheets(writer, analyzed_results, ref_results, citing_results, 
-                                      ethical_insights, terminology_insights, analysis_types, progress_container)
-
+        try:
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                if progress_container:
+                    progress_container.text("📑 Generating sheets...")
+    
+                # Создаем вкладки Excel с обработкой ошибок
+                self._generate_excel_sheets(writer, analyzed_results, ref_results, citing_results, 
+                                          ethical_insights, terminology_insights, analysis_types, progress_container)
+        except Exception as e:
+            st.error(f"Error creating Excel file: {str(e)}")
+            # Создаем минимальный отчет в случае ошибки
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                error_df = pd.DataFrame([{'Error': str(e), 'Time': datetime.now().isoformat()}])
+                error_df.to_excel(writer, sheet_name='Error_Report', index=False)
+    
         output.seek(0)
         return output
 
     def _generate_excel_sheets(self, writer, analyzed_results, ref_results, citing_results,
                              ethical_insights, terminology_insights, analysis_types, progress_container):
-        """Генерирует все вкладки Excel"""
+        """Генерирует все вкладки Excel с обработкой ошибок"""
         sheets = [
             ('Article_Analyzed', lambda: self._prepare_analyzed_articles(analyzed_results)),
             ('Author freq_analyzed', lambda: self._prepare_author_frequency(analyzed_results, "analyzed")),
@@ -5068,7 +5076,7 @@ class ExcelExporter:
             ('Failed_DOI', lambda: self.failed_tracker.get_failed_for_excel()),
             ('Analysis_Stats', lambda: self._prepare_analysis_stats(analyzed_results, ref_results, citing_results)),
         ]
-
+    
         # Добавляем листы анализа неэтичных практик если они включены
         if analysis_types.get('quick_checks', False) and ethical_insights['quick_checks']:
             sheets.append(('Quick_Checks', lambda: ethical_insights['quick_checks']))
@@ -5081,29 +5089,42 @@ class ExcelExporter:
         
         if analysis_types.get('analyzed_citing_relationships', False) and ethical_insights['analyzed_citing_relationships']:
             sheets.append(('Analyzed_Citing_Relationships', lambda: ethical_insights['analyzed_citing_relationships']))
-
+    
         # Добавляем листы терминологического анализа если они включены
-        if analysis_types.get('emerging_terms', False) and terminology_insights['emerging_terms']:
-            sheets.append(('Emerging_Terms', lambda: terminology_insights['emerging_terms']))
-        
-        if analysis_types.get('convergence_zones', False) and terminology_insights['convergence_zones']:
-            sheets.append(('Convergence_Zones', lambda: terminology_insights['convergence_zones']))
-        
-        if analysis_types.get('frontier_predictions', False) and terminology_insights['frontier_predictions']:
-            sheets.append(('Frontier_Predictions', lambda: terminology_insights['frontier_predictions']))
-        
-        # Всегда добавляем статистику терминов
-        if terminology_insights['term_statistics']:
-            sheets.append(('Term_Statistics', lambda: self._prepare_term_statistics(terminology_insights['term_statistics'])))
-
+        try:
+            if analysis_types.get('emerging_terms', False) and terminology_insights['emerging_terms']:
+                sheets.append(('Emerging_Terms', lambda: terminology_insights['emerging_terms']))
+            
+            if analysis_types.get('convergence_zones', False) and terminology_insights['convergence_zones']:
+                sheets.append(('Convergence_Zones', lambda: terminology_insights['convergence_zones']))
+            
+            if analysis_types.get('frontier_predictions', False) and terminology_insights['frontier_predictions']:
+                sheets.append(('Frontier_Predictions', lambda: terminology_insights['frontier_predictions']))
+            
+            # Всегда добавляем статистику терминов
+            if terminology_insights['term_statistics']:
+                sheets.append(('Term_Statistics', lambda: self._prepare_term_statistics(terminology_insights['term_statistics'])))
+        except Exception as e:
+            st.warning(f"⚠️ Skipping terminology sheets due to error: {e}")
+    
         for idx, (sheet_name, data_func) in enumerate(sheets):
             if progress_container:
                 progress_container.text(f"  {idx+1}. {sheet_name}...")
             
-            data = data_func()
-            if data:
-                df = pd.DataFrame(data)
-                df.to_excel(writer, sheet_name=sheet_name, index=False)
+            try:
+                data = data_func()
+                if data:
+                    df = pd.DataFrame(data)
+                    # Очистка слишком длинных строк для Excel
+                    for col in df.columns:
+                        if df[col].dtype == 'object':
+                            df[col] = df[col].apply(lambda x: str(x)[:32767] if isinstance(x, str) else x)
+                    df.to_excel(writer, sheet_name=sheet_name[:31], index=False)  # Ограничение длины имени листа
+            except Exception as e:
+                st.warning(f"⚠️ Error creating sheet '{sheet_name}': {e}")
+                # Создаем пустой лист с ошибкой
+                error_df = pd.DataFrame([{'Sheet': sheet_name, 'Error': str(e)}])
+                error_df.to_excel(writer, sheet_name=f'Error_{idx}'[:31], index=False)
 
     def _prepare_term_statistics(self, term_stats: Dict[str, Any]) -> List[Dict]:
         """Подготавливает статистику терминов"""
@@ -5146,23 +5167,27 @@ class ExcelExporter:
             'Description': 'Average clustering coefficient'
         })
         
-        # Топ термины
+        # Топ термины - исправленная обработка
         top_terms = term_stats.get('top_terms', [])
-        for i, (term, count) in enumerate(top_terms[:10], 1):
-            data.append({
-                'Metric': f'Top Term #{i}',
-                'Value': term,
-                'Description': f'Frequency: {count} articles'
-            })
+        if isinstance(top_terms, list):
+            for i, term_item in enumerate(top_terms[:10], 1):
+                if isinstance(term_item, tuple) and len(term_item) >= 2:
+                    term, count = term_item[0], term_item[1]
+                    data.append({
+                        'Metric': f'Top Term #{i}',
+                        'Value': str(term)[:100],  # Ограничиваем длину
+                        'Description': f'Frequency: {count} articles'
+                    })
         
-        # Годовая динамика
+        # Годовая динамика - исправленная обработка
         yearly_counts = term_stats.get('yearly_term_counts', {})
-        for year, count in sorted(yearly_counts.items(), key=lambda x: x[0]):
-            data.append({
-                'Metric': f'Year {year}',
-                'Value': count,
-                'Description': f'Terms appeared in {year}'
-            })
+        if isinstance(yearly_counts, dict):
+            for year, count in sorted(yearly_counts.items(), key=lambda x: x[0]):
+                data.append({
+                    'Metric': f'Year {year}',
+                    'Value': count,
+                    'Description': f'Terms appeared in {year}'
+                })
         
         return data
 
@@ -6623,3 +6648,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
