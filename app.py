@@ -2101,72 +2101,153 @@ class OptimizedDOIProcessor:
         return retry_results
 
 # ============================================================================
-# 📊 КЛАСС АНАЛИЗА КЛЮЧЕВЫХ СЛОВ В ЗАГОЛОВКАХ
+# 📊 КЛАСС АНАЛИЗА КЛЮЧЕВЫХ СЛОВ В ЗАГОЛОВКАХ (С ЛЕММАТИЗАЦИЕЙ)
 # ============================================================================
 
 class TitleKeywordsAnalyzer:
     def __init__(self):
-        # Инициализация стоп-слов и стеммера
+        # Инициализация стоп-слов и лемматизатора
         try:
             import nltk
             from nltk.corpus import stopwords
-            from nltk.stem import PorterStemmer
+            from nltk.stem import WordNetLemmatizer
             
-            # Загружаем стоп-слова
-            nltk.download('stopwords', quiet=True)
+            # Загружаем необходимые ресурсы NLTK
+            try:
+                nltk.download('wordnet', quiet=True)
+                nltk.download('omw-eng', quiet=True)
+                nltk.download('stopwords', quiet=True)
+                nltk.download('punkt', quiet=True)
+            except:
+                pass
+            
             self.stop_words = set(stopwords.words('english'))
-            self.stemmer = PorterStemmer()
+            self.lemmatizer = WordNetLemmatizer()
+            
+            # Правила для специальных случаев
+            self.irregular_plurals = {
+                'analyses': 'analysis',
+                'axes': 'axis',
+                'bases': 'basis',
+                'crises': 'crisis',
+                'criteria': 'criterion',
+                'data': 'datum',
+                'diagnoses': 'diagnosis',
+                'ellipses': 'ellipsis',
+                'emphases': 'emphasis',
+                'genera': 'genus',
+                'hypotheses': 'hypothesis',
+                'indices': 'index',
+                'media': 'medium',
+                'memoranda': 'memorandum',
+                'parentheses': 'parenthesis',
+                'phenomena': 'phenomenon',
+                'prognoses': 'prognosis',
+                'radii': 'radius',
+                'stimuli': 'stimulus',
+                'syntheses': 'synthesis',
+                'theses': 'thesis',
+                'vertebrae': 'vertebra',
+            }
+            
+            # Суффиксы, которые нужно преобразовать
+            self.suffix_replacements = {
+                'ies': 'y',      # studies -> study
+                'es': '',        # analyses -> analysis (уже обработано выше)
+                's': '',         # methods -> method
+                'ed': '',        # studied -> study
+                'ing': '',       # studying -> study
+                'ly': '',        # analytically -> analytical
+                'ally': 'al',    # analytically -> analytical
+                'ically': 'ic',  # statistically -> statistic
+                'ization': 'ize', # characterization -> characterize
+                'isation': 'ise', # characterisation -> characterise
+                'ment': '',      # development -> develop
+                'ness': '',      # effectiveness -> effective
+                'ity': '',       # activity -> active
+                'ty': '',        # safety -> safe
+                'ic': '',        # analytic -> analyze
+                'ical': '',      # analytical -> analyze
+                'ive': '',       # effective -> effect
+                'ous': '',       # dangerous -> danger
+                'ful': '',       # helpful -> help
+                'less': '',      # helpless -> help
+                'est': '',       # largest -> large
+                'er': '',        # larger -> large
+            }
+            
         except:
             # Fallback если nltk не доступен
             self.stop_words = {'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'}
-            self.stemmer = None
+            self.lemmatizer = None
+            self.irregular_plurals = {}
+            self.suffix_replacements = {}
         
-        # Научные стоп-слова
+        # Научные стоп-слова (уже лемматизированные)
         self.scientific_stopwords = {
-            'activation', 'adaptive', 'advanced', 'analysis', 'application',
-            'applications', 'approach', 'architecture', 'artificial', 'assessment',
-            'based', 'behavior', 'capacity', 'characteristics', 'characterization',
-            'coating', 'coatings', 'comparative', 'computational', 'composite',
-            'composites', 'control', 'cycle', 'damage', 'data', 'density', 'design',
-            'detection', 'development', 'device', 'devices', 'diagnosis', 'discovery',
-            'dynamic', 'dynamics', 'economic', 'effect', 'effects', 'efficacy',
-            'efficient', 'energy', 'engineering', 'enhanced', 'environmental',
-            'evaluation', 'experimental', 'exploration', 'factors', 'failure',
-            'fabrication', 'field', 'film', 'films', 'flow', 'framework', 'frequency',
-            'functional', 'growth', 'high', 'impact', 'improved', 'improvement',
-            'induced', 'influence', 'information', 'innovative', 'intelligent',
-            'interaction', 'interface', 'interfaces', 'investigation', 'knowledge',
-            'layer', 'layers', 'learning', 'magnetic', 'management', 'material',
-            'materials', 'measurement', 'mechanism', 'mechanisms', 'medical',
-            'method', 'methods', 'model', 'models', 'modification', 'modulation',
-            'molecular', 'monitoring', 'motion', 'nanoparticle', 'nanoparticles',
-            'nanostructure', 'nanostructures', 'network', 'neural', 'new', 'nonlinear',
-            'novel', 'numerical', 'optical', 'optimization', 'pattern', 'performance',
-            'phenomenon', 'potential', 'power', 'prediction', 'preparation', 'process',
-            'processing', 'production', 'progression', 'property', 'properties',
-            'quality', 'regulation', 'relationship', 'reliability', 'remote', 'repair',
-            'research', 'resistance', 'response', 'review', 'risk', 'role', 'safety',
-            'sample', 'samples', 'scale', 'screening', 'separation', 'signal',
-            'simulation', 'specific', 'stability', 'stable', 'state', 'storage',
-            'strain', 'strength', 'stress', 'structural', 'structure', 'study',
-            'studies', 'sustainable', 'synergy', 'synthesis', 'system', 'systems',
-            'targeted', 'techniques', 'technology', 'testing', 'theoretical', 'therapy',
-            'thermal', 'tissue', 'tolerance', 'toxicity', 'transformation', 'transition',
-            'transmission', 'transport', 'type', 'understanding', 'using', 'validation',
-            'value', 'variation', 'virtual', 'waste', 'wave'
+            'activate', 'adapt', 'advance', 'analyze', 'apply',
+            'approach', 'architect', 'artificial', 'assess',
+            'base', 'behave', 'capacity', 'characterize',
+            'coat', 'compare', 'compute', 'composite',
+            'control', 'cycle', 'damage', 'data', 'density', 'design',
+            'detect', 'develop', 'device', 'diagnose', 'discover',
+            'dynamic', 'economic', 'effect', 'efficacy',
+            'efficient', 'energy', 'engineer', 'enhance', 'environment',
+            'evaluate', 'experiment', 'explore', 'factor', 'fail',
+            'fabricate', 'field', 'film', 'flow', 'framework', 'frequency',
+            'function', 'grow', 'high', 'impact', 'improve',
+            'induce', 'influence', 'inform', 'innovate', 'intelligent',
+            'interact', 'interface', 'investigate', 'know',
+            'layer', 'learn', 'magnetic', 'manage', 'material',
+            'measure', 'mechanism', 'medical',
+            'method', 'model', 'modify', 'modulate',
+            'molecule', 'monitor', 'motion', 'nanoparticle',
+            'nanostructure', 'network', 'neural', 'new', 'nonlinear',
+            'novel', 'numerical', 'optical', 'optimize', 'pattern', 'perform',
+            'phenomenon', 'potential', 'power', 'predict', 'prepare', 'process',
+            'produce', 'progress', 'property', 'quality', 'regulate', 'relate',
+            'reliable', 'remote', 'repair', 'research', 'resist', 'respond',
+            'review', 'risk', 'role', 'safe', 'sample', 'scale', 'screen',
+            'separate', 'signal', 'simulate', 'specific', 'stable', 'state',
+            'store', 'strain', 'strength', 'stress', 'structure', 'study',
+            'sustain', 'synergy', 'synthesize', 'system', 'target',
+            'technique', 'technology', 'test', 'theoretical', 'therapy',
+            'thermal', 'tissue', 'tolerate', 'toxic', 'transform', 'transition',
+            'transmit', 'transport', 'type', 'understand', 'use', 'validate',
+            'value', 'vary', 'virtual', 'waste', 'wave'
         }
-        
-        # Стемминг научных стоп-слов
-        if self.stemmer:
-            self.scientific_stopwords_stemmed = {
-                self.stemmer.stem(word) for word in self.scientific_stopwords
-            }
-        else:
-            self.scientific_stopwords_stemmed = self.scientific_stopwords
     
-    def preprocess_content_words(self, text: str) -> List[str]:
-        """Очищает и нормализует содержательные слова (удалено слово 'sub')"""
-        if not text or text in ['Название не найдено', 'Таймаут запроса', 'Ошибка сети', 'Ошибка при получении']:
+    def _get_lemma(self, word: str) -> str:
+        """Получаем лемму слова с учетом специальных правил"""
+        if not word or len(word) < 3:
+            return word
+        
+        # Проверяем нестандартные множественные числа
+        lower_word = word.lower()
+        if lower_word in self.irregular_plurals:
+            return self.irregular_plurals[lower_word]
+        
+        # Используем лемматизатор, если доступен
+        if self.lemmatizer:
+            # Пробуем разные части речи
+            for pos in ['n', 'v', 'a', 'r']:  # noun, verb, adjective, adverb
+                lemma = self.lemmatizer.lemmatize(lower_word, pos=pos)
+                if lemma != lower_word:
+                    return lemma
+        
+        # Применяем правила суффиксов
+        for suffix, replacement in self.suffix_replacements.items():
+            if lower_word.endswith(suffix) and len(lower_word) > len(suffix) + 2:
+                base = lower_word[:-len(suffix)] + replacement
+                # Проверяем, что результат не слишком короткий
+                if len(base) >= 3:
+                    return base
+        
+        return lower_word
+    
+    def preprocess_content_words(self, text: str) -> List[Dict]:
+        """Очищает и нормализует содержательные слова, возвращает словари с леммами и формами"""
+        if not text or text in ['Название не найдено', 'Таймаут запроса', 'Ошибка сети', 'Ошибка при получения']:
             return []
 
         text = text.lower()
@@ -2183,34 +2264,45 @@ class TitleKeywordsAnalyzer:
             if '-' in word:
                 continue
             if len(word) > 2 and word not in self.stop_words:
-                if self.stemmer:
-                    stemmed_word = self.stemmer.stem(word)
-                else:
-                    stemmed_word = word
-                if stemmed_word not in self.scientific_stopwords_stemmed:
-                    content_words.append(stemmed_word)
+                lemma = self._get_lemma(word)
+                if lemma not in self.scientific_stopwords:
+                    content_words.append({
+                        'original': word,
+                        'lemma': lemma,
+                        'type': 'content'
+                    })
 
         return content_words
 
-    def extract_compound_words(self, text: str) -> List[str]:
+    def extract_compound_words(self, text: str) -> List[Dict]:
         """Извлекает составные слова через дефис"""
-        if not text or text in ['Название не найдено', 'Таймаут запроса', 'Ошибка сети', 'Ошибка при получении']:
+        if not text or text in ['Название не найдено', 'Таймаут запроса', 'Ошибка сети', 'Ошибка при получения']:
             return []
 
         text = text.lower()
         compound_words = re.findall(r'\b[a-z]{2,}-[a-z]{2,}(?:-[a-z]{2,})*\b', text)
 
-        filtered_compounds = []
+        compounds = []
         for word in compound_words:
             parts = word.split('-')
             if not any(part in self.stop_words for part in parts):
-                filtered_compounds.append(word)
+                # Для составных слов лемматизируем каждую часть
+                lemmatized_parts = []
+                for part in parts:
+                    lemma = self._get_lemma(part)
+                    lemmatized_parts.append(lemma)
+                
+                compounds.append({
+                    'original': word,
+                    'lemma': '-'.join(lemmatized_parts),
+                    'type': 'compound'
+                })
 
-        return filtered_compounds
+        return compounds
 
-    def extract_scientific_stopwords(self, text: str) -> List[str]:
+    def extract_scientific_stopwords(self, text: str) -> List[Dict]:
         """Извлекает научные стоп-слова"""
-        if not text or text in ['Название не найдено', 'Таймаут запроса', 'Ошибка сети', 'Ошибка при получении']:
+        if not text or text in ['Название не найдено', 'Таймаут запроса', 'Ошибка сети', 'Ошибка при получения']:
             return []
 
         text = text.lower()
@@ -2222,103 +2314,91 @@ class TitleKeywordsAnalyzer:
 
         for word in words:
             if len(word) > 2:
-                if self.stemmer:
-                    stemmed_word = self.stemmer.stem(word)
-                else:
-                    stemmed_word = word
-                if stemmed_word in self.scientific_stopwords_stemmed:
-                    for original_word in self.scientific_stopwords:
-                        if self.stemmer:
-                            original_stemmed = self.stemmer.stem(original_word)
-                        else:
-                            original_stemmed = original_word
-                        if original_stemmed == stemmed_word:
-                            scientific_words.append(original_word)
-                            break
+                lemma = self._get_lemma(word)
+                if lemma in self.scientific_stopwords:
+                    scientific_words.append({
+                        'original': word,
+                        'lemma': lemma,
+                        'type': 'scientific'
+                    })
 
         return scientific_words
 
     def analyze_titles(self, analyzed_titles: List[str], reference_titles: List[str], citing_titles: List[str]) -> dict:
         """Анализирует ключевые слова в названиях анализируемых, reference и цитирующих статей"""
-        # Анализ анализируемых статей
-        analyzed_content_words = []
-        analyzed_compound_words = []
-        analyzed_scientific_words = []
         
-        valid_analyzed_titles = [t for t in analyzed_titles if t and t not in ['Название не найдено', 'Таймаут запроса', 'Ошибка сети', 'Ошибка при получении']]
+        # Анализ анализируемых статей
+        analyzed_words = []
+        valid_analyzed_titles = [t for t in analyzed_titles if t and t not in ['Название не найдено', 'Таймаут запроса', 'Ошибка сети', 'Ошибка при получения']]
         
         for title in valid_analyzed_titles:
-            analyzed_content_words.extend(self.preprocess_content_words(title))
-            analyzed_compound_words.extend(self.extract_compound_words(title))
-            analyzed_scientific_words.extend(self.extract_scientific_stopwords(title))
+            analyzed_words.extend(self.preprocess_content_words(title))
+            analyzed_words.extend(self.extract_compound_words(title))
+            analyzed_words.extend(self.extract_scientific_stopwords(title))
         
         # Анализ reference статей
-        reference_content_words = []
-        reference_compound_words = []
-        reference_scientific_words = []
-        
-        valid_reference_titles = [t for t in reference_titles if t and t not in ['Название не найдено', 'Таймаут запроса', 'Ошибка сети', 'Ошибка при получении']]
+        reference_words = []
+        valid_reference_titles = [t for t in reference_titles if t and t not in ['Название не найдено', 'Таймаут запроса', 'Ошибка сети', 'Ошибка при получения']]
         
         for title in valid_reference_titles:
-            reference_content_words.extend(self.preprocess_content_words(title))
-            reference_compound_words.extend(self.extract_compound_words(title))
-            reference_scientific_words.extend(self.extract_scientific_stopwords(title))
+            reference_words.extend(self.preprocess_content_words(title))
+            reference_words.extend(self.extract_compound_words(title))
+            reference_words.extend(self.extract_scientific_stopwords(title))
         
         # Анализ цитирующих статей
-        citing_content_words = []
-        citing_compound_words = []
-        citing_scientific_words = []
-        
-        valid_citing_titles = [t for t in citing_titles if t and t not in ['Название не найдено', 'Таймаут запроса', 'Ошибка сети', 'Ошибка при получении']]
+        citing_words = []
+        valid_citing_titles = [t for t in citing_titles if t and t not in ['Название не найдено', 'Таймаут запроса', 'Ошибка сети', 'Ошибка при получения']]
         
         for title in valid_citing_titles:
-            citing_content_words.extend(self.preprocess_content_words(title))
-            citing_compound_words.extend(self.extract_compound_words(title))
-            citing_scientific_words.extend(self.extract_scientific_stopwords(title))
+            citing_words.extend(self.preprocess_content_words(title))
+            citing_words.extend(self.extract_compound_words(title))
+            citing_words.extend(self.extract_scientific_stopwords(title))
         
-        # Подсчет частот
-        analyzed_content_freq = Counter(analyzed_content_words)
-        analyzed_compound_freq = Counter(analyzed_compound_words)
-        analyzed_scientific_freq = Counter(analyzed_scientific_words)
+        # Создаем агрегированные данные по леммам
+        def aggregate_by_lemma(word_list):
+            lemma_dict = {}
+            for word_info in word_list:
+                lemma = word_info['lemma']
+                original = word_info['original']
+                
+                if lemma not in lemma_dict:
+                    lemma_dict[lemma] = {
+                        'lemma': lemma,
+                        'type': word_info['type'],
+                        'variants': Counter(),
+                        'count': 0
+                    }
+                
+                lemma_dict[lemma]['variants'][original] += 1
+                lemma_dict[lemma]['count'] += 1
+            
+            return lemma_dict
         
-        reference_content_freq = Counter(reference_content_words)
-        reference_compound_freq = Counter(reference_compound_words)
-        reference_scientific_freq = Counter(reference_scientific_words)
+        analyzed_aggregated = aggregate_by_lemma(analyzed_words)
+        reference_aggregated = aggregate_by_lemma(reference_words)
+        citing_aggregated = aggregate_by_lemma(citing_words)
         
-        citing_content_freq = Counter(citing_content_words)
-        citing_compound_freq = Counter(citing_compound_words)
-        citing_scientific_freq = Counter(citing_scientific_words)
+        # Получаем топ-100 для каждого типа
+        def get_top_100(aggregated_dict):
+            items = list(aggregated_dict.values())
+            items.sort(key=lambda x: x['count'], reverse=True)
+            return items[:100]
         
-        # Топ-100 для каждого типа
-        top_100_analyzed_content = analyzed_content_freq.most_common(100)
-        top_100_analyzed_compound = analyzed_compound_freq.most_common(100)
-        top_100_analyzed_scientific = analyzed_scientific_freq.most_common(100)
-        
-        top_100_reference_content = reference_content_freq.most_common(100)
-        top_100_reference_compound = reference_compound_freq.most_common(100)
-        top_100_reference_scientific = reference_scientific_freq.most_common(100)
-        
-        top_100_citing_content = citing_content_freq.most_common(100)
-        top_100_citing_compound = citing_compound_freq.most_common(100)
-        top_100_citing_scientific = citing_scientific_freq.most_common(100)
+        top_100_analyzed = get_top_100(analyzed_aggregated)
+        top_100_reference = get_top_100(reference_aggregated)
+        top_100_citing = get_top_100(citing_aggregated)
         
         return {
             'analyzed': {
-                'content_words': top_100_analyzed_content,
-                'compound_words': top_100_analyzed_compound,
-                'scientific_words': top_100_analyzed_scientific,
+                'words': top_100_analyzed,
                 'total_titles': len(valid_analyzed_titles)
             },
             'reference': {
-                'content_words': top_100_reference_content,
-                'compound_words': top_100_reference_compound,
-                'scientific_words': top_100_reference_scientific,
+                'words': top_100_reference,
                 'total_titles': len(valid_reference_titles)
             },
             'citing': {
-                'content_words': top_100_citing_content,
-                'compound_words': top_100_citing_compound,
-                'scientific_words': top_100_citing_scientific,
+                'words': top_100_citing,
                 'total_titles': len(valid_citing_titles)
             }
         }
@@ -2841,90 +2921,119 @@ class ExcelExporter:
                 if year_count > self.terms_topics_stats[key]['peak_count']:
                     self.terms_topics_stats[key]['peak_year'] = year
                     self.terms_topics_stats[key]['peak_count'] = year_count
-
+        
     def _prepare_title_keywords_data(self, keywords_analysis: dict) -> List[Dict]:
-        """Подготавливает данные для листа Title keywords"""
-        data = []
-        
-        # Общее количество статей для нормализации
-        total_analyzed = keywords_analysis['analyzed']['total_titles']
-        total_reference = keywords_analysis['reference']['total_titles']
-        total_citing = keywords_analysis['citing']['total_titles']
-        
-        # Собираем все уникальные термины
-        all_terms = {}
-        
-        # Обрабатываем content words
-        for term, count in keywords_analysis['analyzed']['content_words']:
-            if term not in all_terms:
-                all_terms[term] = {'type': 'content', 'analyzed': 0, 'reference': 0, 'citing': 0}
-            all_terms[term]['analyzed'] = count
-        
-        for term, count in keywords_analysis['reference']['content_words']:
-            if term not in all_terms:
-                all_terms[term] = {'type': 'content', 'analyzed': 0, 'reference': 0, 'citing': 0}
-            all_terms[term]['reference'] = count
-        
-        for term, count in keywords_analysis['citing']['content_words']:
-            if term not in all_terms:
-                all_terms[term] = {'type': 'content', 'analyzed': 0, 'reference': 0, 'citing': 0}
-            all_terms[term]['citing'] = count
-        
-        # Обрабатываем compound words
-        for term, count in keywords_analysis['analyzed']['compound_words']:
-            if term not in all_terms:
-                all_terms[term] = {'type': 'compound', 'analyzed': 0, 'reference': 0, 'citing': 0}
-            all_terms[term]['analyzed'] = count
-        
-        for term, count in keywords_analysis['reference']['compound_words']:
-            if term not in all_terms:
-                all_terms[term] = {'type': 'compound', 'analyzed': 0, 'reference': 0, 'citing': 0}
-            all_terms[term]['reference'] = count
-        
-        for term, count in keywords_analysis['citing']['compound_words']:
-            if term not in all_terms:
-                all_terms[term] = {'type': 'compound', 'analyzed': 0, 'reference': 0, 'citing': 0}
-            all_terms[term]['citing'] = count
-        
-        # Обрабатываем scientific words
-        for term, count in keywords_analysis['analyzed']['scientific_words']:
-            if term not in all_terms:
-                all_terms[term] = {'type': 'scientific', 'analyzed': 0, 'reference': 0, 'citing': 0}
-            all_terms[term]['analyzed'] = count
-        
-        for term, count in keywords_analysis['reference']['scientific_words']:
-            if term not in all_terms:
-                all_terms[term] = {'type': 'scientific', 'analyzed': 0, 'reference': 0, 'citing': 0}
-            all_terms[term]['reference'] = count
-        
-        for term, count in keywords_analysis['citing']['scientific_words']:
-            if term not in all_terms:
-                all_terms[term] = {'type': 'scientific', 'analyzed': 0, 'reference': 0, 'citing': 0}
-            all_terms[term]['citing'] = count
-        
-        # Создаем строки данных
-        for term, stats in all_terms.items():
-            analyzed_norm = stats['analyzed'] / total_analyzed if total_analyzed > 0 else 0
-            reference_norm = stats['reference'] / total_reference if total_reference > 0 else 0
-            citing_norm = stats['citing'] / total_citing if total_citing > 0 else 0
-            total_norm = analyzed_norm + reference_norm + citing_norm
+            """Подготавливает данные для листа Title keywords с группировкой по леммам"""
+            data = []
             
-            data.append({
-                'Title term': term,
-                'Type': stats['type'],
-                'Analyzed count': stats['analyzed'],
-                'Reference count': stats['reference'],
-                'Citing Count': stats['citing'],
-                'Analyzed norm count': round(analyzed_norm, 4),
-                'Reference norm count': round(reference_norm, 4),
-                'Citing norm Count': round(citing_norm, 4),
-                'Total norm count': round(total_norm, 4)
-            })
-        
-        # Сортировка по Total norm count (от большего к меньшему)
-        data.sort(key=lambda x: x['Total norm count'], reverse=True)
-        
-        return data
+            # Общее количество статей для нормализации
+            total_analyzed = keywords_analysis['analyzed']['total_titles']
+            total_reference = keywords_analysis['reference']['total_titles']
+            total_citing = keywords_analysis['citing']['total_titles']
+            
+            # Собираем все уникальные леммы
+            all_lemmas = {}
+            
+            # Обрабатываем анализируемые статьи
+            for word_info in keywords_analysis['analyzed']['words']:
+                lemma = word_info['lemma']
+                if lemma not in all_lemmas:
+                    all_lemmas[lemma] = {
+                        'type': word_info['type'],
+                        'analyzed': 0,
+                        'reference': 0,
+                        'citing': 0,
+                        'analyzed_variants': Counter(),
+                        'reference_variants': Counter(),
+                        'citing_variants': Counter()
+                    }
+                all_lemmas[lemma]['analyzed'] = word_info['count']
+                all_lemmas[lemma]['analyzed_variants'] = word_info['variants']
+            
+            # Обрабатываем reference статьи
+            for word_info in keywords_analysis['reference']['words']:
+                lemma = word_info['lemma']
+                if lemma not in all_lemmas:
+                    all_lemmas[lemma] = {
+                        'type': word_info['type'],
+                        'analyzed': 0,
+                        'reference': 0,
+                        'citing': 0,
+                        'analyzed_variants': Counter(),
+                        'reference_variants': Counter(),
+                        'citing_variants': Counter()
+                    }
+                all_lemmas[lemma]['reference'] = word_info['count']
+                all_lemmas[lemma]['reference_variants'] = word_info['variants']
+            
+            # Обрабатываем citing статьи
+            for word_info in keywords_analysis['citing']['words']:
+                lemma = word_info['lemma']
+                if lemma not in all_lemmas:
+                    all_lemmas[lemma] = {
+                        'type': word_info['type'],
+                        'analyzed': 0,
+                        'reference': 0,
+                        'citing': 0,
+                        'analyzed_variants': Counter(),
+                        'reference_variants': Counter(),
+                        'citing_variants': Counter()
+                    }
+                all_lemmas[lemma]['citing'] = word_info['count']
+                all_lemmas[lemma]['citing_variants'] = word_info['variants']
+            
+            # Создаем строки данных
+            for lemma, stats in all_lemmas.items():
+                # Рассчитываем нормализованные значения
+                analyzed_norm = stats['analyzed'] / total_analyzed if total_analyzed > 0 else 0
+                reference_norm = stats['reference'] / total_reference if total_reference > 0 else 0
+                citing_norm = stats['citing'] / total_citing if total_citing > 0 else 0
+                total_norm = analyzed_norm + reference_norm + citing_norm
+                
+                # Собираем все варианты слова
+                all_variants = set()
+                variants_info = []
+                
+                # Варианты из analyzed статей
+                if stats['analyzed_variants']:
+                    for variant, count in stats['analyzed_variants'].most_common(3):
+                        all_variants.add(variant)
+                        variants_info.append(f"{variant}({count})")
+                
+                # Варианты из reference статей
+                if stats['reference_variants']:
+                    for variant, count in stats['reference_variants'].most_common(3):
+                        all_variants.add(variant)
+                        if variant not in [v.split('(')[0] for v in variants_info]:
+                            variants_info.append(f"{variant}({count})")
+                
+                # Варианты из citing статей
+                if stats['citing_variants']:
+                    for variant, count in stats['citing_variants'].most_common(3):
+                        all_variants.add(variant)
+                        if variant not in [v.split('(')[0] for v in variants_info]:
+                            variants_info.append(f"{variant}({count})")
+                
+                # Формируем строку с вариантами
+                variants_str = ', '.join(sorted(all_variants))
+                
+                data.append({
+                    'Title term': lemma,
+                    'Variants': variants_str,
+                    'Type': stats['type'],
+                    'Analyzed count': stats['analyzed'],
+                    'Reference count': stats['reference'],
+                    'Citing Count': stats['citing'],
+                    'Analyzed norm count': round(analyzed_norm, 4),
+                    'Reference norm count': round(reference_norm, 4),
+                    'Citing norm Count': round(citing_norm, 4),
+                    'Total norm count': round(total_norm, 4)
+                })
+            
+            # Сортировка по Total norm count (от большего к меньшему)
+            data.sort(key=lambda x: x['Total norm count'], reverse=True)
+            
+            return data
 
     def _prepare_terms_topics_data(self) -> List[Dict]:
         """Подготавливает данные для листа Terms and Topics"""
@@ -4168,3 +4277,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
