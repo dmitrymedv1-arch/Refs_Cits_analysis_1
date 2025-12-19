@@ -35,6 +35,7 @@ import tempfile
 import base64
 from io import BytesIO
 import joblib
+from fuzzywuzzy import fuzz  # Добавляем для ROR поиска
 
 # Настройка страницы Streamlit
 st.set_page_config(
@@ -90,6 +91,16 @@ class Config:
         'top_journal_share': 0.6,      # >60% из топ-1 журнала
         'cluster_coefficient': 0.8,    # коэффициент кластеризации >0.8
         'geographic_bias': 0.9         # географический bias >0.9
+    }
+
+    # Конфигурация для анализа Frontiers & Hot Topics
+    FRONTIERS_ANALYSIS_CONFIG = {
+        'min_term_frequency': 3,           # Минимальная частота термина
+        'min_topic_publications': 10,      # Минимум публикаций для темы
+        'burst_score_threshold': 70,       # Порог для burst detection
+        'growth_period_years': 3,          # Период для анализа роста
+        'hot_topics_limit': 50,            # Лимит вывода hot topics
+        'ngram_max_size': 3                # Максимальный размер N-gram
     }
 
     COUNTRY_CODES = {
@@ -216,6 +227,18 @@ class SmartCacheManager:
             'medium_insights': {},
             'deep_analysis': {},
             'citing_relationships': {}
+        }
+
+        # Кэш для результатов анализа Frontiers & Hot Topics
+        self.frontiers_analysis_cache = {
+            'title_terms': {},
+            'topic_growth': {},
+            'term_topic_convergence': {},
+            'citation_bursts': {},
+            'early_adopters': {},
+            'frontier_candidates': {},
+            'temporal_hotspots': {},
+            'predictive_horizons': {}
         }
 
         if not os.path.exists(cache_dir):
@@ -483,6 +506,11 @@ class SmartCacheManager:
             self.ethical_analysis_cache = {
                 'quick_checks': {}, 'medium_insights': {}, 'deep_analysis': {}, 'citing_relationships': {}
             }
+            self.frontiers_analysis_cache = {
+                'title_terms': {}, 'topic_growth': {}, 'term_topic_convergence': {},
+                'citation_bursts': {}, 'early_adopters': {}, 'frontier_candidates': {},
+                'temporal_hotspots': {}, 'predictive_horizons': {}
+            }
             self.stats = {k: 0 for k in self.stats.keys()}
 
             st.success("✅ Кэш полностью очищен")
@@ -550,6 +578,28 @@ class SmartCacheManager:
         else:
             for analysis in self.ethical_analysis_cache:
                 self.ethical_analysis_cache[analysis].clear()
+
+    # Методы для кэширования анализа Frontiers & Hot Topics
+    def get_frontiers_analysis(self, analysis_type: str, key: str) -> Optional[Dict]:
+        if analysis_type in self.frontiers_analysis_cache and key in self.frontiers_analysis_cache[analysis_type]:
+            return self.frontiers_analysis_cache[analysis_type][key]
+        return None
+
+    def set_frontiers_analysis(self, analysis_type: str, key: str, data: Dict):
+        if analysis_type not in self.frontiers_analysis_cache:
+            self.frontiers_analysis_cache[analysis_type] = {}
+        self.frontiers_analysis_cache[analysis_type][key] = {
+            'data': data,
+            'timestamp': time.time()
+        }
+
+    def clear_frontiers_analysis(self, analysis_type: str = None):
+        if analysis_type:
+            if analysis_type in self.frontiers_analysis_cache:
+                self.frontiers_analysis_cache[analysis_type].clear()
+        else:
+            for analysis in self.frontiers_analysis_cache:
+                self.frontiers_analysis_cache[analysis].clear()
 
 # ============================================================================
 # 🚀 КЛАСС АДАПТИВНЫХ ЗАДЕРЖЕК
@@ -3874,6 +3924,659 @@ class HierarchicalDataAnalyzer:
         return "; ".join(notes)
 
 # ============================================================================
+# 🔬 КЛАСС АНАЛИЗА FRONTIERS & HOT TOPICS (НОВЫЙ)
+# ============================================================================
+
+class FrontiersHotTopicsAnalyzer:
+    def __init__(self, cache_manager: SmartCacheManager, data_processor: DataProcessor):
+        self.cache = cache_manager
+        self.processor = data_processor
+        
+        # Конфигурация
+        self.config = Config.FRONTIERS_ANALYSIS_CONFIG
+        self.current_year = datetime.now().year
+        
+        # Кэш для результатов
+        self.analysis_cache = {
+            'title_terms': {},
+            'topic_growth': {},
+            'term_topic_convergence': {},
+            'citation_bursts': {},
+            'early_adopters': {},
+            'frontier_candidates': {},
+            'temporal_hotspots': {},
+            'predictive_horizons': {}
+        }
+
+    def analyze_title_terms(self, analyzed_results: Dict[str, Dict], 
+                          ref_results: Dict[str, Dict] = None,
+                          citing_results: Dict[str, Dict] = None) -> List[Dict]:
+        """Анализ терминов в заголовках статей"""
+        cache_key = 'title_terms_analysis'
+        
+        # Проверка кэша
+        cached = self.cache.get_frontiers_analysis('title_terms', cache_key)
+        if cached is not None:
+            return cached
+        
+        all_titles = []
+        title_years = {}
+        
+        # Собираем заголовки и годы из всех источников
+        for doi, result in analyzed_results.items():
+            if result.get('status') == 'success':
+                title = result.get('publication_info', {}).get('title', '')
+                year = result.get('publication_info', {}).get('year', '')
+                if title and year:
+                    all_titles.append(title)
+                    title_years[title] = year
+        
+        if ref_results:
+            for doi, result in ref_results.items():
+                if result.get('status') == 'success':
+                    title = result.get('publication_info', {}).get('title', '')
+                    year = result.get('publication_info', {}).get('year', '')
+                    if title and year:
+                        all_titles.append(title)
+                        title_years[title] = year
+        
+        if citing_results:
+            for doi, result in citing_results.items():
+                if result.get('status') == 'success':
+                    title = result.get('publication_info', {}).get('title', '')
+                    year = result.get('publication_info', {}).get('year', '')
+                    if title and year:
+                        all_titles.append(title)
+                        title_years[title] = year
+        
+        # Извлекаем N-gram (1-3 слова)
+        ngrams_counter = Counter()
+        ngram_years = defaultdict(list)
+        
+        for title in all_titles:
+            words = title.lower().split()
+            
+            # 1-gram
+            for i in range(len(words)):
+                term = words[i]
+                if len(term) > 3:  # Исключаем короткие слова
+                    ngrams_counter[term] += 1
+                    ngram_years[term].append(title_years.get(title, ''))
+            
+            # 2-gram
+            for i in range(len(words) - 1):
+                term = f"{words[i]} {words[i+1]}"
+                ngrams_counter[term] += 1
+                ngram_years[term].append(title_years.get(title, ''))
+            
+            # 3-gram
+            for i in range(len(words) - 2):
+                term = f"{words[i]} {words[i+1]} {words[i+2]}"
+                ngrams_counter[term] += 1
+                ngram_years[term].append(title_years.get(title, ''))
+        
+        # Фильтруем по минимальной частоте
+        filtered_ngrams = {k: v for k, v in ngrams_counter.items() 
+                          if v >= self.config['min_term_frequency']}
+        
+        # Анализ временной динамики
+        results = []
+        for term, count in filtered_ngrams.items():
+            years = [int(y) for y in ngram_years[term] if y and y.isdigit()]
+            
+            if len(years) < 3:  # Нужно минимум 3 года для анализа тренда
+                continue
+            
+            years.sort()
+            first_year = min(years)
+            last_year = max(years)
+            term_lifetime = last_year - first_year + 1
+            
+            # Распределение по годам
+            year_counts = Counter(years)
+            
+            # Расчет burst score
+            recent_years = [y for y in years if y >= self.current_year - 3]
+            burst_score = 0
+            if recent_years:
+                recent_count = len(recent_years)
+                avg_per_year = count / term_lifetime
+                recent_avg = recent_count / 3
+                burst_score = min(100, (recent_avg / max(1, avg_per_year)) * 50)
+            
+            # Определение тренда
+            if term_lifetime >= 3:
+                first_half = [y for y in years if y < (first_year + term_lifetime // 2)]
+                second_half = [y for y in years if y >= (first_year + term_lifetime // 2)]
+                
+                first_count = len(first_half)
+                second_count = len(second_half)
+                
+                if second_count > first_count * 1.5:
+                    trend = "Rising"
+                elif second_count < first_count * 0.7:
+                    trend = "Declining"
+                else:
+                    trend = "Stable"
+            else:
+                trend = "New"
+            
+            results.append({
+                'Term': term,
+                'Total_Occurrences': count,
+                'First_Year_Appeared': first_year,
+                'Last_Year_Appeared': last_year,
+                'Term_Lifetime': term_lifetime,
+                'Avg_Per_Year': round(count / term_lifetime, 2),
+                'Recent_3_Years_Count': len(recent_years),
+                'Burst_Score': round(burst_score, 1),
+                'Current_Trend': trend,
+                'Peak_Year': max(year_counts.items(), key=lambda x: x[1])[0] if year_counts else first_year
+            })
+        
+        # Сортировка по Burst Score
+        results.sort(key=lambda x: x['Burst_Score'], reverse=True)
+        
+        # Сохраняем в кэш
+        self.cache.set_frontiers_analysis('title_terms', cache_key, results)
+        
+        return results[:self.config['hot_topics_limit']]
+
+    def analyze_topic_growth(self, analyzed_results: Dict[str, Dict]) -> List[Dict]:
+        """Анализ роста предметных областей (на основе OpenAlex и заголовков)"""
+        cache_key = 'topic_growth_analysis'
+        
+        # Проверка кэша
+        cached = self.cache.get_frontiers_analysis('topic_growth', cache_key)
+        if cached is not None:
+            return cached
+        
+        # Для простоты используем заголовки для категоризации
+        # В реальной реализации нужно интегрировать с OpenAlex API
+        topic_keywords = {
+            'AI_ML': ['artificial intelligence', 'machine learning', 'neural network', 'deep learning'],
+            'Data_Science': ['data science', 'big data', 'data mining', 'analytics'],
+            'Quantum': ['quantum', 'qubit', 'quantum computing', 'quantum mechanics'],
+            'Biotech': ['biotechnology', 'genome', 'crispr', 'gene editing'],
+            'Climate': ['climate change', 'global warming', 'carbon capture', 'renewable energy'],
+            'Healthcare': ['healthcare', 'medical', 'clinical', 'patient'],
+            'Cybersecurity': ['cybersecurity', 'encryption', 'blockchain', 'privacy'],
+            'Materials': ['material science', 'nanomaterial', 'graphene', 'composite']
+        }
+        
+        topic_counts = defaultdict(lambda: defaultdict(int))
+        
+        # Анализируем заголовки
+        for doi, result in analyzed_results.items():
+            if result.get('status') == 'success':
+                title = result.get('publication_info', {}).get('title', '').lower()
+                year = result.get('publication_info', {}).get('year', '')
+                
+                if title and year and year.isdigit():
+                    year_int = int(year)
+                    
+                    # Определяем тему по ключевым словам
+                    for topic, keywords in topic_keywords.items():
+                        for keyword in keywords:
+                            if keyword in title:
+                                topic_counts[topic][year_int] += 1
+                                break
+        
+        results = []
+        for topic, year_data in topic_counts.items():
+            if sum(year_data.values()) < self.config['min_topic_publications']:
+                continue
+            
+            years = list(year_data.keys())
+            years.sort()
+            
+            # Расчет роста за последние 3 года
+            recent_years = [y for y in years if y >= self.current_year - 3]
+            if len(recent_years) < 2:
+                continue
+            
+            recent_counts = [year_data[y] for y in recent_years]
+            total_recent = sum(recent_counts)
+            
+            # Расчет общего роста
+            all_counts = [year_data[y] for y in years]
+            total_all = sum(all_counts)
+            
+            # Процентный рост
+            if len(years) >= 2:
+                first_year = min(years)
+                last_year = max(years)
+                
+                first_count = year_data.get(first_year, 0)
+                last_count = year_data.get(last_year, 0)
+                
+                if first_count > 0:
+                    growth_rate = ((last_count - first_count) / first_count) * 100
+                else:
+                    growth_rate = 100 if last_count > 0 else 0
+            else:
+                growth_rate = 0
+            
+            # Momentum score
+            momentum = min(100, (total_recent / max(1, total_all)) * 100 + growth_rate * 0.5)
+            
+            results.append({
+                'Topic_Name': topic.replace('_', ' '),
+                'Total_Publications': total_all,
+                'Publications_Last_3_Years': total_recent,
+                'Growth_3_Years_Percent': round(growth_rate, 1),
+                'First_Year': min(years) if years else 0,
+                'Last_Year': max(years) if years else 0,
+                'Momentum_Score': round(momentum, 1),
+                'Recent_Trend': 'Rising' if growth_rate > 20 else 'Stable' if growth_rate > -10 else 'Declining'
+            })
+        
+        results.sort(key=lambda x: x['Momentum_Score'], reverse=True)
+        
+        # Сохраняем в кэш
+        self.cache.set_frontiers_analysis('topic_growth', cache_key, results)
+        
+        return results
+
+    def analyze_term_topic_convergence(self, term_results: List[Dict], 
+                                     topic_results: List[Dict]) -> List[Dict]:
+        """Анализ сходимости терминов и тем"""
+        cache_key = 'term_topic_convergence'
+        
+        # Проверка кэша
+        cached = self.cache.get_frontiers_analysis('term_topic_convergence', cache_key)
+        if cached is not None:
+            return cached
+        
+        # Берем топ термины и темы
+        top_terms = [t for t in term_results if t['Burst_Score'] > self.config['burst_score_threshold']]
+        top_topics = topic_results[:20]  # Берем топ 20 тем
+        
+        results = []
+        
+        # Упрощенный анализ сходимости
+        for term_info in top_terms:
+            term = term_info['Term'].lower()
+            
+            for topic_info in top_topics:
+                topic_name = topic_info['Topic_Name'].lower()
+                
+                # Проверяем, содержит ли тема термин или наоборот
+                if term in topic_name or any(word in topic_name for word in term.split()):
+                    convergence_strength = min(100, term_info['Burst_Score'] * 0.5 + topic_info['Momentum_Score'] * 0.5)
+                    
+                    results.append({
+                        'Term': term_info['Term'],
+                        'Topic': topic_info['Topic_Name'],
+                        'Term_Burst_Score': term_info['Burst_Score'],
+                        'Topic_Momentum_Score': topic_info['Momentum_Score'],
+                        'Convergence_Strength': round(convergence_strength, 1),
+                        'Term_First_Year': term_info['First_Year_Appeared'],
+                        'Topic_First_Year': topic_info['First_Year'],
+                        'Convergence_Age': self.current_year - max(term_info['First_Year_Appeared'], topic_info['First_Year']),
+                        'Synergy_Level': 'High' if convergence_strength > 70 else 'Medium' if convergence_strength > 40 else 'Low'
+                    })
+        
+        results.sort(key=lambda x: x['Convergence_Strength'], reverse=True)
+        
+        # Сохраняем в кэш
+        self.cache.set_frontiers_analysis('term_topic_convergence', cache_key, results)
+        
+        return results[:50]
+
+    def analyze_citation_bursts(self, analyzed_results: Dict[str, Dict]) -> List[Dict]:
+        """Анализ всплесков цитирования"""
+        cache_key = 'citation_bursts_analysis'
+        
+        # Проверка кэша
+        cached = self.cache.get_frontiers_analysis('citation_bursts', cache_key)
+        if cached is not None:
+            return cached
+        
+        results = []
+        
+        for doi, result in analyzed_results.items():
+            if result.get('status') == 'success':
+                pub_info = result.get('publication_info', {})
+                title = pub_info.get('title', '')
+                year = pub_info.get('year', '')
+                citation_count = pub_info.get('citation_count_crossref', 0)
+                
+                if title and year and year.isdigit():
+                    year_int = int(year)
+                    age = max(1, self.current_year - year_int)
+                    
+                    # Citation velocity
+                    citation_velocity = citation_count / age
+                    
+                    # Определяем burst
+                    if citation_velocity > 10:  # Высокая скорость цитирования
+                        # Извлекаем ключевые термины из заголовка
+                        title_words = [w.lower() for w in title.split() if len(w) > 3]
+                        key_terms = '; '.join(title_words[:5])
+                        
+                        results.append({
+                            'DOI': doi,
+                            'Title_Short': title[:80] + ('...' if len(title) > 80 else ''),
+                            'Publication_Year': year_int,
+                            'Citation_Count': citation_count,
+                            'Citation_Velocity': round(citation_velocity, 2),
+                            'Burst_Intensity': min(100, citation_velocity * 5),
+                            'Key_Terms': key_terms,
+                            'Age_Years': age,
+                            'Annual_Citations': round(citation_count / age, 1),
+                            'Burst_Status': 'High' if citation_velocity > 20 else 'Medium' if citation_velocity > 10 else 'Low'
+                        })
+        
+        results.sort(key=lambda x: x['Citation_Velocity'], reverse=True)
+        
+        # Сохраняем в кэш
+        self.cache.set_frontiers_analysis('citation_bursts', cache_key, results)
+        
+        return results[:50]
+
+    def analyze_early_adopters(self, analyzed_results: Dict[str, Dict],
+                             ref_results: Dict[str, Dict] = None,
+                             citing_results: Dict[str, Dict] = None) -> List[Dict]:
+        """Анализ ранних последователей (авторов, публикующихся в новых темах)"""
+        cache_key = 'early_adopters_analysis'
+        
+        # Проверка кэша
+        cached = self.cache.get_frontiers_analysis('early_adopters', cache_key)
+        if cached is not None:
+            return cached
+        
+        author_topics = defaultdict(set)
+        author_years = defaultdict(list)
+        
+        # Собираем данные по авторам
+        all_results = [analyzed_results]
+        if ref_results:
+            all_results.append(ref_results)
+        if citing_results:
+            all_results.append(citing_results)
+        
+        for results_dict in all_results:
+            for doi, result in results_dict.items():
+                if result.get('status') == 'success':
+                    title = result.get('publication_info', {}).get('title', '').lower()
+                    year = result.get('publication_info', {}).get('year', '')
+                    authors = result.get('authors', [])
+                    
+                    if title and year and year.isdigit() and authors:
+                        year_int = int(year)
+                        
+                        # Определяем тему по ключевым словам в заголовке
+                        detected_topics = []
+                        ai_keywords = ['ai', 'artificial intelligence', 'machine learning', 'deep learning']
+                        quantum_keywords = ['quantum', 'qubit', 'superposition']
+                        biotech_keywords = ['crispr', 'gene editing', 'genome']
+                        
+                        for keyword in ai_keywords:
+                            if keyword in title:
+                                detected_topics.append('AI/ML')
+                                break
+                        
+                        for keyword in quantum_keywords:
+                            if keyword in title:
+                                detected_topics.append('Quantum')
+                                break
+                        
+                        for keyword in biotech_keywords:
+                            if keyword in title:
+                                detected_topics.append('Biotech')
+                                break
+                        
+                        if not detected_topics:
+                            detected_topics.append('Other')
+                        
+                        # Добавляем информацию об авторах
+                        for author in authors:
+                            author_name = author.get('name', '')
+                            if author_name:
+                                for topic in detected_topics:
+                                    author_topics[author_name].add(topic)
+                                author_years[author_name].append(year_int)
+        
+        results = []
+        for author, topics in author_topics.items():
+            if len(topics) >= 2:  # Авторы, работающие в нескольких темах
+                years = author_years[author]
+                if years:
+                    avg_year = sum(years) / len(years)
+                    time_to_adopt = self.current_year - int(avg_year)
+                    
+                    # Новизна тем
+                    topic_novelty = len([t for t in topics if t in ['AI/ML', 'Quantum', 'Biotech']])
+                    
+                    results.append({
+                        'Author_Name': author,
+                        'Topics_Count': len(topics),
+                        'Topics_List': '; '.join(sorted(topics)),
+                        'Avg_Publication_Year': round(avg_year, 1),
+                        'Time_to_Adopt_Avg': round(time_to_adopt, 1),
+                        'Topic_Novelty_Score': min(100, topic_novelty * 25),
+                        'Interdisciplinarity': 'High' if len(topics) >= 3 else 'Medium' if len(topics) == 2 else 'Low',
+                        'Early_Adopter_Score': max(0, 100 - time_to_adopt * 5 + topic_novelty * 10)
+                    })
+        
+        results.sort(key=lambda x: x['Early_Adopter_Score'], reverse=True)
+        
+        # Сохраняем в кэш
+        self.cache.set_frontiers_analysis('early_adopters', cache_key, results)
+        
+        return results[:50]
+
+    def analyze_frontier_candidates(self, term_results: List[Dict],
+                                  topic_results: List[Dict],
+                                  convergence_results: List[Dict]) -> List[Dict]:
+        """Сводный анализ кандидатов в research frontiers"""
+        cache_key = 'frontier_candidates'
+        
+        # Проверка кэша
+        cached = self.cache.get_frontiers_analysis('frontier_candidates', cache_key)
+        if cached is not None:
+            return cached
+        
+        candidates = []
+        
+        # 1. Кандидаты из терминов с высоким burst score
+        for term in term_results[:30]:
+            novelty = min(100, (self.current_year - term['First_Year_Appeared']) * 10)
+            growth = term['Burst_Score']
+            composite_score = (novelty * 0.3 + growth * 0.7)
+            
+            candidates.append({
+                'Candidate_Name': term['Term'],
+                'Type': 'Term',
+                'Novelty_Score': round(novelty, 1),
+                'Growth_Score': round(growth, 1),
+                'Network_Score': 50,  # По умолчанию
+                'Attention_Score': term['Total_Occurrences'] / 10,
+                'Composite_Frontier_Score': round(composite_score, 1),
+                'First_Year': term['First_Year_Appeared'],
+                'Current_Trend': term['Current_Trend'],
+                'Confidence_Level': 'High' if composite_score > 70 else 'Medium' if composite_score > 40 else 'Low',
+                'Suggested_Actions': 'Investigate' if composite_score > 70 else 'Monitor' if composite_score > 40 else 'Watch'
+            })
+        
+        # 2. Кандидаты из тем с высоким momentum
+        for topic in topic_results[:20]:
+            candidates.append({
+                'Candidate_Name': topic['Topic_Name'],
+                'Type': 'Topic',
+                'Novelty_Score': min(100, (self.current_year - topic['First_Year']) * 8),
+                'Growth_Score': topic['Momentum_Score'],
+                'Network_Score': 60,
+                'Attention_Score': topic['Total_Publications'] / 5,
+                'Composite_Frontier_Score': round(topic['Momentum_Score'] * 0.8 + min(100, (self.current_year - topic['First_Year']) * 8) * 0.2, 1),
+                'First_Year': topic['First_Year'],
+                'Current_Trend': topic['Recent_Trend'],
+                'Confidence_Level': 'High' if topic['Momentum_Score'] > 70 else 'Medium' if topic['Momentum_Score'] > 40 else 'Low',
+                'Suggested_Actions': 'Investigate' if topic['Momentum_Score'] > 70 else 'Monitor'
+            })
+        
+        # 3. Кандидаты из сходимости
+        for convergence in convergence_results[:20]:
+            candidates.append({
+                'Candidate_Name': f"{convergence['Term']} + {convergence['Topic']}",
+                'Type': 'Convergence',
+                'Novelty_Score': min(100, 100 - convergence['Convergence_Age'] * 5),
+                'Growth_Score': (convergence['Term_Burst_Score'] + convergence['Topic_Momentum_Score']) / 2,
+                'Network_Score': 80,  # Высокий score для сходимости
+                'Attention_Score': convergence['Convergence_Strength'],
+                'Composite_Frontier_Score': round(convergence['Convergence_Strength'], 1),
+                'First_Year': max(convergence['Term_First_Year'], convergence['Topic_First_Year']),
+                'Current_Trend': 'Rising',
+                'Confidence_Level': convergence['Synergy_Level'],
+                'Suggested_Actions': 'Validate' if convergence['Convergence_Strength'] > 70 else 'Investigate' if convergence['Convergence_Strength'] > 40 else 'Monitor'
+            })
+        
+        # Сортировка по Composite Frontier Score
+        candidates.sort(key=lambda x: x['Composite_Frontier_Score'], reverse=True)
+        
+        # Сохраняем в кэш
+        self.cache.set_frontiers_analysis('frontier_candidates', cache_key, candidates)
+        
+        return candidates[:50]
+
+    def analyze_temporal_hotspots(self, analyzed_results: Dict[str, Dict]) -> List[Dict]:
+        """Анализ временных горячих точек"""
+        cache_key = 'temporal_hotspots'
+        
+        # Проверка кэша
+        cached = self.cache.get_frontiers_analysis('temporal_hotspots', cache_key)
+        if cached is not None:
+            return cached
+        
+        # Группируем по годам и кварталам
+        year_quarter_data = defaultdict(lambda: defaultdict(list))
+        
+        for doi, result in analyzed_results.items():
+            if result.get('status') == 'success':
+                title = result.get('publication_info', {}).get('title', '').lower()
+                pub_date = result.get('publication_info', {}).get('publication_date', '')
+                
+                if title and pub_date:
+                    try:
+                        # Парсим дату
+                        if '-' in pub_date:
+                            parts = pub_date.split('-')
+                            year = int(parts[0])
+                            if len(parts) >= 2:
+                                month = int(parts[1])
+                                quarter = (month - 1) // 3 + 1
+                                
+                                year_quarter_data[year][quarter].append(title)
+                    except:
+                        continue
+        
+        results = []
+        for year in sorted(year_quarter_data.keys(), reverse=True)[:5]:  # Последние 5 лет
+            for quarter in range(1, 5):
+                titles = year_quarter_data[year].get(quarter, [])
+                
+                if titles:
+                    # Анализируем частые термины в этом периоде
+                    term_counter = Counter()
+                    for title in titles:
+                        words = title.split()
+                        # 2-gram анализ
+                        for i in range(len(words) - 1):
+                            term = f"{words[i]} {words[i+1]}"
+                            if len(term) > 6:
+                                term_counter[term] += 1
+                    
+                    # Берем топ 3 термина
+                    top_terms = [term for term, _ in term_counter.most_common(3)]
+                    
+                    # Определяем интенсивность
+                    intensity = len(titles)
+                    intensity_level = 'High' if intensity > 10 else 'Medium' if intensity > 5 else 'Low'
+                    
+                    results.append({
+                        'Year': year,
+                        'Quarter': f'Q{quarter}',
+                        'Hot_Topic_Cluster': f"{year}-Q{quarter} Cluster",
+                        'Trigger_Terms': '; '.join(top_terms),
+                        'Publication_Count': intensity,
+                        'Intensity_Level': intensity_level,
+                        'Key_Finding': f"Cluster of {intensity} publications with focus on {top_terms[0] if top_terms else 'various topics'}",
+                        'Time_Period': f"{year} Q{quarter}"
+                    })
+        
+        # Сохраняем в кэш
+        self.cache.set_frontiers_analysis('temporal_hotspots', cache_key, results)
+        
+        return results
+
+    def analyze_predictive_horizons(self, frontier_candidates: List[Dict]) -> List[Dict]:
+        """Прогноз временных горизонтов для emerging topics"""
+        cache_key = 'predictive_horizons'
+        
+        # Проверка кэша
+        cached = self.cache.get_frontiers_analysis('predictive_horizons', cache_key)
+        if cached is not None:
+            return cached
+        
+        results = []
+        
+        for candidate in frontier_candidates[:20]:
+            composite_score = candidate['Composite_Frontier_Score']
+            first_year = candidate.get('First_Year', self.current_year - 3)
+            topic_age = self.current_year - first_year
+            
+            # Прогноз времени до mainstream
+            if composite_score > 80:
+                time_to_mainstream = 6  # месяцев
+                stage = 'Emerging'
+                impact = 'High'
+            elif composite_score > 60:
+                time_to_mainstream = 12  # месяцев
+                stage = 'Growing'
+                impact = 'Medium'
+            elif composite_score > 40:
+                time_to_mainstream = 24  # месяцев
+                stage = 'Early Growth'
+                impact = 'Medium'
+            else:
+                time_to_mainstream = 36  # месяцев
+                stage = 'Nascent'
+                impact = 'Low'
+            
+            # Определяем барьеры
+            barriers = []
+            if topic_age < 2:
+                barriers.append('Conceptual maturity')
+            if candidate['Type'] == 'Convergence':
+                barriers.append('Interdisciplinary integration')
+            if composite_score < 50:
+                barriers.append('Adoption rate')
+            
+            barriers_str = '; '.join(barriers) if barriers else 'Minimal'
+            
+            results.append({
+                'Emerging_Topic': candidate['Candidate_Name'],
+                'Topic_Type': candidate['Type'],
+                'Current_Stage': stage,
+                'Topic_Age_Years': topic_age,
+                'Time_to_Mainstream_Months': time_to_mainstream,
+                'Adoption_Barriers': barriers_str,
+                'Potential_Impact': impact,
+                'Current_Frontier_Score': composite_score,
+                'Growth_Trajectory': 'Accelerating' if candidate.get('Current_Trend') == 'Rising' else 'Stable' if candidate.get('Current_Trend') == 'Stable' else 'Decelerating',
+                'Monitoring_Metrics': f"Track citations for {candidate['Candidate_Name'].split()[0] if ' ' in candidate['Candidate_Name'] else candidate['Candidate_Name']}",
+                'Forecast_Horizon': f"Q{((datetime.now().month + time_to_mainstream - 1) // 3 + 1)}/{datetime.now().year + time_to_mainstream // 12}"
+            })
+        
+        results.sort(key=lambda x: x['Current_Frontier_Score'], reverse=True)
+        
+        # Сохраняем в кэш
+        self.cache.set_frontiers_analysis('predictive_horizons', cache_key, results)
+        
+        return results
+
+# ============================================================================
 # 📊 КЛАСС ЭКСПОРТА В EXCEL (УЛУЧШЕННЫЙ С НОВЫМИ ФУНКЦИЯМИ)
 # ============================================================================
 
@@ -3929,12 +4632,17 @@ class ExcelExporter:
         self.affiliation_country_stats = defaultdict(lambda: defaultdict(int))
         self.current_year = datetime.now().year
 
-        # Инициализация анализатора
+        # Инициализация анализаторов
         self.hierarchical_analyzer = None
+        self.frontiers_analyzer = None
 
     def set_hierarchical_analyzer(self, hierarchical_analyzer: HierarchicalDataAnalyzer):
         """Устанавливает анализатор для иерархического анализа"""
         self.hierarchical_analyzer = hierarchical_analyzer
+
+    def set_frontiers_analyzer(self, frontiers_analyzer: FrontiersHotTopicsAnalyzer):
+        """Устанавливает анализатор для Frontiers & Hot Topics анализа"""
+        self.frontiers_analyzer = frontiers_analyzer
 
     def _correct_country_for_author(self, author_key: str, affiliation_stats: Dict[str, Any]) -> str:
         """Correct country for author based on affiliation statistics"""
@@ -4035,10 +4743,131 @@ class ExcelExporter:
 
         return insights
 
+    def _analyze_frontiers_hot_topics(self, analysis_types: Dict[str, bool], progress_container=None) -> Dict[str, Any]:
+        """Analyze frontiers and hot topics from collected data"""
+        insights = {
+            'Title_Term_Growth': [],
+            'Topic_Momentum_Map': [],
+            'Term_Topic_Convergence': [],
+            'Citation_Burst_Analysis': [],
+            'Early_Adopters_Network': [],
+            'Frontier_Candidates_Scoreboard': [],
+            'Temporal_Hotspots_Map': [],
+            'Predictive_Horizons': []
+        }
+
+        if not self.frontiers_analyzer:
+            st.warning("⚠️ Frontiers analyzer not set. Skipping frontiers analysis.")
+            return insights
+
+        # Выполняем только выбранные типы анализа
+        if progress_container:
+            progress_container.text("🚀 Starting Frontiers & Hot Topics analysis...")
+
+        # 1. Title Term Growth
+        if analysis_types.get('title_term_growth', False):
+            if progress_container:
+                progress_container.text("📊 Analyzing title term growth...")
+            insights['Title_Term_Growth'] = self.frontiers_analyzer.analyze_title_terms(
+                self.analyzed_results, self.ref_results, self.citing_results
+            )
+
+        # 2. Topic Momentum Map
+        if analysis_types.get('topic_momentum', False):
+            if progress_container:
+                progress_container.text("📈 Analyzing topic momentum...")
+            insights['Topic_Momentum_Map'] = self.frontiers_analyzer.analyze_topic_growth(
+                self.analyzed_results
+            )
+
+        # 3. Term Topic Convergence (требует предыдущих двух)
+        if (analysis_types.get('term_topic_convergence', False) and 
+            insights['Title_Term_Growth'] and insights['Topic_Momentum_Map']):
+            if progress_container:
+                progress_container.text("🔗 Analyzing term-topic convergence...")
+            insights['Term_Topic_Convergence'] = self.frontiers_analyzer.analyze_term_topic_convergence(
+                insights['Title_Term_Growth'], insights['Topic_Momentum_Map']
+            )
+
+        # 4. Citation Burst Analysis
+        if analysis_types.get('citation_bursts', False):
+            if progress_container:
+                progress_container.text("💥 Analyzing citation bursts...")
+            insights['Citation_Burst_Analysis'] = self.frontiers_analyzer.analyze_citation_bursts(
+                self.analyzed_results
+            )
+
+        # 5. Early Adopters Network
+        if analysis_types.get('early_adopters', False):
+            if progress_container:
+                progress_container.text("👥 Analyzing early adopters network...")
+            insights['Early_Adopters_Network'] = self.frontiers_analyzer.analyze_early_adopters(
+                self.analyzed_results, self.ref_results, self.citing_results
+            )
+
+        # 6. Frontier Candidates Scoreboard (требует предыдущих)
+        if (analysis_types.get('frontier_candidates', False) and 
+            (insights['Title_Term_Growth'] or insights['Topic_Momentum_Map'] or insights['Term_Topic_Convergence'])):
+            if progress_container:
+                progress_container.text("🎯 Compiling frontier candidates...")
+            insights['Frontier_Candidates_Scoreboard'] = self.frontiers_analyzer.analyze_frontier_candidates(
+                insights.get('Title_Term_Growth', []),
+                insights.get('Topic_Momentum_Map', []),
+                insights.get('Term_Topic_Convergence', [])
+            )
+
+        # 7. Temporal Hotspots Map
+        if analysis_types.get('temporal_hotspots', False):
+            if progress_container:
+                progress_container.text("🗺️ Mapping temporal hotspots...")
+            insights['Temporal_Hotspots_Map'] = self.frontiers_analyzer.analyze_temporal_hotspots(
+                self.analyzed_results
+            )
+
+        # 8. Predictive Horizons (требует frontier candidates)
+        if (analysis_types.get('predictive_horizons', False) and 
+            insights['Frontier_Candidates_Scoreboard']):
+            if progress_container:
+                progress_container.text("🔮 Analyzing predictive horizons...")
+            insights['Predictive_Horizons'] = self.frontiers_analyzer.analyze_predictive_horizons(
+                insights['Frontier_Candidates_Scoreboard']
+            )
+
+        return insights
+
+    def _prepare_ror_data_with_progress(self, affiliations_list: List[str], progress_container=None) -> Dict[str, Dict]:
+        """Prepare ROR data with progress bar"""
+        ror_data = {}
+        total_affiliations = len(affiliations_list)
+        
+        if progress_container:
+            progress_text = progress_container.text(f"🔍 Поиск ROR данных для {total_affiliations} аффилиаций...")
+            ror_progress_bar = progress_container.progress(0)
+        else:
+            progress_text = None
+            ror_progress_bar = None
+        
+        for idx, aff in enumerate(affiliations_list):
+            if progress_text and ror_progress_bar and total_affiliations > 0:
+                progress_percent = (idx + 1) / total_affiliations
+                ror_progress_bar.progress(progress_percent)
+                progress_text.text(f"🔍 Поиск ROR данных: {idx+1}/{total_affiliations} ({progress_percent*100:.1f}%)")
+            
+            ror_info = self.ror_client.search_organization(aff, category="summary")
+            if ror_info.get('ror_id'):
+                ror_data[aff] = ror_info
+        
+        if progress_text and ror_progress_bar:
+            ror_progress_bar.progress(1.0)
+            progress_text.text(f"✅ ROR данные собраны для {len(ror_data)} аффилиаций")
+        
+        return ror_data
+
     def create_comprehensive_report(self, analyzed_results: Dict[str, Dict],
                                    ref_results: Dict[str, Dict] = None,
                                    citing_results: Dict[str, Dict] = None,
-                                   analysis_types: Dict[str, bool] = None,
+                                   ethical_analysis_types: Dict[str, bool] = None,
+                                   frontiers_analysis_types: Dict[str, bool] = None,
                                    filename: str = None,
                                    progress_container=None) -> BytesIO:
 
@@ -4050,24 +4879,60 @@ class ExcelExporter:
             progress_container.text(f"📊 Creating comprehensive report: {filename}")
 
         # Устанавливаем типы анализа по умолчанию, если не указаны
-        if analysis_types is None:
-            analysis_types = {
+        if ethical_analysis_types is None:
+            ethical_analysis_types = {
                 'quick_checks': True,
                 'medium_insights': True,
                 'deep_analysis': False,
                 'analyzed_citing_relationships': False
             }
 
+        if frontiers_analysis_types is None:
+            frontiers_analysis_types = {
+                'title_term_growth': True,
+                'topic_momentum': True,
+                'term_topic_convergence': True,
+                'citation_bursts': True,
+                'early_adopters': False,
+                'frontier_candidates': True,
+                'temporal_hotspots': False,
+                'predictive_horizons': False
+            }
+
         self.analyzed_results = analyzed_results
         self.ref_results = ref_results or {}
         self.citing_results = citing_results or {}
 
+        # Подготовка summary data с ROR прогрессом
+        if progress_container:
+            progress_container.text("📋 Подготовка summary данных...")
         self._prepare_summary_data()
 
+        # Подготовка ROR данных с прогресс-баром
+        affiliations_list = list(self.affiliation_stats.keys())
+        if affiliations_list and progress_container:
+            progress_container.text(f"🔍 Сбор ROR данных для {len(affiliations_list)} аффилиаций...")
+            ror_data = self._prepare_ror_data_with_progress(affiliations_list, progress_container)
+            
+            # Обновляем affiliation stats с ROR данными
+            for aff, ror_info in ror_data.items():
+                if aff in self.affiliation_stats:
+                    self.affiliation_stats[aff]['colab_id'] = ror_info.get('ror_id', '')
+                    self.affiliation_stats[aff]['website'] = ror_info.get('website', '')
+
         # Generate ethical insights
-        if progress_container:
-            progress_container.text("🔍 Generating ethical insights...")
-        ethical_insights = self._analyze_ethical_insights(analysis_types, progress_container)
+        ethical_insights = {}
+        if any(ethical_analysis_types.values()):
+            if progress_container:
+                progress_container.text("🔍 Generating ethical insights...")
+            ethical_insights = self._analyze_ethical_insights(ethical_analysis_types, progress_container)
+
+        # Generate frontiers insights
+        frontiers_insights = {}
+        if any(frontiers_analysis_types.values()):
+            if progress_container:
+                progress_container.text("🚀 Generating frontiers & hot topics insights...")
+            frontiers_insights = self._analyze_frontiers_hot_topics(frontiers_analysis_types, progress_container)
 
         # Создаем Excel файл в памяти
         output = BytesIO()
@@ -4078,13 +4943,16 @@ class ExcelExporter:
 
             # Создаем вкладки Excel
             self._generate_excel_sheets(writer, analyzed_results, ref_results, citing_results, 
-                                      ethical_insights, analysis_types, progress_container)
+                                      ethical_insights, frontiers_insights,
+                                      ethical_analysis_types, frontiers_analysis_types, 
+                                      progress_container)
 
         output.seek(0)
         return output
 
     def _generate_excel_sheets(self, writer, analyzed_results, ref_results, citing_results,
-                             ethical_insights, analysis_types, progress_container):
+                             ethical_insights, frontiers_insights,
+                             ethical_analysis_types, frontiers_analysis_types, progress_container):
         """Генерирует все вкладки Excel"""
         sheets = [
             ('Article_Analyzed', lambda: self._prepare_analyzed_articles(analyzed_results)),
@@ -4111,17 +4979,42 @@ class ExcelExporter:
         ]
 
         # Добавляем листы анализа неэтичных практик если они включены
-        if analysis_types.get('quick_checks', False) and ethical_insights['quick_checks']:
+        if ethical_analysis_types.get('quick_checks', False) and ethical_insights.get('quick_checks'):
             sheets.append(('Quick_Checks', lambda: ethical_insights['quick_checks']))
         
-        if analysis_types.get('medium_insights', False) and ethical_insights['medium_insights']:
+        if ethical_analysis_types.get('medium_insights', False) and ethical_insights.get('medium_insights'):
             sheets.append(('Medium_Insights', lambda: ethical_insights['medium_insights']))
         
-        if analysis_types.get('deep_analysis', False) and ethical_insights['deep_analysis']:
+        if ethical_analysis_types.get('deep_analysis', False) and ethical_insights.get('deep_analysis'):
             sheets.append(('Deep_Analysis', lambda: ethical_insights['deep_analysis']))
         
-        if analysis_types.get('analyzed_citing_relationships', False) and ethical_insights['analyzed_citing_relationships']:
+        if ethical_analysis_types.get('analyzed_citing_relationships', False) and ethical_insights.get('analyzed_citing_relationships'):
             sheets.append(('Analyzed_Citing_Relationships', lambda: ethical_insights['analyzed_citing_relationships']))
+
+        # Добавляем листы анализа Frontiers & Hot Topics если они включены
+        if frontiers_analysis_types.get('title_term_growth', False) and frontiers_insights.get('Title_Term_Growth'):
+            sheets.append(('Title_Term_Growth', lambda: frontiers_insights['Title_Term_Growth']))
+        
+        if frontiers_analysis_types.get('topic_momentum', False) and frontiers_insights.get('Topic_Momentum_Map'):
+            sheets.append(('Topic_Momentum_Map', lambda: frontiers_insights['Topic_Momentum_Map']))
+        
+        if frontiers_analysis_types.get('term_topic_convergence', False) and frontiers_insights.get('Term_Topic_Convergence'):
+            sheets.append(('Term_Topic_Convergence', lambda: frontiers_insights['Term_Topic_Convergence']))
+        
+        if frontiers_analysis_types.get('citation_bursts', False) and frontiers_insights.get('Citation_Burst_Analysis'):
+            sheets.append(('Citation_Burst_Analysis', lambda: frontiers_insights['Citation_Burst_Analysis']))
+        
+        if frontiers_analysis_types.get('early_adopters', False) and frontiers_insights.get('Early_Adopters_Network'):
+            sheets.append(('Early_Adopters_Network', lambda: frontiers_insights['Early_Adopters_Network']))
+        
+        if frontiers_analysis_types.get('frontier_candidates', False) and frontiers_insights.get('Frontier_Candidates_Scoreboard'):
+            sheets.append(('Frontier_Candidates_Scoreboard', lambda: frontiers_insights['Frontier_Candidates_Scoreboard']))
+        
+        if frontiers_analysis_types.get('temporal_hotspots', False) and frontiers_insights.get('Temporal_Hotspots_Map'):
+            sheets.append(('Temporal_Hotspots_Map', lambda: frontiers_insights['Temporal_Hotspots_Map']))
+        
+        if frontiers_analysis_types.get('predictive_horizons', False) and frontiers_insights.get('Predictive_Horizons'):
+            sheets.append(('Predictive_Horizons', lambda: frontiers_insights['Predictive_Horizons']))
 
         for idx, (sheet_name, data_func) in enumerate(sheets):
             if progress_container:
@@ -4293,14 +5186,6 @@ class ExcelExporter:
                 self.affiliation_stats[affiliation]['normalized_citing'] += normalized_aff_value
                 self.affiliation_stats[affiliation]['total_count'] += normalized_aff_value
 
-        affiliations_list = list(self.affiliation_stats.keys())
-
-        for aff in affiliations_list:
-            ror_info = self.ror_client.search_organization(aff, category="summary")
-            if ror_info.get('ror_id'):
-                self.affiliation_stats[aff]['colab_id'] = ror_info.get('ror_id', '')
-                self.affiliation_stats[aff]['website'] = ror_info.get('website', '')
-
     def _prepare_analyzed_articles(self, results: Dict[str, Dict]) -> List[Dict]:
         return self._prepare_article_sheet(results, "analyzed")
 
@@ -4334,6 +5219,7 @@ class ExcelExporter:
             row = {
                 'doi': ref_doi,
                 'publication_date': pub_info.get('publication_date', ''),
+                'Title': pub_info.get('title', '')[:200] + ('...' if len(pub_info.get('title', '')) > 200 else ''),  # НОВАЯ КОЛОНКА
                 'authors': '; '.join([a['name'] for a in authors]),
                 'ORCID ID 1; ORCID ID 2... ORCID ID last': '; '.join(orcid_urls),
                 'author count': len(authors),
@@ -4359,6 +5245,7 @@ class ExcelExporter:
                 row = {
                     'doi': ref_doi,
                     'publication_date': '',
+                    'Title': '',  # НОВАЯ КОЛОНКА
                     'authors': '',
                     'ORCID ID 1; ORCID ID 2... ORCID ID last': '',
                     'author count': 0,
@@ -4411,6 +5298,7 @@ class ExcelExporter:
             row = {
                 'doi': cite_doi,
                 'publication_date': pub_info.get('publication_date', ''),
+                'Title': pub_info.get('title', '')[:200] + ('...' if len(pub_info.get('title', '')) > 200 else ''),  # НОВАЯ КОЛОНКА
                 'authors': '; '.join([a['name'] for a in authors]),
                 'ORCID ID 1; ORCID ID 2... ORCID ID last': '; '.join(orcid_urls),
                 'author count': len(authors),
@@ -4440,6 +5328,7 @@ class ExcelExporter:
                 row = {
                     'doi': cite_doi,
                     'publication_date': '',
+                    'Title': '',  # НОВАЯ КОЛОНКА
                     'authors': '',
                     'ORCID ID 1; ORCID ID 2... ORCID ID last': '',
                     'author count': 0,
@@ -4516,6 +5405,7 @@ class ExcelExporter:
             row = {
                 'doi': doi,
                 'publication_date': pub_info.get('publication_date', ''),
+                'Title': pub_info.get('title', '')[:200] + ('...' if len(pub_info.get('title', '')) > 200 else ''),  # НОВАЯ КОЛОНКА
                 'authors': '; '.join([a['name'] for a in authors]),
                 'ORCID ID 1; ORCID ID 2... ORCID ID last': '; '.join(orcid_urls),
                 'author count': len(authors),
@@ -5030,8 +5920,10 @@ class ArticleAnalyzerSystem:
         self.hierarchical_analyzer = HierarchicalDataAnalyzer(
             self.cache_manager, self.data_processor, self.doi_processor
         )
+        self.frontiers_analyzer = FrontiersHotTopicsAnalyzer(self.cache_manager, self.data_processor)
         self.excel_exporter = ExcelExporter(self.data_processor, self.ror_client, self.failed_tracker)
         self.excel_exporter.set_hierarchical_analyzer(self.hierarchical_analyzer)
+        self.excel_exporter.set_frontiers_analyzer(self.frontiers_analyzer)
 
         # Инициализация данных в состоянии сессии
         if 'analyzed_results' not in st.session_state:
@@ -5089,7 +5981,9 @@ class ArticleAnalyzerSystem:
         return doi.strip()
 
     def process_dois(self, dois: List[str], num_workers: int = Config.DEFAULT_WORKERS,
-                    analysis_types: Dict[str, bool] = None, progress_container=None):
+                    ethical_analysis_types: Dict[str, bool] = None,
+                    frontiers_analysis_types: Dict[str, bool] = None,
+                    progress_container=None):
         """Основная функция обработки DOI"""
         
         start_time = time.time()
@@ -5214,14 +6108,28 @@ class ArticleAnalyzerSystem:
             'total_cites': self.system_stats['total_cite_dois']
         }
 
-    def create_excel_report(self, analysis_types: Dict[str, bool] = None, progress_container=None):
+    def create_excel_report(self, ethical_analysis_types: Dict[str, bool] = None,
+                          frontiers_analysis_types: Dict[str, bool] = None, 
+                          progress_container=None):
         """Создает Excel отчет"""
-        if analysis_types is None:
-            analysis_types = {
+        if ethical_analysis_types is None:
+            ethical_analysis_types = {
                 'quick_checks': True,
                 'medium_insights': True,
                 'deep_analysis': False,
                 'analyzed_citing_relationships': False
+            }
+
+        if frontiers_analysis_types is None:
+            frontiers_analysis_types = {
+                'title_term_growth': True,
+                'topic_momentum': True,
+                'term_topic_convergence': True,
+                'citation_bursts': True,
+                'early_adopters': False,
+                'frontier_candidates': True,
+                'temporal_hotspots': False,
+                'predictive_horizons': False
             }
 
         # Обновляем экспортер данными
@@ -5234,7 +6142,8 @@ class ArticleAnalyzerSystem:
             st.session_state.analyzed_results,
             st.session_state.ref_results,
             st.session_state.citing_results,
-            analysis_types,
+            ethical_analysis_types,
+            frontiers_analysis_types,
             progress_container=progress_container
         )
 
@@ -5257,7 +6166,7 @@ def main():
     st.title("📚 Анализатор научных статей по DOI")
     st.markdown("""
     Анализируйте научные статьи по DOI с умным кэшированием, анализом ссылок и цитирований,
-    а также выявлением неэтичных практик цитирования.
+    а также выявлением неэтичных практик цитирования и research frontiers.
     """)
 
     # Инициализация системы
@@ -5307,6 +6216,76 @@ def main():
             value=False,
             help="Анализ связей между анализируемыми и цитирующими статьями"
         )
+        
+        st.markdown("---")
+        
+        # Настройки анализа Frontiers & Hot Topics
+        st.subheader("🚀 Анализ Frontiers & Hot Topics")
+        
+        frontiers_analysis = st.checkbox(
+            "Включить анализ Frontiers & Hot Topics",
+            value=True,
+            help="Анализ emerging research fronts и горячих тем"
+        )
+        
+        if frontiers_analysis:
+            with st.expander("Настройки анализа Frontiers"):
+                title_term_growth = st.checkbox(
+                    "Title Term Growth", 
+                    value=True,
+                    help="Анализ роста терминов в заголовках"
+                )
+                
+                topic_momentum = st.checkbox(
+                    "Topic Momentum Map", 
+                    value=True,
+                    help="Динамика предметных областей"
+                )
+                
+                term_topic_convergence = st.checkbox(
+                    "Term-Topic Convergence", 
+                    value=True,
+                    help="Сходимость терминов и тем"
+                )
+                
+                citation_bursts = st.checkbox(
+                    "Citation Burst Analysis", 
+                    value=True,
+                    help="Анализ всплесков цитирования"
+                )
+                
+                early_adopters = st.checkbox(
+                    "Early Adopters Network", 
+                    value=False,
+                    help="Сеть ранних последователей"
+                )
+                
+                frontier_candidates = st.checkbox(
+                    "Frontier Candidates Scoreboard", 
+                    value=True,
+                    help="Сводный рейтинг кандидатов в frontiers"
+                )
+                
+                temporal_hotspots = st.checkbox(
+                    "Temporal Hotspots Map", 
+                    value=False,
+                    help="Карта временных горячих точек"
+                )
+                
+                predictive_horizons = st.checkbox(
+                    "Predictive Horizons", 
+                    value=False,
+                    help="Прогнозные горизонты для emerging topics"
+                )
+        else:
+            title_term_growth = False
+            topic_momentum = False
+            term_topic_convergence = False
+            citation_bursts = False
+            early_adopters = False
+            frontier_candidates = False
+            temporal_hotspots = False
+            predictive_horizons = False
         
         st.markdown("---")
         
@@ -5376,19 +6355,33 @@ def main():
                 status_text = st.empty()
                 
                 # Собираем настройки анализа
-                analysis_types = {
+                ethical_analysis_types = {
                     'quick_checks': quick_checks,
                     'medium_insights': medium_insights,
                     'deep_analysis': deep_analysis,
                     'analyzed_citing_relationships': citing_relationships
                 }
                 
+                frontiers_analysis_types = {}
+                if frontiers_analysis:
+                    frontiers_analysis_types = {
+                        'title_term_growth': title_term_growth,
+                        'topic_momentum': topic_momentum,
+                        'term_topic_convergence': term_topic_convergence,
+                        'citation_bursts': citation_bursts,
+                        'early_adopters': early_adopters,
+                        'frontier_candidates': frontier_candidates,
+                        'temporal_hotspots': temporal_hotspots,
+                        'predictive_horizons': predictive_horizons
+                    }
+                
                 # Запускаем обработку
                 try:
                     results = system.process_dois(
                         dois, 
                         num_workers, 
-                        analysis_types,
+                        ethical_analysis_types,
+                        frontiers_analysis_types,
                         progress_container
                     )
                     
@@ -5445,15 +6438,31 @@ def main():
         with st.spinner("📊 Создание Excel отчета..."):
             try:
                 # Собираем настройки анализа
-                analysis_types = {
+                ethical_analysis_types = {
                     'quick_checks': quick_checks,
                     'medium_insights': medium_insights,
                     'deep_analysis': deep_analysis,
                     'analyzed_citing_relationships': citing_relationships
                 }
                 
+                frontiers_analysis_types = {}
+                if frontiers_analysis:
+                    frontiers_analysis_types = {
+                        'title_term_growth': title_term_growth,
+                        'topic_momentum': topic_momentum,
+                        'term_topic_convergence': term_topic_convergence,
+                        'citation_bursts': citation_bursts,
+                        'early_adopters': early_adopters,
+                        'frontier_candidates': frontier_candidates,
+                        'temporal_hotspots': temporal_hotspots,
+                        'predictive_horizons': predictive_horizons
+                    }
+                
                 # Создаем отчет
-                excel_file = system.create_excel_report(analysis_types)
+                excel_file = system.create_excel_report(
+                    ethical_analysis_types, 
+                    frontiers_analysis_types
+                )
                 
                 # Создаем имя файла
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -5467,7 +6476,7 @@ def main():
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
                 
-                st.success("✅ Excel отчет создан и готов к скачиванию")
+                st.success("✅ Excel отчет создан и готов к скачивания")
                 
             except Exception as e:
                 st.error(f"❌ Ошибка при создании отчета: {str(e)}")
