@@ -4760,64 +4760,79 @@ class TerminologyAnalyzer:
         
     def get_term_statistics(self) -> Dict[str, Any]:
         """Возвращает статистику по терминам"""
-        total_terms = len(self.term_frequency)
-        total_articles = sum(len(articles) for articles in self.term_articles.values())
-        
-        # Самые частые термины
-        term_freqs = {}
-        for term, year_counts in self.term_frequency.items():
-            term_freqs[term] = sum(year_counts.values())
-        
-        top_terms = sorted(term_freqs.items(), key=lambda x: x[1], reverse=True)[:10]
-        
-        # Динамика по годам
-        yearly_term_counts = defaultdict(int)
-        for year_counts in self.term_frequency.values():
-            for year, count in year_counts.items():
-                yearly_term_counts[year] += count
-        
-        # Средний коэффициент кластеризации
-        avg_clustering = 0
-        if self.term_network.nodes():
-            try:
-                avg_clustering = nx.average_clustering(self.term_network)
-            except:
-                avg_clustering = 0
-        
-        # Подсчет среднего количества терминов на статью
-        total_articles_with_terms = len(self.term_articles)
-        avg_terms_per_article = 0
-        if total_articles_with_terms > 0:
-            total_terms_in_articles = 0
-            for articles_list in self.term_articles.values():
-                total_terms_in_articles += len(articles_list)
-            avg_terms_per_article = total_terms_in_articles / total_articles_with_terms
-        
-        # Создаем безопасные структуры данных
-        safe_top_terms = []
-        for term, count in top_terms:
-            safe_top_terms.append({
-                'term': term,
-                'count': count
-            })
-        
-        safe_yearly_counts = []
-        for year, count in sorted(yearly_term_counts.items()):
-            safe_yearly_counts.append({
-                'year': year,
-                'count': count
-            })
-        
-        return {
-            'total_terms': total_terms,
-            'total_articles_with_terms': total_articles_with_terms,
-            'average_terms_per_article': round(avg_terms_per_article, 2),
-            'top_terms': safe_top_terms,  # Список словарей вместо списка кортежей
-            'yearly_term_counts': safe_yearly_counts,  # Список словарей
-            'network_nodes': self.term_network.number_of_nodes(),
-            'network_edges': self.term_network.number_of_edges(),
-            'average_clustering': round(avg_clustering, 3)
-        }
+        try:
+            total_terms = len(self.term_frequency)
+            total_articles = sum(len(articles) for articles in self.term_articles.values())
+            
+            # Самые частые термины - упрощенный расчет
+            term_freqs = []
+            for term, year_counts in self.term_frequency.items():
+                total_count = sum(year_counts.values())
+                term_freqs.append({
+                    'term': term,
+                    'count': total_count
+                })
+            
+            # Сортируем по частоте
+            term_freqs.sort(key=lambda x: x['count'], reverse=True)
+            top_terms = term_freqs[:10]
+            
+            # Динамика по годам
+            yearly_term_counts = {}
+            for year_counts in self.term_frequency.values():
+                for year, count in year_counts.items():
+                    if year not in yearly_term_counts:
+                        yearly_term_counts[year] = 0
+                    yearly_term_counts[year] += count
+            
+            # Преобразуем в список словарей для безопасности
+            yearly_counts_list = []
+            for year, count in sorted(yearly_term_counts.items()):
+                yearly_counts_list.append({
+                    'year': year,
+                    'count': count
+                })
+            
+            # Средний коэффициент кластеризации
+            avg_clustering = 0
+            if self.term_network.nodes():
+                try:
+                    avg_clustering = nx.average_clustering(self.term_network)
+                except:
+                    avg_clustering = 0
+            
+            # Подсчет среднего количества терминов на статью
+            total_articles_with_terms = len(self.term_articles)
+            avg_terms_per_article = 0
+            if total_articles_with_terms > 0:
+                total_terms_in_articles = 0
+                for articles_list in self.term_articles.values():
+                    total_terms_in_articles += len(articles_list)
+                avg_terms_per_article = total_terms_in_articles / total_articles_with_terms
+            
+            return {
+                'total_terms': total_terms,
+                'total_articles_with_terms': total_articles_with_terms,
+                'average_terms_per_article': round(avg_terms_per_article, 2),
+                'top_terms': top_terms,  # Список словарей
+                'yearly_term_counts': yearly_counts_list,  # Список словарей
+                'network_nodes': self.term_network.number_of_nodes(),
+                'network_edges': self.term_network.number_of_edges(),
+                'average_clustering': round(avg_clustering, 3)
+            }
+        except Exception as e:
+            st.error(f"❌ Error calculating term statistics: {e}")
+            # Возвращаем минимальные данные при ошибке
+            return {
+                'total_terms': 0,
+                'total_articles_with_terms': 0,
+                'average_terms_per_article': 0,
+                'top_terms': [],
+                'yearly_term_counts': [],
+                'network_nodes': 0,
+                'network_edges': 0,
+                'average_clustering': 0
+            }
 # ============================================================================
 # 📊 КЛАСС ЭКСПОРТА В EXCEL (УЛУЧШЕННЫЙ С НОВЫМИ ФУНКЦИЯМИ)
 # ============================================================================
@@ -5172,7 +5187,7 @@ class ExcelExporter:
                 # Создаем пустой лист с ошибкой
                 error_df = pd.DataFrame([{'Sheet': sheet_name, 'Error': str(e)}])
                 error_df.to_excel(writer, sheet_name=f'Error_{idx}'[:31], index=False)
-                
+                        
     def _prepare_term_statistics(self, term_stats: Dict[str, Any]) -> List[Dict]:
         """Подготавливает статистику терминов"""
         data = []
@@ -5190,11 +5205,10 @@ class ExcelExporter:
             'Description': 'Articles containing extracted terms'
         })
         
+        # Обработка среднего количества терминов
         avg_terms = term_stats.get('average_terms_per_article', 0)
         if isinstance(avg_terms, (int, float)):
             avg_terms = round(avg_terms, 2)
-        elif isinstance(avg_terms, dict):  # Если это dict, берем первое значение
-            avg_terms = round(list(avg_terms.values())[0] if avg_terms else 0, 2)
         
         data.append({
             'Metric': 'Avg Terms per Article',
@@ -5214,11 +5228,10 @@ class ExcelExporter:
             'Description': 'Number of edges in term network'
         })
         
+        # Обработка коэффициента кластеризации
         clustering = term_stats.get('average_clustering', 0)
         if isinstance(clustering, (int, float)):
             clustering = round(clustering, 3)
-        elif isinstance(clustering, dict):  # Если это dict, берем первое значение
-            clustering = round(list(clustering.values())[0] if clustering else 0, 3)
         
         data.append({
             'Metric': 'Average Clustering',
@@ -5226,12 +5239,14 @@ class ExcelExporter:
             'Description': 'Average clustering coefficient'
         })
         
-        # Топ термины - безопасная обработка
+        # БЕЗОПАСНАЯ обработка топ-терминов
         top_terms = term_stats.get('top_terms', [])
         if isinstance(top_terms, (list, tuple)):
-            # Проверяем, что можно взять срез
+            # Берем только первые 10 элементов, если они есть
             try:
-                for i, term_item in enumerate(top_terms[:10], 1):
+                # Преобразуем в список для безопасности
+                top_terms_list = list(top_terms)
+                for i, term_item in enumerate(top_terms_list[:10], 1):
                     if isinstance(term_item, (list, tuple)) and len(term_item) >= 2:
                         term, count = term_item[0], term_item[1]
                         data.append({
@@ -5239,47 +5254,52 @@ class ExcelExporter:
                             'Value': str(term)[:100] if term is not None else '',
                             'Description': f'Frequency: {count} articles'
                         })
-                    elif isinstance(term_item, dict):
-                        # Обработка случая, когда term_item - это dict
-                        for term_key, count in list(term_item.items())[:1]:
-                            data.append({
-                                'Metric': f'Top Term #{i}',
-                                'Value': str(term_key)[:100] if term_key is not None else '',
-                                'Description': f'Frequency: {count} articles'
-                            })
-                            break
+                    elif isinstance(term_item, dict) and 'term' in term_item and 'count' in term_item:
+                        # Обработка формата словаря
+                        term = term_item.get('term', '')
+                        count = term_item.get('count', 0)
+                        data.append({
+                            'Metric': f'Top Term #{i}',
+                            'Value': str(term)[:100] if term else '',
+                            'Description': f'Frequency: {count} articles'
+                        })
             except Exception as e:
                 st.warning(f"⚠️ Error processing top terms: {e}")
-        elif isinstance(top_terms, dict):
-            # Если top_terms - это dict, обрабатываем как словарь
-            try:
-                for i, (term, count) in enumerate(list(top_terms.items())[:10], 1):
-                    data.append({
-                        'Metric': f'Top Term #{i}',
-                        'Value': str(term)[:100] if term is not None else '',
-                        'Description': f'Frequency: {count} articles'
-                    })
-            except Exception as e:
-                st.warning(f"⚠️ Error processing top terms dict: {e}")
-        
-        # Годовая динамика - безопасная обработка
-        yearly_counts = term_stats.get('yearly_term_counts', {})
-        if isinstance(yearly_counts, dict):
-            for year, count in sorted(yearly_counts.items(), key=lambda x: str(x[0])):
+                # Добавляем информацию об ошибке
                 data.append({
-                    'Metric': f'Year {year}',
-                    'Value': count,
-                    'Description': f'Terms appeared in {year}'
+                    'Metric': 'Error',
+                    'Value': 'Failed to process top terms',
+                    'Description': str(e)
                 })
-        elif isinstance(yearly_counts, (list, tuple)):
-            # Если yearly_counts - это список/кортеж
+        else:
+            # Если top_terms не список/кортеж, пропускаем эту секцию
+            data.append({
+                'Metric': 'Top Terms',
+                'Value': 'N/A',
+                'Description': 'Top terms data not available in expected format'
+            })
+        
+        # БЕЗОПАСНАЯ обработка годовой динамики
+        yearly_counts = term_stats.get('yearly_term_counts', [])
+        if isinstance(yearly_counts, (list, tuple)):
             try:
-                for i, (year, count) in enumerate(yearly_counts):
-                    data.append({
-                        'Metric': f'Year {year}',
-                        'Value': count,
-                        'Description': f'Terms appeared in {year}'
-                    })
+                yearly_counts_list = list(yearly_counts)
+                for item in yearly_counts_list:
+                    if isinstance(item, dict) and 'year' in item and 'count' in item:
+                        year = item.get('year', '')
+                        count = item.get('count', 0)
+                        data.append({
+                            'Metric': f'Year {year}',
+                            'Value': count,
+                            'Description': f'Terms appeared in {year}'
+                        })
+                    elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                        year, count = item[0], item[1]
+                        data.append({
+                            'Metric': f'Year {year}',
+                            'Value': count,
+                            'Description': f'Terms appeared in {year}'
+                        })
             except Exception as e:
                 st.warning(f"⚠️ Error processing yearly counts: {e}")
         
@@ -6742,6 +6762,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
