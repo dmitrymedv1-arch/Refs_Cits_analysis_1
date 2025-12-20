@@ -210,7 +210,14 @@ class SmartCacheManager:
         try:
             if os.path.exists(self.progress_cache_file):
                 with open(self.progress_cache_file, 'r') as f:
-                    self.progress_cache = json.load(f)
+                    loaded_cache = json.load(f)
+                    # Преобразуем списки обратно в множества при загрузке
+                    for key, data in loaded_cache.items():
+                        if 'data' in data and isinstance(data['data'], dict):
+                            for subkey, value in data['data'].items():
+                                if isinstance(value, list) and subkey.endswith('_processed'):
+                                    data['data'][subkey] = set(value)
+                        self.progress_cache[key] = data
         except Exception as e:
             st.warning(f"⚠️ Ошибка загрузки прогресса обработки: {e}")
             self.progress_cache = {}
@@ -218,15 +225,38 @@ class SmartCacheManager:
     def _save_progress_cache(self):
         """Сохраняет кэш прогресса обработки в файл"""
         try:
+            # Преобразуем множества в списки для сериализации JSON
+            serializable_cache = {}
+            for key, data in self.progress_cache.items():
+                serializable_data = data.copy()
+                # Преобразуем множества в списки
+                if 'data' in serializable_data and isinstance(serializable_data['data'], dict):
+                    data_copy = serializable_data['data'].copy()
+                    for subkey, value in data_copy.items():
+                        if isinstance(value, set):
+                            data_copy[subkey] = list(value)
+                    serializable_data['data'] = data_copy
+                serializable_cache[key] = serializable_data
+            
             with open(self.progress_cache_file, 'w') as f:
-                json.dump(self.progress_cache, f, indent=2)
+                json.dump(serializable_cache, f, indent=2)
         except Exception as e:
             st.warning(f"⚠️ Ошибка сохранения прогресса обработки: {e}")
 
     def save_processing_progress(self, key: str, data: Dict):
         """Сохраняет прогресс обработки для ключа"""
+        # Преобразуем множества в списки для сериализации
+        serializable_data = data.copy()
+        for subkey, value in serializable_data.items():
+            if isinstance(value, set):
+                serializable_data[subkey] = list(value)
+            elif isinstance(value, dict):
+                for dict_key, dict_value in value.items():
+                    if isinstance(dict_value, set):
+                        value[dict_key] = list(dict_value)
+        
         self.progress_cache[key] = {
-            'data': data,
+            'data': serializable_data,
             'timestamp': time.time(),
             'date': datetime.now().isoformat()
         }
@@ -238,7 +268,17 @@ class SmartCacheManager:
             # Проверяем, не устарели ли данные (старше 7 дней)
             cached_time = self.progress_cache[key].get('timestamp', 0)
             if time.time() - cached_time < 7 * 24 * 3600:  # 7 дней
-                return self.progress_cache[key]['data']
+                data = self.progress_cache[key]['data']
+                # Преобразуем списки обратно в множества при загрузке
+                if isinstance(data, dict):
+                    for subkey, value in data.items():
+                        if isinstance(value, list) and subkey.endswith('_processed'):
+                            data[subkey] = set(value)
+                        elif isinstance(value, dict):
+                            for dict_key, dict_value in value.items():
+                                if isinstance(dict_value, list) and dict_key.endswith('_processed'):
+                                    value[dict_key] = set(dict_value)
+                return data
             else:
                 # Удаляем устаревшие данные
                 del self.progress_cache[key]
@@ -253,7 +293,7 @@ class SmartCacheManager:
         else:
             self.progress_cache.clear()
         self._save_progress_cache()
-
+    
     def _get_cache_key(self, source: str, identifier: str) -> str:
         key_str = f"v3:{source}:{identifier}"
         return hashlib.sha256(key_str.encode()).hexdigest()[:32]
@@ -4846,3 +4886,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
