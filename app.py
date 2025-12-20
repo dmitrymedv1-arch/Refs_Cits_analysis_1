@@ -3056,9 +3056,7 @@ class ExcelExporter:
                     key = f"{normalized_name}_{author['orcid']}"
 
                 # Calculate normalized value for analyzed articles
-                normalized_value = 1 / total_analyzed_articles if total_analyzed_articles > 0 else 0
-                self.author_stats[key]['normalized_analyzed'] += normalized_value
-                self.author_stats[key]['total_count'] += normalized_value
+                self.author_stats[key]['article_count_analyzed'] = self.author_stats[key].get('article_count_analyzed', 0) + 1
 
                 if not self.author_stats[key]['orcid'] and author.get('orcid'):
                     self.author_stats[key]['orcid'] = self.processor._format_orcid_id(author.get('orcid', ''))
@@ -3767,7 +3765,7 @@ class ExcelExporter:
                 'Affiliation': stats['affiliation'],
                 'Country': corrected_country,
                 'Total Count': round(total_count, 4),
-                'Normalized Analyzed': round(stats['normalized_analyzed'], 4),
+                'Normalized Analyzed': round(stats.get('article_count_analyzed', 0) / total_analyzed_articles if total_analyzed_articles > 0 else 0, 4),
                 'Normalized Reference': round(stats['normalized_reference'], 4),
                 'Normalized Citing': round(stats['normalized_citing'], 4)
             }
@@ -4772,4 +4770,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
