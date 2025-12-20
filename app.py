@@ -3765,7 +3765,7 @@ class ExcelExporter:
                 'Affiliation': stats['affiliation'],
                 'Country': corrected_country,
                 'Total Count': round(total_count, 4),
-                'Normalized Analyzed': round(stats.get('article_count_analyzed', 0) / total_analyzed_articles if total_analyzed_articles > 0 else 0, 4),
+                'Normalized Analyzed': round(stats.get('article_count_analyzed', 0) / max(1, sum(1 for r in self.analyzed_results.values() if r.get('status') == 'success')), 4),
                 'Normalized Reference': round(stats['normalized_reference'], 4),
                 'Normalized Citing': round(stats['normalized_citing'], 4)
             }
@@ -4770,5 +4770,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
