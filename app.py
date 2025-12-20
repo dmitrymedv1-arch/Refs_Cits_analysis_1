@@ -1325,24 +1325,33 @@ class RORClient:
     def search_organization_parallel(self, query: str) -> Dict[str, str]:
         """Обертка для параллельной обработки"""
         return self.search_organization(query, "summary")
-
+        
     def search_multiple_organizations(self, queries: List[str], progress_container=None) -> Dict[str, Dict[str, str]]:
         """Параллельный поиск нескольких организаций"""
         results = {}
         
         if not queries:
+            st.warning("Список запросов для ROR поиска пуст")
             return results
         
         # Убираем дубликаты
         unique_queries = list(set(queries))
         
+        # Настраиваем прогресс-бар
         if progress_container:
-            progress_container.text(f"🔍 Поиск ROR данных для {len(unique_queries)} аффилиаций...")
+            # Создаем новые элементы для прогресса внутри контейнера
+            progress_text = progress_container.text(f"🔍 Поиск ROR данных для {len(unique_queries)} аффилиаций...")
             ror_progress_bar = progress_container.progress(0)
             status_text = progress_container.empty()
+            
+            # Обновляем начальный статус
+            status_text.text(f"🔍 Инициализация поиска...")
         else:
+            progress_text = None
             ror_progress_bar = None
             status_text = None
+        
+        st.info(f"Начинаю поиск ROR для {len(unique_queries)} уникальных аффилиаций...")
         
         # Используем ThreadPoolExecutor для параллельной обработки
         with ThreadPoolExecutor(max_workers=self.parallel_workers) as executor:
@@ -1362,23 +1371,31 @@ class RORClient:
                     result = future.result()
                     if result and result.get('ror_id'):
                         results[query] = result
+                        if len(results) % 10 == 0 and status_text:
+                            status_text.text(f"🔍 Найдено {len(results)} ROR записей...")
+                    elif result and not result.get('ror_id'):
+                        # Записываем в результаты даже если не нашли ROR ID
+                        results[query] = result
                 except Exception as e:
                     st.warning(f"Ошибка при поиске ROR для '{query}': {e}")
+                    # Создаем пустую запись в случае ошибки
+                    results[query] = {'ror_id': '', 'website': '', 'score': 0, 'name': '', 'acronyms': []}
                 
                 completed += 1
-                if ror_progress_bar:
+                if ror_progress_bar and total > 0:
                     progress_percent = completed / total
                     ror_progress_bar.progress(progress_percent)
                     if status_text:
-                        status_text.text(f"🔍 Поиск ROR данных: {completed}/{total} ({progress_percent*100:.1f}%)")
+                        status_text.text(f"🔍 Обработано: {completed}/{total} ({progress_percent*100:.1f}%), найдено ROR: {len([r for r in results.values() if r.get('ror_id')])}")
         
         if ror_progress_bar:
             ror_progress_bar.progress(1.0)
             if status_text:
-                status_text.text(f"✅ ROR данные собраны для {len(results)} аффилиаций")
+                status_text.text(f"✅ ROR данные собраны для {len(results)} аффилиаций (найдено ROR ID: {len([r for r in results.values() if r.get('ror_id')])})")
+        
+        st.success(f"✅ Завершен поиск ROR. Найдено {len([r for r in results.values() if r.get('ror_id')])} ROR ID из {len(unique_queries)} запросов")
         
         return results
-
     def _improved_find_best_match(self, query: str, items: List[Dict]) -> Optional[Dict]:
         if not items:
             return None
@@ -2830,13 +2847,15 @@ class ExcelExporter:
             return citation_count / age
         except:
             return 0.0
-
+          
     def _prepare_ror_data_with_progress(self, affiliations_list: List[str], progress_container=None) -> Dict[str, Dict]:
         """Prepare ROR data with progress bar"""
         if not self.enable_ror_analysis:
+            st.info("ℹ️ ROR анализ отключен")
             return {}
             
         if not affiliations_list:
+            st.warning("⚠️ Список аффилиаций пуст")
             return {}
             
         total_affiliations = len(affiliations_list)
@@ -2844,16 +2863,25 @@ class ExcelExporter:
         if progress_container:
             progress_text = progress_container.text(f"🔍 Поиск ROR данных для {total_affiliations} аффилиаций...")
             ror_progress_bar = progress_container.progress(0)
+            status_text = progress_container.empty()
         else:
             progress_text = None
             ror_progress_bar = None
+            status_text = None
         
         # Используем параллельный поиск через RORClient
         ror_data = self.ror_client.search_multiple_organizations(affiliations_list, progress_container)
         
-        if progress_text and ror_progress_bar:
+        # ВАЖНО: Обновляем статистику аффилиаций с полученными ROR данными
+        for affiliation, ror_info in ror_data.items():
+            if affiliation in self.affiliation_stats:
+                self.affiliation_stats[affiliation]['colab_id'] = ror_info.get('ror_id', '')
+                self.affiliation_stats[affiliation]['website'] = ror_info.get('website', '')
+        
+        if progress_container and ror_progress_bar:
             ror_progress_bar.progress(1.0)
-            progress_text.text(f"✅ ROR данные собраны для {len(ror_data)} аффилиаций")
+            if status_text:
+                status_text.text(f"✅ ROR данные собраны для {len(ror_data)} аффилиаций")
         
         return ror_data
 
@@ -2863,38 +2891,42 @@ class ExcelExporter:
                                    filename: str = None,
                                    progress_container=None,
                                    enable_ror: bool = False) -> BytesIO:
-
+    
         if filename is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"articles_analysis_comprehensive_{timestamp}.xlsx"
-
+    
         if progress_container:
-            progress_container.text(f"📊 Creating comprehensive report: {filename}")
-
+            progress_container.text(f"📊 Создание комплексного отчета: {filename}")
+    
         self.analyzed_results = analyzed_results
         self.ref_results = ref_results or {}
         self.citing_results = citing_results or {}
         
         # Устанавливаем флаг ROR анализа
         self.enable_ror_analysis = enable_ror
-
+        
+        if self.enable_ror_analysis and progress_container:
+            progress_container.info("🔍 ROR анализ включен. Будут собраны данные об организациях.")
+    
         # Подготовка summary data с ROR прогрессом
         if progress_container:
             progress_container.text("📋 Подготовка summary данных...")
         self._prepare_summary_data()
-
+    
         # Подготовка ROR данных с прогресс-баром (если включено)
         affiliations_list = list(self.affiliation_stats.keys())
         ror_data = {}
-        if self.enable_ror_analysis and affiliations_list and progress_container:
-            progress_container.text(f"🔍 Сбор ROR данных для {len(affiliations_list)} аффилиаций...")
+        if self.enable_ror_analysis and affiliations_list:
+            if progress_container:
+                progress_container.text(f"🔍 Сбор ROR данных для {len(affiliations_list)} аффилиаций...")
+            # Используем тот же контейнер для прогресса
             ror_data = self._prepare_ror_data_with_progress(affiliations_list, progress_container)
             
-            # Обновляем affiliation stats с ROR данными
-            for aff, ror_info in ror_data.items():
-                if aff in self.affiliation_stats:
-                    self.affiliation_stats[aff]['colab_id'] = ror_info.get('ror_id', '')
-                    self.affiliation_stats[aff]['website'] = ror_info.get('website', '')
+            if ror_data and progress_container:
+                progress_container.success(f"✅ Получено ROR данных для {len(ror_data)} из {len(affiliations_list)} аффилиаций")
+            elif progress_container:
+                progress_container.warning(f"⚠️ Не удалось получить ROR данные для аффилиаций")
 
         # Анализ ключевых слов в заголовках
         if progress_container:
@@ -3747,21 +3779,32 @@ class ExcelExporter:
 
     def _prepare_affiliation_summary(self) -> List[Dict]:
         data = []
-
+    
         for affiliation, stats in self.affiliation_stats.items():
             if stats['total_count'] == 0:
                 continue
-
+    
             # Determine main country for affiliation
             main_country = ""
             if stats['countries']:
                 country_counter = Counter(stats['countries'])
-                main_country = country_counter.most_common(1)[0][0]
-
+                most_common = country_counter.most_common(1)
+                if most_common:
+                    main_country = most_common[0][0]
+    
+            # Проверяем и форматируем ROR данные
+            colab_id = stats.get('colab_id', '')
+            website = stats.get('website', '')
+            
+            # Если ROR анализ был включен, но данные не найдены, добавляем пометку
+            if self.enable_ror_analysis and not colab_id:
+                # Можно добавить пометку, что ROR не найден
+                colab_id = "ROR не найден"
+            
             row = {
                 'Affiliation': affiliation,
-                'Colab ID': stats['colab_id'],
-                'Web Site': stats['website'],
+                'Colab ID': colab_id,
+                'Web Site': website,
                 'Main Country': main_country,
                 'total count': round(stats['total_count'], 4),
                 'Normalized analyzed': round(stats['normalized_analyzed'], 4),
@@ -3769,9 +3812,14 @@ class ExcelExporter:
                 'Normalized citing': round(stats['normalized_citing'], 4)
             }
             data.append(row)
-
+    
         data.sort(key=lambda x: x['total count'], reverse=True)
-
+        
+        # Логируем результат
+        ror_found = sum(1 for row in data if row['Colab ID'] and row['Colab ID'] != "ROR не найден")
+        if self.enable_ror_analysis:
+            st.info(f"📊 В Affiliation_summary: {ror_found} записей с ROR ID из {len(data)} аффилиаций")
+    
         return data
 
     def _prepare_time_ref_analyzed_connections(self) -> List[Dict]:
@@ -4402,7 +4450,16 @@ class ArticleAnalyzerSystem:
         self.excel_exporter.analyzed_results = st.session_state.analyzed_results
         self.excel_exporter.ref_results = st.session_state.ref_results
         self.excel_exporter.citing_results = st.session_state.citing_results
-
+        
+        # Устанавливаем флаг ROR анализа
+        self.excel_exporter.enable_ror_analysis = st.session_state.enable_ror_analysis
+        
+        if progress_container:
+            if st.session_state.enable_ror_analysis:
+                progress_container.info("🔍 ROR анализ включен. Будут собраны данные об организациях.")
+            else:
+                progress_container.info("ℹ️ ROR анализ отключен. Для получения ROR ID включите соответствующую опцию.")
+    
         # Создаем отчет в памяти
         excel_file = self.excel_exporter.create_comprehensive_report(
             st.session_state.analyzed_results,
@@ -4411,7 +4468,7 @@ class ArticleAnalyzerSystem:
             progress_container=progress_container,
             enable_ror=st.session_state.enable_ror_analysis
         )
-
+    
         return excel_file
 
     def clear_data(self):
@@ -4715,3 +4772,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
