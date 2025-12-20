@@ -4506,7 +4506,7 @@ def main():
             st.write(f"Эффективность: {cache_stats['hit_ratio']}%")
             st.write(f"API вызовов сохранено: {cache_stats['api_calls_saved']}")
             st.write(f"Размер кэша: {cache_stats['cache_size_mb']} MB")
-            st.write(f"Обработано DOI: {cache_stats['progress_cache_size']}")
+            st.write(f"Обработано DOI: {cache_stats.get('progress_cache_size', 0)}")
             
             # НОВОЕ: Информация о возобновлении
             if cache_stats['progress_cache_size'] > 0:
@@ -4738,3 +4738,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
