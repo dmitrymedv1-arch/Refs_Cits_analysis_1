@@ -1849,7 +1849,7 @@ class DataProcessor:
                 for inst in authorship.get('institutions', []):
                     if 'country_code' in inst and inst['country_code']:
                         countries.append(inst['country_code'])
-
+        
         if not countries:
             for author in authors:
                 for affil in author['affiliation']:
@@ -2417,7 +2417,7 @@ class OptimizedDOIProcessor:
         return None
 
 # ============================================================================
-# 📊 КЛАСС АНАЛИЗА КЛЮЧЕВЫХ СЛОВ В ЗАГОЛОВКАХ (С ЛЕММАТИЗАЦИЕЙ)
+# 📊 КЛАСС АНАЛИЗА КЛЮЧЕВЫХ СЛОВ В ЗАГОЛОВКАХ (С ЛЕММАТИЗАЦИЕЙ - ОБНОВЛЕННЫЙ)
 # ============================================================================
 
 class TitleKeywordsAnalyzer:
@@ -2440,7 +2440,7 @@ class TitleKeywordsAnalyzer:
             self.stop_words = set(stopwords.words('english'))
             self.lemmatizer = WordNetLemmatizer()
             
-            # Правила для специальных случаев
+            # Правила для специальных случаев - УЛУЧШЕННЫЙ СПИСОК
             self.irregular_plurals = {
                 'analyses': 'analysis',
                 'axes': 'axis',
@@ -2464,9 +2464,398 @@ class TitleKeywordsAnalyzer:
                 'syntheses': 'synthesis',
                 'theses': 'thesis',
                 'vertebrae': 'vertebra',
+                # Добавляем научные термины
+                'oxides': 'oxide',
+                'composites': 'composite',
+                'applications': 'application',
+                'materials': 'material',
+                'methods': 'method',
+                'systems': 'system',
+                'techniques': 'technique',
+                'properties': 'property',
+                'structures': 'structure',
+                'devices': 'device',
+                'processes': 'process',
+                'mechanisms': 'mechanism',
+                'models': 'model',
+                'approaches': 'approach',
+                'frameworks': 'framework',
+                'strategies': 'strategy',
+                'solutions': 'solution',
+                'technologies': 'technology',
+                'materials': 'material',
+                'nanoparticles': 'nanoparticle',
+                'nanostructures': 'nanostructure',
+                'polymers': 'polymer',
+                'composites': 'composite',
+                'ceramics': 'ceramic',
+                'alloys': 'alloy',
+                'coatings': 'coating',
+                'films': 'film',
+                'layers': 'layer',
+                'interfaces': 'interface',
+                'surfaces': 'surface',
+                'catalysts': 'catalyst',
+                'sensors': 'sensor',
+                'actuators': 'actuator',
+                'transistors': 'transistor',
+                'diodes': 'diode',
+                'circuits': 'circuit',
+                'networks': 'network',
+                'algorithms': 'algorithm',
+                'protocols': 'protocol',
+                'databases': 'database',
+                'architectures': 'architecture',
+                'platforms': 'platform',
+                'environments': 'environment',
+                'simulations': 'simulation',
+                'experiments': 'experiment',
+                'measurements': 'measurement',
+                'observations': 'observation',
+                'analyses': 'analysis',
+                'evaluations': 'evaluation',
+                'assessments': 'assessment',
+                'comparisons': 'comparison',
+                'classifications': 'classification',
+                'predictions': 'prediction',
+                'optimizations': 'optimization',
+                'characterizations': 'characterization',
+                'syntheses': 'synthesis',
+                'fabrications': 'fabrication',
+                'preparations': 'preparation',
+                'treatments': 'treatment',
+                'modifications': 'modification',
+                'enhancements': 'enhancement',
+                'improvements': 'improvement',
+                'developments': 'development',
+                'innovations': 'innovation',
+                'discoveries': 'discovery',
+                'inventions': 'invention',
+                'applications': 'application',
+                'implementations': 'implementation',
+                'utilizations': 'utilization',
+                'integrations': 'integration',
+                'combinations': 'combination',
+                'interactions': 'interaction',
+                'relationships': 'relationship',
+                'dependencies': 'dependency',
+                'correlations': 'correlation',
+                'associations': 'association',
+                'connections': 'connection',
+                'communications': 'communication',
+                'collaborations': 'collaboration',
+                'cooperations': 'cooperation',
+                'competitions': 'competition',
+                'conflicts': 'conflict',
+                'challenges': 'challenge',
+                'problems': 'problem',
+                'solutions': 'solution',
+                'alternatives': 'alternative',
+                'options': 'option',
+                'variants': 'variant',
+                'versions': 'version',
+                'editions': 'edition',
+                'releases': 'release',
+                'updates': 'update',
+                'revisions': 'revision',
+                'modifications': 'modification',
+                'adaptations': 'adaptation',
+                'customizations': 'customization',
+                'personalizations': 'personalization',
+                'localizations': 'localization',
+                'internationalizations': 'internationalization',
+                'standardizations': 'standardization',
+                'normalizations': 'normalization',
+                'optimizations': 'optimization',
+                'maximizations': 'maximization',
+                'minimizations': 'minimization',
+                'reductions': 'reduction',
+                'increases': 'increase',
+                'improvements': 'improvement',
+                'enhancements': 'enhancement',
+                'advancements': 'advancement',
+                'progresses': 'progress',
+                'developments': 'development',
+                'evolutions': 'evolution',
+                'revolutions': 'revolution',
+                'transformations': 'transformation',
+                'changes': 'change',
+                'variations': 'variation',
+                'fluctuations': 'fluctuation',
+                'oscillations': 'oscillation',
+                'vibrations': 'vibration',
+                'rotations': 'rotation',
+                'translations': 'translation',
+                'movements': 'movement',
+                'motions': 'motion',
+                'dynamics': 'dynamic',
+                'kinematics': 'kinematic',
+                'mechanics': 'mechanic',
+                'thermodynamics': 'thermodynamic',
+                'electrodynamics': 'electrodynamic',
+                'hydrodynamics': 'hydrodynamic',
+                'aerodynamics': 'aerodynamic',
+                'biomechanics': 'biomechanic',
+                'geomechanics': 'geomechanic',
+                'chemomechanics': 'chemomechanic',
+                'tribology': 'tribology',
+                'rheology': 'rheology',
+                'viscoelasticity': 'viscoelastic',
+                'plasticity': 'plastic',
+                'elasticity': 'elastic',
+                'viscosity': 'viscous',
+                'conductivity': 'conductive',
+                'resistivity': 'resistive',
+                'permeability': 'permeable',
+                'porosity': 'porous',
+                'density': 'dense',
+                'hardness': 'hard',
+                'stiffness': 'stiff',
+                'strength': 'strong',
+                'toughness': 'tough',
+                'brittleness': 'brittle',
+                'ductility': 'ductile',
+                'malleability': 'malleable',
+                'flexibility': 'flexible',
+                'rigidity': 'rigid',
+                'stability': 'stable',
+                'instability': 'unstable',
+                'reliability': 'reliable',
+                'durability': 'durable',
+                'sustainability': 'sustainable',
+                'efficiency': 'efficient',
+                'effectiveness': 'effective',
+                'performance': 'perform',
+                'productivity': 'productive',
+                'quality': 'qualitative',
+                'quantity': 'quantitative',
+                'accuracy': 'accurate',
+                'precision': 'precise',
+                'reliability': 'reliable',
+                'validity': 'valid',
+                'reproducibility': 'reproducible',
+                'repeatability': 'repeatable',
+                'consistency': 'consistent',
+                'homogeneity': 'homogeneous',
+                'heterogeneity': 'heterogeneous',
+                'isotropy': 'isotropic',
+                'anisotropy': 'anisotropic',
+                'symmetry': 'symmetric',
+                'asymmetry': 'asymmetric',
+                'regularity': 'regular',
+                'irregularity': 'irregular',
+                'periodicity': 'periodic',
+                'aperiodicity': 'aperiodic',
+                'randomness': 'random',
+                'determinism': 'deterministic',
+                'stochasticity': 'stochastic',
+                'probability': 'probable',
+                'statistics': 'statistic',
+                'distributions': 'distribution',
+                'functions': 'function',
+                'equations': 'equation',
+                'formulas': 'formula',
+                'theorems': 'theorem',
+                'lemmas': 'lemma',
+                'corollaries': 'corollary',
+                'proofs': 'proof',
+                'demonstrations': 'demonstration',
+                'verifications': 'verification',
+                'validations': 'validation',
+                'confirmations': 'confirmation',
+                'tests': 'test',
+                'experiments': 'experiment',
+                'trials': 'trial',
+                'studies': 'study',
+                'investigations': 'investigation',
+                'examinations': 'examination',
+                'inspections': 'inspection',
+                'audits': 'audit',
+                'reviews': 'review',
+                'surveys': 'survey',
+                'polls': 'poll',
+                'questionnaires': 'questionnaire',
+                'interviews': 'interview',
+                'observations': 'observation',
+                'measurements': 'measurement',
+                'calculations': 'calculation',
+                'computations': 'computation',
+                'simulations': 'simulation',
+                'modelings': 'modeling',
+                'analyses': 'analysis',
+                'syntheses': 'synthesis',
+                'evaluations': 'evaluation',
+                'assessments': 'assessment',
+                'appraisals': 'appraisal',
+                'estimations': 'estimation',
+                'approximations': 'approximation',
+                'predictions': 'prediction',
+                'forecasts': 'forecast',
+                'projections': 'projection',
+                'extrapolations': 'extrapolation',
+                'interpolations': 'interpolation',
+                'regressions': 'regression',
+                'correlations': 'correlation',
+                'classifications': 'classification',
+                'clusters': 'cluster',
+                'segments': 'segment',
+                'groups': 'group',
+                'categories': 'category',
+                'types': 'type',
+                'classes': 'class',
+                'kinds': 'kind',
+                'sorts': 'sort',
+                'varieties': 'variety',
+                'forms': 'form',
+                'shapes': 'shape',
+                'sizes': 'size',
+                'dimensions': 'dimension',
+                'volumes': 'volume',
+                'areas': 'area',
+                'lengths': 'length',
+                'widths': 'width',
+                'heights': 'height',
+                'depths': 'depth',
+                'thicknesses': 'thickness',
+                'diameters': 'diameter',
+                'radii': 'radius',
+                'circumferences': 'circumference',
+                'perimeters': 'perimeter',
+                'surfaces': 'surface',
+                'interfaces': 'interface',
+                'boundaries': 'boundary',
+                'edges': 'edge',
+                'corners': 'corner',
+                'vertices': 'vertex',
+                'nodes': 'node',
+                'points': 'point',
+                'lines': 'line',
+                'curves': 'curve',
+                'planes': 'plane',
+                'spaces': 'space',
+                'regions': 'region',
+                'zones': 'zone',
+                'sectors': 'sector',
+                'segments': 'segment',
+                'parts': 'part',
+                'components': 'component',
+                'elements': 'element',
+                'units': 'unit',
+                'modules': 'module',
+                'blocks': 'block',
+                'pieces': 'piece',
+                'fragments': 'fragment',
+                'particles': 'particle',
+                'atoms': 'atom',
+                'molecules': 'molecule',
+                'ions': 'ion',
+                'electrons': 'electron',
+                'protons': 'proton',
+                'neutrons': 'neutron',
+                'photons': 'photon',
+                'quarks': 'quark',
+                'leptons': 'lepton',
+                'bosons': 'boson',
+                'fermions': 'fermion',
+                'hadrons': 'hadron',
+                'mesons': 'meson',
+                'baryons': 'baryon',
+                'nuclei': 'nucleus',
+                'isotopes': 'isotope',
+                'elements': 'element',
+                'compounds': 'compound',
+                'mixtures': 'mixture',
+                'solutions': 'solution',
+                'suspensions': 'suspension',
+                'colloids': 'colloid',
+                'emulsions': 'emulsion',
+                'foams': 'foam',
+                'gels': 'gel',
+                'solids': 'solid',
+                'liquids': 'liquid',
+                'gases': 'gas',
+                'plasmas': 'plasma',
+                'crystals': 'crystal',
+                'amorphous': 'amorphous',
+                'polymers': 'polymer',
+                'monomers': 'monomer',
+                'oligomers': 'oligomer',
+                'copolymers': 'copolymer',
+                'homopolymers': 'homopolymer',
+                'biopolymers': 'biopolymer',
+                'proteins': 'protein',
+                'enzymes': 'enzyme',
+                'antibodies': 'antibody',
+                'antigens': 'antigen',
+                'vaccines': 'vaccine',
+                'drugs': 'drug',
+                'medicines': 'medicine',
+                'therapies': 'therapy',
+                'treatments': 'treatment',
+                'diagnoses': 'diagnosis',
+                'prognoses': 'prognosis',
+                'symptoms': 'symptom',
+                'diseases': 'disease',
+                'disorders': 'disorder',
+                'conditions': 'condition',
+                'syndromes': 'syndrome',
+                'infections': 'infection',
+                'inflammations': 'inflammation',
+                'tumors': 'tumor',
+                'cancers': 'cancer',
+                'metastases': 'metastasis',
+                'remissions': 'remission',
+                'recurrences': 'recurrence',
+                'survivals': 'survival',
+                'mortality': 'mortal',
+                'morbidity': 'morbid',
+                'epidemiology': 'epidemiologic',
+                'pathology': 'pathologic',
+                'physiology': 'physiologic',
+                'anatomy': 'anatomic',
+                'histology': 'histologic',
+                'cytology': 'cytologic',
+                'genetics': 'genetic',
+                'genomics': 'genomic',
+                'proteomics': 'proteomic',
+                'metabolomics': 'metabolomic',
+                'transcriptomics': 'transcriptomic',
+                'epigenetics': 'epigenetic',
+                'bioinformatics': 'bioinformatic',
+                'biotechnology': 'biotechnologic',
+                'nanotechnology': 'nanotechnologic',
+                'microtechnology': 'microtechnologic',
+                'microfabrication': 'microfabricate',
+                'nanofabrication': 'nanofabricate',
+                'lithography': 'lithographic',
+                'photolithography': 'photolithographic',
+                'electron-beam': 'electron-beam',
+                'ion-beam': 'ion-beam',
+                'focused-ion-beam': 'focused-ion-beam',
+                'atomic-force': 'atomic-force',
+                'scanning-tunneling': 'scanning-tunneling',
+                'transmission-electron': 'transmission-electron',
+                'scanning-electron': 'scanning-electron',
+                'optical': 'optical',
+                'confocal': 'confocal',
+                'fluorescence': 'fluorescent',
+                'phosphorescence': 'phosphorescent',
+                'luminescence': 'luminescent',
+                'chemiluminescence': 'chemiluminescent',
+                'bioluminescence': 'bioluminescent',
+                'electroluminescence': 'electroluminescent',
+                'photoluminescence': 'photoluminescent',
+                'cathodoluminescence': 'cathodoluminescent',
+                'thermoluminescence': 'thermoluminescent',
+                'radioluminescence': 'radioluminescent',
+                'sonoluminescence': 'sonoluminescent',
+                'triboluminescence': 'triboluminescent',
+                'crystalloluminescence': 'crystalloluminescent',
+                'electroluminescence': 'electroluminescent',
+                'magnetoluminescence': 'magnetoluminescent',
             }
             
-            # Суффиксы, которые нужно преобразовать
+            # Суффиксы, которые нужно преобразовать - УЛУЧШЕННЫЙ СПИСОК
             self.suffix_replacements = {
                 'ies': 'y',      # studies -> study
                 'es': '',        # analyses -> analysis (уже обработано выше)
@@ -2490,6 +2879,10 @@ class TitleKeywordsAnalyzer:
                 'less': '',      # helpless -> help
                 'est': '',       # largest -> large
                 'er': '',        # larger -> large
+                'ors': 'or',     # indicators -> indicator
+                'ors': 'or',     # actuators -> actuator
+                'ings': 'ing',   # coatings -> coating
+                'ments': 'ment', # developments -> development
             }
             
         except:
@@ -2499,7 +2892,7 @@ class TitleKeywordsAnalyzer:
             self.irregular_plurals = {}
             self.suffix_replacements = {}
         
-        # Научные стоп-слова (уже лемматизированные)
+        # Научные стоп-слова (уже лемматизированные) - УЛУЧШЕННЫЙ СПИСОК
         self.scientific_stopwords = {
             'activate', 'adapt', 'advance', 'analyze', 'apply',
             'approach', 'architect', 'artificial', 'assess',
@@ -2530,18 +2923,47 @@ class TitleKeywordsAnalyzer:
             'technique', 'technology', 'test', 'theoretical', 'therapy',
             'thermal', 'tissue', 'tolerate', 'toxic', 'transform', 'transition',
             'transmit', 'transport', 'type', 'understand', 'use', 'validate',
-            'value', 'vary', 'virtual', 'waste', 'wave'
+            'value', 'vary', 'virtual', 'waste', 'wave',
+            # Добавляем научные стоп-слова, которые часто встречаются
+            'application', 'approach', 'assessment', 'behavior', 'capability',
+            'characterization', 'comparison', 'concept', 'condition', 'configuration',
+            'construction', 'contribution', 'demonstration', 'description', 'detection',
+            'determination', 'development', 'effectiveness', 'efficiency', 'evaluation',
+            'examination', 'experimentation', 'explanation', 'exploration', 'fabrication',
+            'formation', 'implementation', 'improvement', 'indication', 'investigation',
+            'management', 'manufacture', 'measurement', 'modification', 'observation',
+            'operation', 'optimization', 'performance', 'preparation', 'presentation',
+            'production', 'realization', 'recognition', 'regulation', 'representation',
+            'simulation', 'solution', 'specification', 'synthesis', 'transformation',
+            'treatment', 'utilization', 'validation', 'verification'
         }
     
     def _get_lemma(self, word: str) -> str:
-        """Получаем лемму слова с учетом специальных правил"""
+        """Получаем лемму слова с учетом специальных правил - УЛУЧШЕННАЯ ВЕРСИЯ"""
         if not word or len(word) < 3:
             return word
         
-        # Проверяем нестандартные множественные числа
+        # Приводим к нижнему регистру для обработки
         lower_word = word.lower()
+        
+        # Проверяем нестандартные множественные числа В ПЕРВУЮ ОЧЕРЕДЬ
         if lower_word in self.irregular_plurals:
             return self.irregular_plurals[lower_word]
+        
+        # Проверяем регулярные множественные числа
+        # Если слово заканчивается на 's' или 'es', но не 'ss' или 'us'
+        if lower_word.endswith('s') and not (lower_word.endswith('ss') or lower_word.endswith('us')):
+            # Пробуем удалить 's' или 'es'
+            if lower_word.endswith('es') and len(lower_word) > 2:
+                base_word = lower_word[:-2]
+                # Проверяем, что после удаления 'es' слово не слишком короткое
+                if len(base_word) >= 3:
+                    return base_word
+            elif len(lower_word) > 1:
+                base_word = lower_word[:-1]
+                # Проверяем, что после удаления 's' слово не слишком короткое
+                if len(base_word) >= 3:
+                    return base_word
         
         # Используем лемматизатор, если доступен
         if self.lemmatizer:
@@ -2551,15 +2973,59 @@ class TitleKeywordsAnalyzer:
                 if lemma != lower_word:
                     return lemma
         
-        # Применяем правила суффиксов
-        for suffix, replacement in self.suffix_replacements.items():
+        # Применяем правила суффиксов в обратном порядке (от длинных к коротким)
+        sorted_suffixes = sorted(self.suffix_replacements.keys(), key=len, reverse=True)
+        for suffix in sorted_suffixes:
             if lower_word.endswith(suffix) and len(lower_word) > len(suffix) + 2:
+                replacement = self.suffix_replacements[suffix]
                 base = lower_word[:-len(suffix)] + replacement
                 # Проверяем, что результат не слишком короткий
                 if len(base) >= 3:
+                    # Также проверяем, что base не заканчивается на двойную согласную
+                    if len(base) >= 4 and base[-1] == base[-2]:
+                        base = base[:-1]
                     return base
         
         return lower_word
+    
+    def _get_base_form(self, word: str) -> str:
+        """Получаем базовую форму слова с агрессивной лемматизацией"""
+        lemma = self._get_lemma(word)
+        
+        # Дополнительные правила для научных терминов
+        if lemma.endswith('isation'):
+            return lemma[:-7] + 'ize'
+        elif lemma.endswith('ization'):
+            return lemma[:-7] + 'ize'
+        elif lemma.endswith('ication'):
+            return lemma[:-7] + 'y'
+        elif lemma.endswith('ation'):
+            return lemma[:-5] + 'e'
+        elif lemma.endswith('ition'):
+            return lemma[:-5] + 'e'
+        elif lemma.endswith('ution'):
+            return lemma[:-5] + 'e'
+        elif lemma.endswith('ment'):
+            return lemma[:-4]
+        elif lemma.endswith('ness'):
+            return lemma[:-4]
+        elif lemma.endswith('ity'):
+            return lemma[:-3] + 'e'
+        elif lemma.endswith('ty'):
+            base = lemma[:-2]
+            if base.endswith('i'):
+                return base[:-1] + 'y'
+            return base
+        elif lemma.endswith('ic'):
+            return lemma[:-2] + 'y'
+        elif lemma.endswith('al'):
+            return lemma[:-2]
+        elif lemma.endswith('ive'):
+            return lemma[:-3] + 'e'
+        elif lemma.endswith('ous'):
+            return lemma[:-3]
+        
+        return lemma
     
     def preprocess_content_words(self, text: str) -> List[Dict]:
         """Очищает и нормализует содержательные слова, возвращает словари с леммами и формами"""
@@ -2580,7 +3046,7 @@ class TitleKeywordsAnalyzer:
             if '-' in word:
                 continue
             if len(word) > 2 and word not in self.stop_words:
-                lemma = self._get_lemma(word)
+                lemma = self._get_base_form(word)
                 if lemma not in self.scientific_stopwords:
                     content_words.append({
                         'original': word,
@@ -2605,7 +3071,7 @@ class TitleKeywordsAnalyzer:
                 # Для составных слов лемматизируем каждую часть
                 lemmatized_parts = []
                 for part in parts:
-                    lemma = self._get_lemma(part)
+                    lemma = self._get_base_form(part)
                     lemmatized_parts.append(lemma)
                 
                 compounds.append({
@@ -2617,7 +3083,7 @@ class TitleKeywordsAnalyzer:
         return compounds
 
     def extract_scientific_stopwords(self, text: str) -> List[Dict]:
-        """Извлекает научные стоп-слова"""
+        """Извлекает научные стоп-сwords"""
         if not text or text in ['Название не найдено', 'Таймаут запроса', 'Ошибка сети', 'Ошибка при получения']:
             return []
 
@@ -2630,7 +3096,7 @@ class TitleKeywordsAnalyzer:
 
         for word in words:
             if len(word) > 2:
-                lemma = self._get_lemma(word)
+                lemma = self._get_base_form(word)
                 if lemma in self.scientific_stopwords:
                     scientific_words.append({
                         'original': word,
@@ -2670,13 +3136,17 @@ class TitleKeywordsAnalyzer:
             citing_words.extend(self.extract_compound_words(title))
             citing_words.extend(self.extract_scientific_stopwords(title))
         
-        # Создаем агрегированные данные по леммам
+        # Создаем агрегированные данные по леммам - УЛУЧШЕННАЯ АГРЕГАЦИЯ
         def aggregate_by_lemma(word_list):
             lemma_dict = {}
             for word_info in word_list:
                 lemma = word_info['lemma']
                 original = word_info['original']
                 
+                # Исключаем слишком короткие леммы
+                if len(lemma) < 3:
+                    continue
+                    
                 if lemma not in lemma_dict:
                     lemma_dict[lemma] = {
                         'lemma': lemma,
@@ -2693,6 +3163,42 @@ class TitleKeywordsAnalyzer:
         analyzed_aggregated = aggregate_by_lemma(analyzed_words)
         reference_aggregated = aggregate_by_lemma(reference_words)
         citing_aggregated = aggregate_by_lemma(citing_words)
+        
+        # Объединяем похожие леммы (например, "composite" и "composites")
+        def merge_similar_lemmas(lemma_dict):
+            # Создаем список для удаления после слияния
+            to_remove = set()
+            
+            lemmas = list(lemma_dict.keys())
+            for i in range(len(lemmas)):
+                lemma1 = lemmas[i]
+                if lemma1 in to_remove:
+                    continue
+                    
+                for j in range(i+1, len(lemmas)):
+                    lemma2 = lemmas[j]
+                    if lemma2 in to_remove:
+                        continue
+                    
+                    # Проверяем, похожи ли леммы
+                    if self._are_similar_lemmas(lemma1, lemma2):
+                        # Объединяем в lemma1
+                        lemma_dict[lemma1]['count'] += lemma_dict[lemma2]['count']
+                        for variant, count in lemma_dict[lemma2]['variants'].items():
+                            lemma_dict[lemma1]['variants'][variant] += count
+                        
+                        to_remove.add(lemma2)
+            
+            # Удаляем объединенные леммы
+            for lemma in to_remove:
+                if lemma in lemma_dict:
+                    del lemma_dict[lemma]
+            
+            return lemma_dict
+        
+        analyzed_aggregated = merge_similar_lemmas(analyzed_aggregated)
+        reference_aggregated = merge_similar_lemmas(reference_aggregated)
+        citing_aggregated = merge_similar_lemmas(citing_aggregated)
         
         # Получаем топ-100 для каждого типа
         def get_top_100(aggregated_dict):
@@ -2718,9 +3224,44 @@ class TitleKeywordsAnalyzer:
                 'total_titles': len(valid_citing_titles)
             }
         }
+    
+    def _are_similar_lemmas(self, lemma1: str, lemma2: str) -> bool:
+        """Проверяет, являются ли леммы похожими (например, единственное/множественное число)"""
+        if lemma1 == lemma2:
+            return True
+        
+        # Проверяем, являются ли они формами одного слова
+        # Например: "composite" и "composites"
+        if lemma1.endswith('s') and lemma1[:-1] == lemma2:
+            return True
+        if lemma2.endswith('s') and lemma2[:-1] == lemma1:
+            return True
+        
+        # Проверяем, являются ли они формами с разными суффиксами
+        # Например: "characterization" и "characterize"
+        common_prefix = self._get_common_prefix(lemma1, lemma2)
+        if len(common_prefix) >= 5:  # Если общий префикс достаточно длинный
+            # Проверяем разницу в длине
+            if abs(len(lemma1) - len(lemma2)) <= 3:
+                return True
+        
+        return False
+    
+    def _get_common_prefix(self, str1: str, str2: str) -> str:
+        """Возвращает общий префикс двух строк"""
+        min_length = min(len(str1), len(str2))
+        common_prefix = []
+        
+        for i in range(min_length):
+            if str1[i] == str2[i]:
+                common_prefix.append(str1[i])
+            else:
+                break
+        
+        return ''.join(common_prefix)
 
 # ============================================================================
-# 📊 КЛАСС ЭКСПОРТА В EXCEL (ОБНОВЛЕННЫЙ С ROR ИНТЕГРАЦИЕЙ)
+# 📊 КЛАСС ЭКСПОРТА В EXCEL (ОБНОВЛЕННЫЙ С ROR ИНТЕГРАЦИЕЙ И ИСПРАВЛЕННОЙ НОРМАЛИЗАЦИЕЙ)
 # ============================================================================
 
 class ExcelExporter:
@@ -2751,23 +3292,27 @@ class ExcelExporter:
         self.ref_to_analyzed = defaultdict(list)
         self.analyzed_to_citing = defaultdict(list)
 
+        # ИЗМЕНЕНИЕ: Упрощаем структуру для авторов - используем только normalized_name как ключ
         self.author_stats = defaultdict(lambda: {
             'normalized_name': '',
-            'orcid': '',
+            'orcid': set(),  # Множество ORCID для одного автора
             'affiliation': '',
             'country': '',
-            'total_count': 0,
-            'normalized_analyzed': 0,
+            'total_count': 0,  # Сумма normalized значений
+            'normalized_analyzed': 0,  # Только normalized значение для analyzed
+            'article_count_analyzed': 0,  # Абсолютное количество статей в analyzed
             'normalized_reference': 0,
             'normalized_citing': 0
         })
 
+        # ИЗМЕНЕНИЕ: Упрощаем структуру для аффилиаций
         self.affiliation_stats = defaultdict(lambda: {
             'colab_id': '',
             'website': '',
             'countries': [],
-            'total_count': 0,
-            'normalized_analyzed': 0,
+            'total_count': 0,  # Сумма normalized значений
+            'normalized_analyzed': 0,  # Только normalized значение для analyzed
+            'article_count_analyzed': 0,  # Абсолютное количество статей в analyzed
             'normalized_reference': 0,
             'normalized_citing': 0
         })
@@ -3024,6 +3569,10 @@ class ExcelExporter:
         total_ref_articles = len([r for r in self.ref_results.values() if r.get('status') == 'success'])
         total_citing_articles = len([r for r in self.citing_results.values() if r.get('status') == 'success'])
 
+        # ИЗМЕНЕНИЕ: Временные счетчики для правильной нормализации
+        author_analyzed_counts = Counter()  # Количество статей автора в analyzed
+        affiliation_analyzed_counts = Counter()  # Количество статей аффилиации в analyzed
+
         for doi, result in self.analyzed_results.items():
             if result.get('status') != 'success':
                 continue
@@ -3043,23 +3592,22 @@ class ExcelExporter:
                 self.doi_to_source_counts[cite_doi]['citing'] += 1
                 self.source_dois['citing'].add(cite_doi)
 
-            # Update author stats with normalized values
+            # ИЗМЕНЕНИЕ: Обновляем статистику авторов ДЛЯ ANALYZED
             for author in result.get('authors', []):
                 full_name = author.get('name', '')
                 if not full_name:
                     continue
 
                 normalized_name = self.processor.normalize_author_name(full_name)
+                # ИСПОЛЬЗУЕМ ТОЛЬКО normalized_name как ключ
                 key = normalized_name
 
+                # Считаем абсолютное количество статей в analyzed
+                author_analyzed_counts[key] += 1
+                
+                # Обновляем ORCID как множество
                 if author.get('orcid'):
-                    key = f"{normalized_name}_{author['orcid']}"
-
-                # Calculate normalized value for analyzed articles
-                self.author_stats[key]['article_count_analyzed'] = self.author_stats[key].get('article_count_analyzed', 0) + 1
-
-                if not self.author_stats[key]['orcid'] and author.get('orcid'):
-                    self.author_stats[key]['orcid'] = self.processor._format_orcid_id(author.get('orcid', ''))
+                    self.author_stats[key]['orcid'].add(self.processor._format_orcid_id(author.get('orcid', '')))
 
                 if not self.author_stats[key]['affiliation'] and author.get('affiliation'):
                     self.author_stats[key]['affiliation'] = author.get('affiliation')[0] if author.get('affiliation') else ''
@@ -3074,22 +3622,36 @@ class ExcelExporter:
 
                 self.author_stats[key]['normalized_name'] = normalized_name
 
-            # Update affiliation stats with normalized values
+            # ИЗМЕНЕНИЕ: Обновляем статистику аффилиаций ДЛЯ ANALYZED
             unique_affiliations_in_article = set()
             for author in result.get('authors', []):
                 for affiliation in author.get('affiliation', []):
                     if affiliation:
                         unique_affiliations_in_article.add(affiliation)
 
-            normalized_aff_value = 1 / total_analyzed_articles if total_analyzed_articles > 0 else 0
+            # Считаем абсолютное количество статей для каждой аффилиации в analyzed
             for affiliation in unique_affiliations_in_article:
-                self.affiliation_stats[affiliation]['normalized_analyzed'] += normalized_aff_value
-                self.affiliation_stats[affiliation]['total_count'] += normalized_aff_value
-
+                affiliation_analyzed_counts[affiliation] += 1
+                
                 if result.get('countries'):
                     for country in result.get('countries'):
                         if country:
                             self.affiliation_stats[affiliation]['countries'].append(country)
+
+        # ИЗМЕНЕНИЕ: После подсчета всех analyzed статей, вычисляем normalized значения
+        for author_key, count in author_analyzed_counts.items():
+            if total_analyzed_articles > 0:
+                normalized_value = count / total_analyzed_articles
+                self.author_stats[author_key]['normalized_analyzed'] = normalized_value
+                self.author_stats[author_key]['article_count_analyzed'] = count
+                self.author_stats[author_key]['total_count'] = normalized_value
+
+        for affiliation, count in affiliation_analyzed_counts.items():
+            if total_analyzed_articles > 0:
+                normalized_value = count / total_analyzed_articles
+                self.affiliation_stats[affiliation]['normalized_analyzed'] = normalized_value
+                self.affiliation_stats[affiliation]['article_count_analyzed'] = count
+                self.affiliation_stats[affiliation]['total_count'] = normalized_value
 
         # Process ref results
         for doi, result in self.ref_results.items():
@@ -3099,25 +3661,25 @@ class ExcelExporter:
             # Обновляем статистику Terms and Topics для reference статей
             self._update_terms_topics_stats(doi, result, 'reference')
 
-            # Update author stats for ref articles
+            # ИЗМЕНЕНИЕ: Update author stats for ref articles - ТОЛЬКО normalized значения
             for author in result.get('authors', []):
                 full_name = author.get('name', '')
                 if not full_name:
                     continue
 
                 normalized_name = self.processor.normalize_author_name(full_name)
+                # ИСПОЛЬЗУЕМ ТОЛЬКО normalized_name как ключ
                 key = normalized_name
 
-                if author.get('orcid'):
-                    key = f"{normalized_name}_{author['orcid']}"
-
                 # Calculate normalized value for ref articles
-                normalized_value = 1 / total_ref_articles if total_ref_articles > 0 else 0
-                self.author_stats[key]['normalized_reference'] += normalized_value
-                self.author_stats[key]['total_count'] += normalized_value
+                if total_ref_articles > 0:
+                    normalized_value = 1 / total_ref_articles
+                    self.author_stats[key]['normalized_reference'] += normalized_value
+                    self.author_stats[key]['total_count'] += normalized_value
 
-                if not self.author_stats[key]['orcid'] and author.get('orcid'):
-                    self.author_stats[key]['orcid'] = self.processor._format_orcid_id(author.get('orcid', ''))
+                # Обновляем ORCID как множество
+                if author.get('orcid'):
+                    self.author_stats[key]['orcid'].add(self.processor._format_orcid_id(author.get('orcid', '')))
 
                 if not self.author_stats[key]['affiliation'] and author.get('affiliation'):
                     self.author_stats[key]['affiliation'] = author.get('affiliation')[0] if author.get('affiliation') else ''
@@ -3127,17 +3689,18 @@ class ExcelExporter:
 
                 self.author_stats[key]['normalized_name'] = normalized_name
 
-            # Update affiliation stats for ref articles
+            # ИЗМЕНЕНИЕ: Update affiliation stats for ref articles - ТОЛЬКО normalized значения
             unique_affiliations_in_article = set()
             for author in result.get('authors', []):
                 for affiliation in author.get('affiliation', []):
                     if affiliation:
                         unique_affiliations_in_article.add(affiliation)
 
-            normalized_aff_value = 1 / total_ref_articles if total_ref_articles > 0 else 0
-            for affiliation in unique_affiliations_in_article:
-                self.affiliation_stats[affiliation]['normalized_reference'] += normalized_aff_value
-                self.affiliation_stats[affiliation]['total_count'] += normalized_aff_value
+            if total_ref_articles > 0:
+                normalized_aff_value = 1 / total_ref_articles
+                for affiliation in unique_affiliations_in_article:
+                    self.affiliation_stats[affiliation]['normalized_reference'] += normalized_aff_value
+                    self.affiliation_stats[affiliation]['total_count'] += normalized_aff_value
 
         # Process citing results
         for doi, result in self.citing_results.items():
@@ -3147,25 +3710,25 @@ class ExcelExporter:
             # Обновляем статистику Terms and Topics для citing статей
             self._update_terms_topics_stats(doi, result, 'citing')
 
-            # Update author stats for citing articles
+            # ИЗМЕНЕНИЕ: Update author stats for citing articles - ТОЛЬКО normalized значения
             for author in result.get('authors', []):
                 full_name = author.get('name', '')
                 if not full_name:
                     continue
 
                 normalized_name = self.processor.normalize_author_name(full_name)
+                # ИСПОЛЬЗУЕМ ТОЛЬКО normalized_name как ключ
                 key = normalized_name
 
-                if author.get('orcid'):
-                    key = f"{normalized_name}_{author['orcid']}"
-
                 # Calculate normalized value for citing articles
-                normalized_value = 1 / total_citing_articles if total_citing_articles > 0 else 0
-                self.author_stats[key]['normalized_citing'] += normalized_value
-                self.author_stats[key]['total_count'] += normalized_value
+                if total_citing_articles > 0:
+                    normalized_value = 1 / total_citing_articles
+                    self.author_stats[key]['normalized_citing'] += normalized_value
+                    self.author_stats[key]['total_count'] += normalized_value
 
-                if not self.author_stats[key]['orcid'] and author.get('orcid'):
-                    self.author_stats[key]['orcid'] = self.processor._format_orcid_id(author.get('orcid', ''))
+                # Обновляем ORCID как множество
+                if author.get('orcid'):
+                    self.author_stats[key]['orcid'].add(self.processor._format_orcid_id(author.get('orcid', '')))
 
                 if not self.author_stats[key]['affiliation'] and author.get('affiliation'):
                     self.author_stats[key]['affiliation'] = author.get('affiliation')[0] if author.get('affiliation') else ''
@@ -3175,17 +3738,18 @@ class ExcelExporter:
 
                 self.author_stats[key]['normalized_name'] = normalized_name
 
-            # Update affiliation stats for citing articles
+            # ИЗМЕНЕНИЕ: Update affiliation stats for citing articles - ТОЛЬКО normalized значения
             unique_affiliations_in_article = set()
             for author in result.get('authors', []):
                 for affiliation in author.get('affiliation', []):
                     if affiliation:
                         unique_affiliations_in_article.add(affiliation)
 
-            normalized_aff_value = 1 / total_citing_articles if total_citing_articles > 0 else 0
-            for affiliation in unique_affiliations_in_article:
-                self.affiliation_stats[affiliation]['normalized_citing'] += normalized_aff_value
-                self.affiliation_stats[affiliation]['total_count'] += normalized_aff_value
+            if total_citing_articles > 0:
+                normalized_aff_value = 1 / total_citing_articles
+                for affiliation in unique_affiliations_in_article:
+                    self.affiliation_stats[affiliation]['normalized_citing'] += normalized_aff_value
+                    self.affiliation_stats[affiliation]['total_count'] += normalized_aff_value
 
     def _update_terms_topics_stats(self, doi: str, result: Dict, source_type: str):
         """Обновляет статистику терминов и тем"""
@@ -3258,7 +3822,7 @@ class ExcelExporter:
                     self.terms_topics_stats[key]['peak_count'] = year_count
         
     def _prepare_title_keywords_data(self, keywords_analysis: dict) -> List[Dict]:
-            """Подготавливает данные для листа Title keywords с группировкой по леммам"""
+            """Подготавливает данные для листа Title keywords с группировкой по леммам - УЛУЧШЕННАЯ ВЕРСИЯ"""
             data = []
             
             # Общее количество статей для нормализации
@@ -3317,8 +3881,81 @@ class ExcelExporter:
                 all_lemmas[lemma]['citing'] = word_info['count']
                 all_lemmas[lemma]['citing_variants'] = word_info['variants']
             
-            # Создаем строки данных
+            # Объединяем похожие леммы между типами (analyzed, reference, citing)
+            merged_lemmas = {}
+            lemmas_to_merge = {}
+            
+            # Находим похожие леммы
+            all_lemma_list = list(all_lemmas.keys())
+            for i in range(len(all_lemma_list)):
+                lemma1 = all_lemma_list[i]
+                if lemma1 in lemmas_to_merge:
+                    continue
+                    
+                for j in range(i+1, len(all_lemma_list)):
+                    lemma2 = all_lemma_list[j]
+                    if lemma2 in lemmas_to_merge:
+                        continue
+                    
+                    # Проверяем, похожи ли леммы с помощью улучшенного анализатора
+                    if self.title_keywords_analyzer._are_similar_lemmas(lemma1, lemma2):
+                        # Выбираем более короткую лемму как основную
+                        if len(lemma1) <= len(lemma2):
+                            main_lemma = lemma1
+                            secondary_lemma = lemma2
+                        else:
+                            main_lemma = lemma2
+                            secondary_lemma = lemma1
+                        
+                        if main_lemma not in lemmas_to_merge:
+                            lemmas_to_merge[main_lemma] = []
+                        
+                        lemmas_to_merge[main_lemma].append(secondary_lemma)
+                        lemmas_to_merge[secondary_lemma] = [main_lemma]
+            
+            # Объединяем данные
             for lemma, stats in all_lemmas.items():
+                if lemma in lemmas_to_merge and lemma not in lemmas_to_merge.get(lemma, []):
+                    # Эта лемма уже будет объединена с другой
+                    continue
+                
+                # Проверяем, нужно ли объединять эту лемму с другими
+                if lemma in lemmas_to_merge:
+                    main_lemma = lemma
+                    # Создаем новую запись для основной леммы
+                    merged_stats = {
+                        'type': stats['type'],
+                        'analyzed': stats['analyzed'],
+                        'reference': stats['reference'],
+                        'citing': stats['citing'],
+                        'analyzed_variants': stats['analyzed_variants'].copy(),
+                        'reference_variants': stats['reference_variants'].copy(),
+                        'citing_variants': stats['citing_variants'].copy()
+                    }
+                    
+                    # Объединяем с вторичными леммами
+                    for secondary_lemma in lemmas_to_merge[lemma]:
+                        if secondary_lemma in all_lemmas:
+                            sec_stats = all_leams[secondary_lemma]
+                            merged_stats['analyzed'] += sec_stats['analyzed']
+                            merged_stats['reference'] += sec_stats['reference']
+                            merged_stats['citing'] += sec_stats['citing']
+                            
+                            # Объединяем варианты
+                            for variant, count in sec_stats['analyzed_variants'].items():
+                                merged_stats['analyzed_variants'][variant] += count
+                            for variant, count in sec_stats['reference_variants'].items():
+                                merged_stats['reference_variants'][variant] += count
+                            for variant, count in sec_stats['citing_variants'].items():
+                                merged_stats['citing_variants'][variant] += count
+                    
+                    merged_lemmas[main_lemma] = merged_stats
+                else:
+                    # Лемма не требует объединения
+                    merged_lemmas[lemma] = stats
+            
+            # Создаем строки данных
+            for lemma, stats in merged_lemmas.items():
                 # Рассчитываем нормализованные значения
                 analyzed_norm = stats['analyzed'] / total_analyzed if total_analyzed > 0 else 0
                 reference_norm = stats['reference'] / total_reference if total_reference > 0 else 0
@@ -3703,9 +4340,8 @@ class ExcelExporter:
                 full_name = author['name']
                 normalized_name = self.processor.normalize_author_name(full_name)
 
+                # ИСПОЛЬЗУЕМ ТОЛЬКО normalized_name как ключ
                 key = normalized_name
-                if author.get('orcid'):
-                    key = f"{normalized_name}_{author['orcid']}"
 
                 author_counter[key] += 1
 
@@ -3748,24 +4384,35 @@ class ExcelExporter:
 
     def _prepare_author_summary(self) -> List[Dict]:
         data = []
+        
+        # ИЗМЕНЕНИЕ: Рассчитываем общее количество analyzed статей для нормализации
+        total_analyzed_articles = len([r for r in self.analyzed_results.values() if r.get('status') == 'success'])
 
         for key, stats in self.author_stats.items():
             if stats['total_count'] == 0:
                 continue
 
-            # Calculate total count as sum of normalized values (as requested)
-            total_count = stats['total_count']
+            # ИЗМЕНЕНИЕ: Рассчитываем normalized_analyzed на основе article_count_analyzed
+            normalized_analyzed = 0
+            if total_analyzed_articles > 0:
+                normalized_analyzed = stats['article_count_analyzed'] / total_analyzed_articles
+            
+            # ИЗМЕНЕНИЕ: Total Count должен быть суммой normalized значений, но normalized_analyzed уже правильное
+            total_count = normalized_analyzed + stats['normalized_reference'] + stats['normalized_citing']
+
+            # Преобразуем множество ORCID в строку
+            orcid_str = '; '.join(sorted(stats['orcid'])) if stats['orcid'] else ''
 
             # Correct country
             corrected_country = self._correct_country_for_author(key, self.affiliation_stats)
 
             row = {
                 'Surname + Initial_normalized': stats['normalized_name'],
-                'ORCID ID': stats['orcid'],
+                'ORCID ID': orcid_str,
                 'Affiliation': stats['affiliation'],
                 'Country': corrected_country,
                 'Total Count': round(total_count, 4),
-                'Normalized Analyzed': round(stats.get('article_count_analyzed', 0) / max(1, sum(1 for r in self.analyzed_results.values() if r.get('status') == 'success')), 4),
+                'Normalized Analyzed': round(normalized_analyzed, 4),
                 'Normalized Reference': round(stats['normalized_reference'], 4),
                 'Normalized Citing': round(stats['normalized_citing'], 4)
             }
@@ -3777,6 +4424,9 @@ class ExcelExporter:
 
     def _prepare_affiliation_summary(self) -> List[Dict]:
         data = []
+        
+        # ИЗМЕНЕНИЕ: Рассчитываем общее количество analyzed статей для нормализации
+        total_analyzed_articles = len([r for r in self.analyzed_results.values() if r.get('status') == 'success'])
     
         for affiliation, stats in self.affiliation_stats.items():
             if stats['total_count'] == 0:
@@ -3790,6 +4440,14 @@ class ExcelExporter:
                 if most_common:
                     main_country = most_common[0][0]
     
+            # ИЗМЕНЕНИЕ: Рассчитываем normalized_analyzed на основе article_count_analyzed
+            normalized_analyzed = 0
+            if total_analyzed_articles > 0:
+                normalized_analyzed = stats['article_count_analyzed'] / total_analyzed_articles
+            
+            # ИЗМЕНЕНИЕ: Total Count должен быть суммой normalized значений
+            total_count = normalized_analyzed + stats['normalized_reference'] + stats['normalized_citing']
+
             # Проверяем и форматируем ROR данные
             colab_id = stats.get('colab_id', '')
             website = stats.get('website', '')
@@ -3798,14 +4456,14 @@ class ExcelExporter:
             if self.enable_ror_analysis and not colab_id:
                 # Можно добавить пометку, что ROR не найден
                 colab_id = "ROR не найден"
-            
+    
             row = {
                 'Affiliation': affiliation,
                 'Colab ID': colab_id,
                 'Web Site': website,
                 'Main Country': main_country,
-                'total count': round(stats['total_count'], 4),
-                'Normalized analyzed': round(stats['normalized_analyzed'], 4),
+                'total count': round(total_count, 4),
+                'Normalized analyzed': round(normalized_analyzed, 4),
                 'Normalized reference': round(stats['normalized_reference'], 4),
                 'Normalized citing': round(stats['normalized_citing'], 4)
             }
@@ -3989,7 +4647,21 @@ class ExcelExporter:
             return None
 
     def _prepare_journal_frequency(self, results: Dict[str, Dict], source_type: str) -> List[Dict]:
+        """Подготавливает данные для листа Journal freq с метриками цитирования"""
         journal_counter = Counter()
+        journal_citation_cr = defaultdict(list)  # Список цитирований Crossref для каждого журнала
+        journal_citation_oa = defaultdict(list)  # Список цитирований OpenAlex для каждого журнала
+        journal_articles = defaultdict(list)  # Список статей для каждого журнала (для дополнительной информации)
+
+        # Определяем, из какого источника брать данные для цитирований
+        if source_type == "analyzed":
+            source_data = self.analyzed_results
+        elif source_type == "ref":
+            source_data = self.ref_results
+        elif source_type == "citing":
+            source_data = self.citing_results
+        else:
+            source_data = results
 
         for doi, result in results.items():
             if result.get('status') != 'success':
@@ -3998,11 +4670,80 @@ class ExcelExporter:
             journal = result['publication_info'].get('journal', '')
             if journal:
                 journal_counter[journal] += 1
+                
+                # Получаем данные о цитированиях из соответствующего источника
+                if doi in source_data and source_data[doi].get('status') == 'success':
+                    source_result = source_data[doi]
+                    pub_info = source_result.get('publication_info', {})
+                    
+                    # Добавляем цитирования Crossref
+                    cr_citations = pub_info.get('citation_count_crossref', 0)
+                    if cr_citations > 0:
+                        journal_citation_cr[journal].append(cr_citations)
+                    
+                    # Добавляем цитирования OpenAlex
+                    oa_citations = pub_info.get('citation_count_openalex', 0)
+                    if oa_citations > 0:
+                        journal_citation_oa[journal].append(oa_citations)
+                    
+                    # Сохраняем статью для дополнительной информации
+                    journal_articles[journal].append({
+                        'doi': doi,
+                        'title': pub_info.get('title', ''),
+                        'year': pub_info.get('year', ''),
+                        'cr_citations': cr_citations,
+                        'oa_citations': oa_citations
+                    })
 
         sorted_journals = sorted(journal_counter.items(), key=lambda x: x[1], reverse=True)
 
-        return [{'Full Journal Name': journal, 'Count': count}
-                for journal, count in sorted_journals]
+        data = []
+        for journal, count in sorted_journals:
+            # Рассчитываем метрики цитирования Crossref
+            cr_citations_list = journal_citation_cr.get(journal, [])
+            total_cr = sum(cr_citations_list)
+            avg_cr = total_cr / len(cr_citations_list) if cr_citations_list else 0
+            
+            # Рассчитываем медиану для Crossref
+            median_cr = 0
+            if cr_citations_list:
+                sorted_cr = sorted(cr_citations_list)
+                n = len(sorted_cr)
+                if n % 2 == 1:
+                    median_cr = sorted_cr[n // 2]
+                else:
+                    median_cr = (sorted_cr[n // 2 - 1] + sorted_cr[n // 2]) / 2
+            
+            # Рассчитываем метрики цитирования OpenAlex
+            oa_citations_list = journal_citation_oa.get(journal, [])
+            total_oa = sum(oa_citations_list)
+            avg_oa = total_oa / len(oa_citations_list) if oa_citations_list else 0
+            
+            # Рассчитываем медиану для OpenAlex
+            median_oa = 0
+            if oa_citations_list:
+                sorted_oa = sorted(oa_citations_list)
+                n = len(sorted_oa)
+                if n % 2 == 1:
+                    median_oa = sorted_oa[n // 2]
+                else:
+                    median_oa = (sorted_oa[n // 2 - 1] + sorted_oa[n // 2]) / 2
+            
+            row = {
+                'Full Journal Name': journal,
+                'Count': count,
+                'Total citations (CR)': total_cr,
+                'Total citations (OA)': total_oa,
+                'Average citations (CR)': round(avg_cr, 2),
+                'Average citations (OA)': round(avg_oa, 2),
+                'Median citation (CR)': median_cr,
+                'Median citation (OA)': median_oa,
+                'Articles with CR data': len(cr_citations_list),
+                'Articles with OA data': len(oa_citations_list)
+            }
+            data.append(row)
+
+        return data
 
     def _prepare_affiliation_frequency(self, results: Dict[str, Dict], source_type: str) -> List[Dict]:
         affiliation_counter = Counter()
@@ -4770,6 +5511,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
