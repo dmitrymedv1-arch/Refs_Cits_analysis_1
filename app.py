@@ -194,12 +194,75 @@ class SmartCacheManager:
             'mutual_citations': {}
         }
 
+        # НОВОЕ: Кэш для прогресса обработки
+        self.progress_cache = {
+            'processed_dois': set(),
+            'processing_stage': 'not_started',
+            'last_checkpoint': None,
+            'failed_but_retryable': {}
+        }
+
         if not os.path.exists(cache_dir):
             os.makedirs(cache_dir, exist_ok=True)
 
         self._clean_expired_cache()
-
         self._load_popular_dois()
+        self._load_progress_cache()
+
+    def _load_progress_cache(self):
+        """Загружает кэш прогресса из файла"""
+        progress_file = os.path.join(self.cache_dir, "progress_cache.json")
+        if os.path.exists(progress_file):
+            try:
+                with open(progress_file, 'r') as f:
+                    loaded_data = json.load(f)
+                    self.progress_cache['processed_dois'] = set(loaded_data.get('processed_dois', []))
+                    self.progress_cache['processing_stage'] = loaded_data.get('processing_stage', 'not_started')
+                    self.progress_cache['last_checkpoint'] = loaded_data.get('last_checkpoint')
+                    self.progress_cache['failed_but_retryable'] = loaded_data.get('failed_but_retryable', {})
+            except Exception as e:
+                st.warning(f"⚠️ Ошибка загрузки кэша прогресса: {e}")
+
+    def _save_progress_cache(self):
+        """Сохраняет кэш прогресса в файл"""
+        progress_file = os.path.join(self.cache_dir, "progress_cache.json")
+        try:
+            data_to_save = {
+                'processed_dois': list(self.progress_cache['processed_dois']),
+                'processing_stage': self.progress_cache['processing_stage'],
+                'last_checkpoint': self.progress_cache['last_checkpoint'],
+                'failed_but_retryable': self.progress_cache['failed_but_retryable'],
+                'timestamp': datetime.now().isoformat()
+            }
+            with open(progress_file, 'w') as f:
+                json.dump(data_to_save, f, indent=2, default=str)
+        except Exception as e:
+            st.warning(f"⚠️ Ошибка сохранения кэша прогресса: {e}")
+
+    def mark_doi_as_processed(self, doi: str, stage: str = 'analyzed'):
+        """Отмечает DOI как обработанный"""
+        self.progress_cache['processed_dois'].add(f"{stage}:{doi}")
+        self.progress_cache['processing_stage'] = stage
+        self.progress_cache['last_checkpoint'] = datetime.now().isoformat()
+        self._save_progress_cache()
+
+    def is_doi_processed(self, doi: str, stage: str = 'analyzed') -> bool:
+        """Проверяет, был ли DOI уже обработан"""
+        return f"{stage}:{doi}" in self.progress_cache['processed_dois']
+
+    def get_unprocessed_dois(self, dois: List[str], stage: str = 'analyzed') -> List[str]:
+        """Возвращает список еще не обработанных DOI"""
+        return [doi for doi in dois if not self.is_doi_processed(doi, stage)]
+
+    def clear_progress_cache(self):
+        """Очищает кэш прогресса"""
+        self.progress_cache = {
+            'processed_dois': set(),
+            'processing_stage': 'not_started',
+            'last_checkpoint': None,
+            'failed_but_retryable': {}
+        }
+        self._save_progress_cache()
 
     def _get_cache_key(self, source: str, identifier: str) -> str:
         key_str = f"v3:{source}:{identifier}"
@@ -436,7 +499,8 @@ class SmartCacheManager:
             'cache_size_mb': round(cache_size, 2),
             'hit_ratio': round(hit_ratio, 1),
             'failed_cache_size': len(self.failed_cache),
-            'popular_dois': len(self.popular_cache)
+            'popular_dois': len(self.popular_cache),
+            'progress_cache_size': len(self.progress_cache['processed_dois'])
         }
 
     def clear_all(self):
@@ -455,6 +519,12 @@ class SmartCacheManager:
             self.insights_cache = {
                 'geo_bubbles': {}, 'temporal_patterns': {}, 'hyper_citation': {},
                 'citation_cascades': {}, 'mutual_citations': {}
+            }
+            self.progress_cache = {
+                'processed_dois': set(),
+                'processing_stage': 'not_started',
+                'last_checkpoint': None,
+                'failed_but_retryable': {}
             }
             self.stats = {k: 0 for k in self.stats.keys()}
 
@@ -716,7 +786,7 @@ class ProgressMonitor:
         return summary
 
 # ============================================================================
-# 📝 КЛАСС ТРЕКИНГА НЕУДАЧНЫХ DOI (НОВЫЙ)
+# 📝 КЛАСС ТРЕКИНГА НЕУДАЧНЫХ DOI (ОБНОВЛЕННЫЙ)
 # ============================================================================
 
 class FailedDOITracker:
@@ -743,7 +813,8 @@ class FailedDOITracker:
             'source_type': source_type,
             'timestamp': datetime.now().isoformat(),
             'related_dois': related_dois or [],
-            'original_doi': original_doi
+            'original_doi': original_doi,
+            'retry_count': self.failed_dois.get(doi, {}).get('retry_count', 0) + 1
         }
 
         self.sources[doi] = source_type
@@ -776,6 +847,7 @@ class FailedDOITracker:
                 'DOI': doi,
                 'Source Type': info['source_type'],
                 'Error': info['error'],
+                'Retry Count': info.get('retry_count', 0),
                 'Relationships': relationship_info,
                 'Relationship Count': len(info['related_dois']),
                 'Error Date': info['timestamp']
@@ -795,6 +867,17 @@ class FailedDOITracker:
             'unique_failed_dois': len(self.failed_dois)
         }
 
+    def get_retryable_failed_dois(self, max_retries: int = 3) -> List[str]:
+        """Возвращает список DOI, которые можно повторно попробовать обработать"""
+        retryable = []
+        for doi, info in self.failed_dois.items():
+            if info.get('retry_count', 0) < max_retries:
+                error = info.get('error', '')
+                # Не повторяем DOI, которые не найдены или имеют перманентные ошибки
+                if '404' not in error and 'not found' not in error.lower():
+                    retryable.append(doi)
+        return retryable
+
     def clear(self):
         self.failed_dois.clear()
         self.relationships.clear()
@@ -809,7 +892,7 @@ class FailedDOITracker:
         }
 
 # ============================================================================
-# 🌐 КЛАСС КЛИЕНТОВ API
+# 🌐 КЛАСС КЛИЕНТОВ API (ОБНОВЛЕННЫЙ С УЛУЧШЕННЫМ RETRY)
 # ============================================================================
 
 class APIClient:
@@ -824,7 +907,8 @@ class APIClient:
         })
 
     def make_request(self, url: str, cache_key: str, params: Dict = None,
-                    timeout: int = Config.REQUEST_TIMEOUT, category: str = "api") -> Dict:
+                    timeout: int = Config.REQUEST_TIMEOUT, category: str = "api",
+                    retry_on_rate_limit: bool = True) -> Dict:
 
         full_cache_key = f"{url}:{hash(str(params) if params else '')}"
 
@@ -846,10 +930,28 @@ class APIClient:
                 self.delay.update_delay(True, response_time)
                 return data
 
-            elif response.status_code == 429:
-                self.delay.current_delay = min(self.delay.max_delay, self.delay.current_delay * 1.5)
+            elif response.status_code == 429 and retry_on_rate_limit:
+                # Rate limit - exponential backoff
+                self.delay.current_delay = min(self.delay.max_delay, self.delay.current_delay * 2.0)
                 self.delay.update_delay(False, response_time)
-                return {"error": f"Rate limit exceeded, wait {self.delay.current_delay:.1f}s", "status": 429}
+                
+                # Попробуем подождать и повторить
+                retry_delay = self.delay.current_delay * 2
+                time.sleep(retry_delay)
+                
+                # Повторный запрос
+                wait_time = self.delay.wait_if_needed()
+                start_time = time.time()
+                response = self.session.get(url, params=params, timeout=timeout)
+                response_time = time.time() - start_time
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    self.cache.set(category, full_cache_key, data)
+                    self.delay.update_delay(True, response_time)
+                    return data
+                else:
+                    return {"error": f"API error {response.status_code} after retry", "status": response.status_code}
 
             else:
                 self.delay.update_delay(False, response_time)
@@ -858,6 +960,9 @@ class APIClient:
         except requests.exceptions.Timeout:
             self.delay.update_delay(False, Config.REQUEST_TIMEOUT)
             return {"error": "Request timeout"}
+        except requests.exceptions.ConnectionError:
+            self.delay.update_delay(False, 0)
+            return {"error": "Connection error"}
         except Exception as e:
             self.delay.update_delay(False, 0)
             return {"error": f"Request failed: {str(e)}"}
@@ -1315,13 +1420,14 @@ class RORClient:
         }
 
 # ============================================================================
-# 🛠️ КЛАСС ОБРАБОТКИ ДАННЫХ
+# 🛠️ КЛАСС ОБРАБОТКИ ДАННЫХ (ОБНОВЛЕННЫЙ С УЛУЧШЕННЫМ ИЗВЛЕЧЕНИЕМ АВТОРОВ)
 # ============================================================================
 
 class DataProcessor:
     def __init__(self, cache_manager: SmartCacheManager):
         self.cache = cache_manager
         self.country_codes = Config.COUNTRY_CODES
+        self.author_country_mapping = defaultdict(lambda: defaultdict(int))
 
     def extract_article_info(self, crossref_data: Dict, openalex_data: Dict,
                            doi: str, references: List[str], citations: List[str]) -> Dict:
@@ -1329,6 +1435,9 @@ class DataProcessor:
         pub_info = self._extract_publication_info(crossref_data, openalex_data)
         authors, countries_from_auth = self._extract_authors_info(crossref_data, openalex_data)
         countries = self._extract_countries_info(authors, openalex_data)
+
+        # НОВОЕ: Обновляем статистику стран для каждого автора
+        self._update_author_country_stats(authors, countries, doi)
 
         country_codes = [self._country_to_code(c) for c in countries]
         country_codes = list(set(filter(None, country_codes)))
@@ -1370,6 +1479,36 @@ class DataProcessor:
             'status': 'success',
             'quick_insights': quick_insights
         }
+
+    def _update_author_country_stats(self, authors: List[Dict], countries: List[str], doi: str):
+        """Обновляет статистику стран для каждого автора"""
+        for author in authors:
+            normalized_name = self.normalize_author_name(author.get('name', ''))
+            if normalized_name and countries:
+                for country in countries:
+                    if country:
+                        # Учитываем все страны для автора
+                        self.author_country_mapping[normalized_name][country] += 1
+
+    def get_author_primary_country(self, author_name: str) -> str:
+        """Возвращает основную страну автора на основе статистики"""
+        normalized_name = self.normalize_author_name(author_name)
+        if not normalized_name or normalized_name not in self.author_country_mapping:
+            return ""
+        
+        country_stats = self.author_country_mapping[normalized_name]
+        if not country_stats:
+            return ""
+        
+        # Возвращаем страну с наибольшим количеством публикаций
+        return max(country_stats.items(), key=lambda x: x[1])[0]
+
+    def get_author_country_stats(self, author_name: str) -> Dict[str, int]:
+        """Возвращает статистику стран для автора"""
+        normalized_name = self.normalize_author_name(author_name)
+        if normalized_name in self.author_country_mapping:
+            return dict(self.author_country_mapping[normalized_name])
+        return {}
 
     def _extract_topics_info(self, openalex_data: Dict) -> Dict:
         """Извлекает информацию о темах, подполях, полях, доменах и концептах из OpenAlex"""
@@ -1562,6 +1701,54 @@ class DataProcessor:
         authors = []
         countries = []
 
+        # НОВОЕ: Пробуем сначала улучшенное извлечение из OpenAlex
+        if openalex_data and 'authorships' in openalex_data:
+            try:
+                for authorship in openalex_data['authorships']:
+                    if not authorship:
+                        continue
+
+                    raw_name = authorship.get('raw_author_name', '')
+                    
+                    # Используем улучшенное форматирование имен
+                    if raw_name:
+                        formatted_name = self._format_author_name_openalex(raw_name)
+                    else:
+                        author_display = authorship.get('author', {})
+                        full_name = author_display.get('display_name', '')
+                        formatted_name = self.normalize_author_name(full_name)
+
+                    if not formatted_name:
+                        continue
+
+                    author_info = {
+                        'name': formatted_name,
+                        'affiliation': [],
+                        'orcid': authorship.get('author', {}).get('orcid', '')
+                    }
+
+                    institutions = authorship.get('institutions', [])
+                    if institutions:
+                        for inst in institutions:
+                            if inst and isinstance(inst, dict):
+                                display_name = inst.get('display_name')
+                                if display_name:
+                                    clean_aff = self._clean_affiliation(display_name)
+                                    if clean_aff:
+                                        author_info['affiliation'].append(clean_aff)
+
+                                country_code = inst.get('country_code')
+                                if country_code:
+                                    countries.append(country_code)
+
+                    authors.append(author_info)
+                # Если успешно извлекли авторов из OpenAlex, возвращаем результат
+                if authors:
+                    return authors, list(set(countries))
+            except Exception as e:
+                st.warning(f"⚠️ Улучшенное извлечение авторов из OpenAlex не удалось: {e}")
+
+        # Старая логика извлечения авторов (fallback)
         try:
             if openalex_data and 'authorships' in openalex_data:
                 for authorship in openalex_data['authorships']:
@@ -1636,6 +1823,36 @@ class DataProcessor:
                 st.warning(f"⚠️ Crossref author extraction error: {e}")
 
         return authors, list(set(countries))
+
+    def _format_author_name_openalex(self, raw_name: str) -> str:
+        """Улучшенное форматирование имен авторов из OpenAlex"""
+        if not raw_name or not isinstance(raw_name, str):
+            return ""
+
+        # Убираем лишнее
+        name = re.sub(r'\s+', ' ', raw_name.strip())
+        name = name.replace(',', ' ').replace('  ', ' ')
+        
+        parts = name.split()
+        if len(parts) == 1:
+            return parts[0]
+        
+        # Ищем фамилию — обычно последняя часть (самая длинная или с большой буквы)
+        family = parts[-1]
+        
+        # Всё остальное — имя и отчество
+        given_parts = parts[:-1]
+        initials = []
+        for p in given_parts:
+            cleaned = re.sub(r'[^A-Za-zА-яЁё]', '', p)
+            if cleaned and cleaned[0].isalpha():
+                initials.append(cleaned[0].upper() + '.')
+        
+        result = family
+        if initials:
+            result += " " + " ".join(initials)
+        
+        return result
 
     def _extract_author_from_crossref(self, full_name: Optional[str], crossref_data: Dict, author_obj: Dict = None) -> Optional[Dict]:
         if author_obj is None:
@@ -1760,7 +1977,7 @@ class DataProcessor:
         return family
 
 # ============================================================================
-# 🎯 КЛАСС ОПТИМИЗИРОВАННОЙ ОБРАБОТКИ DOI (НОВЫЙ)
+# 🎯 КЛАСС ОПТИМИЗИРОВАННОЙ ОБРАБОТКИ DOI (ОБНОВЛЕННЫЙ)
 # ============================================================================
 
 class OptimizedDOIProcessor:
@@ -1791,33 +2008,50 @@ class OptimizedDOIProcessor:
             'successful': 0,
             'failed': 0,
             'cached_hits': 0,
-            'api_calls': 0
+            'api_calls': 0,
+            'retry_successful': 0,
+            'retry_failed': 0
         }
 
     def process_doi_batch(self, dois: List[str], source_type: str = "analyzed",
                          original_doi: str = None, fetch_refs: bool = True,
                          fetch_cites: bool = True, batch_size: int = Config.BATCH_SIZE,
-                         progress_container=None) -> Dict[str, Dict]:
+                         progress_container=None, skip_processed: bool = True) -> Dict[str, Dict]:
+
+        # НОВОЕ: Фильтруем уже обработанные DOI, если нужно
+        if skip_processed:
+            dois_to_process = self.cache.get_unprocessed_dois(dois, source_type)
+            if len(dois_to_process) < len(dois):
+                skipped = len(dois) - len(dois_to_process)
+                if progress_container:
+                    progress_container.text(f"📝 Пропускаем {skipped} уже обработанных DOI, осталось {len(dois_to_process)}")
+        else:
+            dois_to_process = dois
 
         results = {}
-        total_batches = (len(dois) + batch_size - 1) // batch_size
+        total_batches = (len(dois_to_process) + batch_size - 1) // batch_size
 
         if progress_container:
-            status_text = progress_container.text(f"🔧 Обработка {len(dois)} DOI (источник: {source_type})")
+            status_text = progress_container.text(f"🔧 Обработка {len(dois_to_process)} DOI (источник: {source_type})")
             progress_bar = progress_container.progress(0)
         else:
             status_text = None
             progress_bar = None
 
-        monitor = ProgressMonitor(len(dois), f"Обработка {source_type}", progress_bar, status_text)
+        monitor = ProgressMonitor(len(dois_to_process), f"Обработка {source_type}", progress_bar, status_text)
 
-        for batch_idx in range(0, len(dois), batch_size):
-            batch = dois[batch_idx:batch_idx + batch_size]
+        for batch_idx in range(0, len(dois_to_process), batch_size):
+            batch = dois_to_process[batch_idx:batch_idx + batch_size]
             batch_results = self._process_single_batch(
                 batch, source_type, original_doi, True, True
             )
 
             results.update(batch_results)
+
+            # НОВОЕ: Отмечаем успешно обработанные DOI
+            for doi, result in batch_results.items():
+                if result.get('status') == 'success':
+                    self.cache.mark_doi_as_processed(doi, source_type)
 
             monitor.update(len(batch), 'processed')
 
@@ -1826,11 +2060,15 @@ class OptimizedDOIProcessor:
         monitor.complete()
 
         successful = sum(1 for r in results.values() if r.get('status') == 'success')
-        failed = len(dois) - successful
+        failed = len(dois_to_process) - successful
 
-        self.stats['total_processed'] += len(dois)
+        self.stats['total_processed'] += len(dois_to_process)
         self.stats['successful'] += successful
         self.stats['failed'] += failed
+
+        # НОВОЕ: Проверяем, нужно ли повторно обработать неудачные DOI
+        if failed > 0 and source_type == "analyzed":
+            self._retry_incomplete_data(results, source_type, progress_container)
 
         return results
 
@@ -1876,6 +2114,53 @@ class OptimizedDOIProcessor:
                 'error': f"Ошибка обработки: {str(e)}"
             }
 
+    def _retry_incomplete_data(self, results: Dict[str, Dict], source_type: str,
+                              progress_container=None) -> Dict[str, Dict]:
+        """Повторно обрабатывает DOI с неполными данными"""
+        incomplete_dois = []
+        incomplete_reasons = []
+
+        for doi, result in results.items():
+            if result.get('status') == 'success':
+                pub_info = result.get('publication_info', {})
+                authors = result.get('authors', [])
+                
+                # Проверяем наличие основных данных
+                has_title = bool(pub_info.get('title', '').strip())
+                has_authors = len(authors) > 0
+                has_citations = len(result.get('citations', [])) > 0
+                
+                # Если есть заголовок, но нет авторов или цитирований, помечаем как неполный
+                if has_title and (not has_authors or not has_citations):
+                    incomplete_dois.append(doi)
+                    reason = []
+                    if not has_authors:
+                        reason.append("нет авторов")
+                    if not has_citations:
+                        reason.append("нет цитирований")
+                    incomplete_reasons.append(", ".join(reason))
+
+        if not incomplete_dois:
+            return {}
+
+        if progress_container:
+            progress_container.text(f"🔄 Повторная обработка {len(incomplete_dois)} DOI с неполными данными")
+
+        retry_results = self.process_doi_batch(
+            incomplete_dois, source_type + "_retry", None, True, True,
+            Config.BATCH_SIZE, progress_container, skip_processed=False
+        )
+
+        # Обновляем оригинальные результаты
+        for doi, retry_result in retry_results.items():
+            if retry_result.get('status') == 'success':
+                results[doi] = retry_result
+                self.stats['retry_successful'] += 1
+            else:
+                self.stats['retry_failed'] += 1
+
+        return retry_results
+
     def _process_single_doi_optimized(self, doi: str, source_type: str,
                                      original_doi: str, fetch_refs: bool, fetch_cites: bool) -> Dict:
 
@@ -1909,14 +2194,28 @@ class OptimizedDOIProcessor:
         if isinstance(openalex_data, dict):
             openalex_error = openalex_data.get('error')
 
-        if crossref_error and openalex_error:
-            error_msg = f"Ошибки API: Crossref - {crossref_error}, OpenAlex - {openalex_error}"
-            self._handle_processing_error(doi, error_msg, source_type, original_doi)
-            return {
-                'doi': doi,
-                'status': 'failed',
-                'error': error_msg
-            }
+        # НОВОЕ: Более детальная проверка ошибок
+        if crossref_error or openalex_error:
+            # Если одна из API вернула ошибку, но другая успешно - используем успешную
+            if crossref_error and not openalex_error:
+                # Только Crossref ошибка, OpenAlex OK
+                st.warning(f"⚠️ Crossref error for {doi}: {crossref_error}, но OpenAlex успешен")
+                # Продолжаем с данными OpenAlex
+                crossref_data = {}
+            elif openalex_error and not crossref_error:
+                # Только OpenAlex ошибка, Crossref OK
+                st.warning(f"⚠️ OpenAlex error for {doi}: {openalex_error}, но Crossref успешен")
+                # Продолжаем с данными Crossref
+                openalex_data = {}
+            elif crossref_error and openalex_error:
+                # Обе API вернули ошибку
+                error_msg = f"Ошибки API: Crossref - {crossref_error}, OpenAlex - {openalex_error}"
+                self._handle_processing_error(doi, error_msg, source_type, original_doi)
+                return {
+                    'doi': doi,
+                    'status': 'failed',
+                    'error': error_msg
+                }
 
         crossref_data = crossref_data if isinstance(crossref_data, dict) else {}
         openalex_data = openalex_data if isinstance(openalex_data, dict) else {}
@@ -2072,31 +2371,28 @@ class OptimizedDOIProcessor:
             'failed': self.stats['failed'],
             'cached_hits': self.stats['cached_hits'],
             'api_calls': self.stats['api_calls'],
+            'retry_successful': self.stats['retry_successful'],
+            'retry_failed': self.stats['retry_failed'],
             'cache_efficiency': round((self.stats['cached_hits'] / max(1, self.stats['total_processed'])) * 100, 1),
             'success_rate': round((self.stats['successful'] / max(1, self.stats['total_processed'])) * 100, 1)
         }
 
-    def retry_failed_dois(self, failed_tracker: FailedDOITracker, max_retries: int = 1) -> Dict[str, Dict]:
+    def retry_failed_dois(self, failed_tracker: FailedDOITracker, max_retries: int = 3) -> Dict[str, Dict]:
         retry_results = {}
 
-        rate_limit_dois = []
-        for doi, info in failed_tracker.failed_dois.items():
-            if 'Rate limit exceeded' in info.get('error', ''):
-                rate_limit_dois.append(doi)
-
-        if not rate_limit_dois:
+        retryable_dois = failed_tracker.get_retryable_failed_dois(max_retries)
+        if not retryable_dois:
             return retry_results
 
         original_delay = self.delay.current_delay
         self.delay.current_delay = min(Config.MAX_DELAY, original_delay * 1.5)
 
         retry_results = self.process_doi_batch(
-            rate_limit_dois, "retry", None, True, True, Config.BATCH_SIZE
+            retryable_dois, "retry", None, True, True, Config.BATCH_SIZE,
+            skip_processed=False
         )
 
         self.delay.current_delay = original_delay
-
-        successful_retries = sum(1 for r in retry_results.values() if r.get('status') == 'success')
 
         return retry_results
 
@@ -2404,7 +2700,7 @@ class TitleKeywordsAnalyzer:
         }
 
 # ============================================================================
-# 📊 КЛАСС ЭКСПОРТА В EXCEL (УЛУЧШЕННЫЙ С НОВЫМИ ФУНКЦИЯМИ)
+# 📊 КЛАСС ЭКСПОРТА В EXCEL (ОБНОВЛЕННЫЙ С УЛУЧШЕННЫМ ОПРЕДЕЛЕНИЕМ СТРАН)
 # ============================================================================
 
 class ExcelExporter:
@@ -2435,11 +2731,13 @@ class ExcelExporter:
         self.ref_to_analyzed = defaultdict(list)
         self.analyzed_to_citing = defaultdict(list)
 
+        # НОВОЕ: Улучшенная статистика авторов с учетом всех публикаций
         self.author_stats = defaultdict(lambda: {
             'normalized_name': '',
             'orcid': '',
             'affiliation': '',
-            'country': '',
+            'country_stats': defaultdict(int),  # Статистика стран по всем публикациям
+            'primary_country': '',  # Основная страна на основе статистики
             'total_count': 0,
             'normalized_analyzed': 0,
             'normalized_reference': 0,
@@ -2477,8 +2775,17 @@ class ExcelExporter:
     def _correct_country_for_author(self, author_key: str, affiliation_stats: Dict[str, Any]) -> str:
         """Correct country for author based on affiliation statistics"""
         author_info = self.author_stats[author_key]
+        
+        # НОВОЕ: Используем основную страну из статистики
+        if author_info['primary_country']:
+            return author_info['primary_country']
+        
+        # Старая логика (fallback)
         if not author_info['affiliation']:
-            return author_info['country']
+            # Если есть статистика стран, используем самую частую
+            if author_info['country_stats']:
+                return max(author_info['country_stats'].items(), key=lambda x: x[1])[0]
+            return ''
 
         affiliation = author_info['affiliation']
         if affiliation in affiliation_stats and affiliation_stats[affiliation]['countries']:
@@ -2487,7 +2794,7 @@ class ExcelExporter:
                 country_counter = Counter(countries)
                 most_common_country = country_counter.most_common(1)[0][0]
 
-                if author_info['country'] != most_common_country:
+                if author_info['primary_country'] != most_common_country:
                     website = affiliation_stats[affiliation].get('website', '')
                     if website:
                         domain_match = re.search(r'\.([a-z]{2,3})$', website.lower())
@@ -2512,7 +2819,11 @@ class ExcelExporter:
                         if country_freq >= 0.7:
                             return most_common_country
 
-        return author_info['country']
+        # Если нет другой информации, используем самую частую страну из статистики
+        if author_info['country_stats']:
+            return max(author_info['country_stats'].items(), key=lambda x: x[1])[0]
+
+        return author_info['primary_country']
 
     def _calculate_annual_citation_rate(self, citation_count: int, publication_year_str: str) -> float:
         """Calculate average annual citations"""
@@ -2729,13 +3040,17 @@ class ExcelExporter:
                 if not self.author_stats[key]['affiliation'] and author.get('affiliation'):
                     self.author_stats[key]['affiliation'] = author.get('affiliation')[0] if author.get('affiliation') else ''
 
+                # НОВОЕ: Обновляем статистику стран для автора
                 if result.get('countries'):
-                    country = result.get('countries')[0] if result.get('countries') else ''
-                    if country and not self.author_stats[key]['country']:
-                        self.author_stats[key]['country'] = country
+                    for country in result.get('countries'):
+                        if country:
+                            self.author_stats[key]['country_stats'][country] += 1
 
-                    if self.author_stats[key]['affiliation']:
-                        self.affiliation_country_stats[self.author_stats[key]['affiliation']][country] += 1
+                # НОВОЕ: Определяем основную страну автора на основе статистики
+                if self.author_stats[key]['country_stats']:
+                    primary_country = max(self.author_stats[key]['country_stats'].items(), 
+                                        key=lambda x: x[1])[0]
+                    self.author_stats[key]['primary_country'] = primary_country
 
                 self.author_stats[key]['normalized_name'] = normalized_name
 
@@ -2787,8 +3102,17 @@ class ExcelExporter:
                 if not self.author_stats[key]['affiliation'] and author.get('affiliation'):
                     self.author_stats[key]['affiliation'] = author.get('affiliation')[0] if author.get('affiliation') else ''
 
-                if not self.author_stats[key]['country'] and result.get('countries'):
-                    self.author_stats[key]['country'] = result.get('countries')[0] if result.get('countries') else ''
+                # НОВОЕ: Обновляем статистику стран для автора
+                if result.get('countries'):
+                    for country in result.get('countries'):
+                        if country:
+                            self.author_stats[key]['country_stats'][country] += 1
+
+                # НОВОЕ: Определяем основную страну автора на основе статистики
+                if self.author_stats[key]['country_stats']:
+                    primary_country = max(self.author_stats[key]['country_stats'].items(), 
+                                        key=lambda x: x[1])[0]
+                    self.author_stats[key]['primary_country'] = primary_country
 
                 self.author_stats[key]['normalized_name'] = normalized_name
 
@@ -2835,8 +3159,17 @@ class ExcelExporter:
                 if not self.author_stats[key]['affiliation'] and author.get('affiliation'):
                     self.author_stats[key]['affiliation'] = author.get('affiliation')[0] if author.get('affiliation') else ''
 
-                if not self.author_stats[key]['country'] and result.get('countries'):
-                    self.author_stats[key]['country'] = result.get('countries')[0] if result.get('countries') else ''
+                # НОВОЕ: Обновляем статистику стран для автора
+                if result.get('countries'):
+                    for country in result.get('countries'):
+                        if country:
+                            self.author_stats[key]['country_stats'][country] += 1
+
+                # НОВОЕ: Определяем основную страну автора на основе статистики
+                if self.author_stats[key]['country_stats']:
+                    primary_country = max(self.author_stats[key]['country_stats'].items(), 
+                                        key=lambda x: x[1])[0]
+                    self.author_stats[key]['primary_country'] = primary_country
 
                 self.author_stats[key]['normalized_name'] = normalized_name
 
@@ -3378,10 +3711,13 @@ class ExcelExporter:
                     affiliation = author['affiliation'][0] if author.get('affiliation') else ""
                     orcid = author.get('orcid', '')
 
+                    # НОВОЕ: Определяем страну автора на основе статистики
+                    primary_country = self.processor.get_author_primary_country(full_name)
+                    
                     author_details[key] = {
                         'orcid': self.processor._format_orcid_id(orcid) if orcid else '',
                         'affiliation': affiliation,
-                        'country': result.get('countries', [''])[0] if result.get('countries') else '',
+                        'country': primary_country,  # Используем основную страну из статистики
                         'normalized_name': normalized_name
                     }
 
@@ -3421,8 +3757,10 @@ class ExcelExporter:
             # Calculate total count as sum of normalized values (as requested)
             total_count = stats['total_count']
 
-            # Correct country
-            corrected_country = self._correct_country_for_author(key, self.affiliation_stats)
+            # Correct country - используем основную страну из статистики
+            corrected_country = stats['primary_country']
+            if not corrected_country and stats['country_stats']:
+                corrected_country = max(stats['country_stats'].items(), key=lambda x: x[1])[0]
 
             row = {
                 'Surname + Initial_normalized': stats['normalized_name'],
@@ -3799,7 +4137,7 @@ class ExcelExporter:
                 counter_cite[cite] += 1
 
 # ============================================================================
-# 🚀 ГЛАВНЫЙ КЛАСС СИСТЕМЫ (АДАПТИРОВАННЫЙ ДЛЯ STREAMLIT)
+# 🚀 ГЛАВНЫЙ КЛАСС СИСТЕМЫ (ОБНОВЛЕННЫЙ)
 # ============================================================================
 
 class ArticleAnalyzerSystem:
@@ -3836,6 +4174,10 @@ class ArticleAnalyzerSystem:
             st.session_state.citing_results = {}
         if 'processing_complete' not in st.session_state:
             st.session_state.processing_complete = False
+        if 'duplicate_dois_found' not in st.session_state:
+            st.session_state.duplicate_dois_found = []
+        if 'original_dois_count' not in st.session_state:
+            st.session_state.original_dois_count = 0
 
         self.system_stats = {
             'total_dois_processed': 0,
@@ -3847,9 +4189,10 @@ class ArticleAnalyzerSystem:
             'total_cite_dois': 0
         }
 
-    def _parse_dois(self, input_text: str) -> List[str]:
+    def _parse_dois(self, input_text: str) -> Tuple[List[str], List[str]]:
+        """Парсит DOI из текста с удалением дубликатов и возвращает уникальные DOI и список дубликатов"""
         if not input_text:
-            return []
+            return [], []
 
         separators = [',', ';', '\n', '\t', '|']
 
@@ -3860,15 +4203,32 @@ class ArticleAnalyzerSystem:
         else:
             parts = input_text.split()
 
-        dois = []
+        raw_dois = []
         for part in parts:
             doi = self._clean_doi(part)
             if doi and len(doi) > 5:
-                dois.append(doi)
+                raw_dois.append(doi)
 
-        return list(set(dois))
+        # Удаляем дубликаты, сохраняя порядок
+        unique_dois = []
+        seen_dois = set()
+        duplicate_dois = []
+        
+        for doi in raw_dois:
+            if doi not in seen_dois:
+                seen_dois.add(doi)
+                unique_dois.append(doi)
+            else:
+                duplicate_dois.append(doi)
+
+        # Сохраняем информацию о дубликатах в session state
+        st.session_state.duplicate_dois_found = duplicate_dois
+        st.session_state.original_dois_count = len(raw_dois)
+
+        return unique_dois, duplicate_dois
 
     def _clean_doi(self, doi: str) -> str:
+        """Нормализует DOI, убирая различные префиксы и приводя к стандартному виду"""
         if not doi or not isinstance(doi, str):
             return ""
 
@@ -3882,22 +4242,68 @@ class ArticleAnalyzerSystem:
 
         return doi.strip()
 
+    def _check_and_resume_processing(self, dois: List[str], progress_container=None) -> Dict[str, Any]:
+        """Проверяет, можно ли возобновить обработку с места прерывания"""
+        # Проверяем, есть ли уже обработанные DOI
+        unprocessed_dois = self.cache_manager.get_unprocessed_dois(dois, "analyzed")
+        processed_dois = [doi for doi in dois if doi not in unprocessed_dois]
+        
+        if processed_dois and progress_container:
+            progress_container.text(f"📊 Найдено {len(processed_dois)} уже обработанных DOI из {len(dois)}")
+            progress_container.text(f"🔄 Продолжаем обработку с места прерывания...")
+            
+            # Загружаем уже обработанные результаты из кэша
+            for doi in processed_dois:
+                cache_key = f"full_result:{doi}"
+                cached_result = self.cache_manager.get("full_analysis", cache_key)
+                if cached_result and cached_result.get('status') == 'success':
+                    st.session_state.analyzed_results[doi] = cached_result
+        
+        return {
+            'total_dois': len(dois),
+            'processed_dois': len(processed_dois),
+            'unprocessed_dois': len(unprocessed_dois),
+            'resume_possible': len(processed_dois) > 0
+        }
+
     def process_dois(self, dois: List[str], num_workers: int = Config.DEFAULT_WORKERS,
-                    progress_container=None):
-        """Основная функция обработки DOI"""
+                    progress_container=None, resume_processing: bool = True):
+        """Основная функция обработки DOI с возможностью возобновления"""
         
         start_time = time.time()
 
+        # НОВОЕ: Проверяем и возобновляем обработку, если нужно
+        if resume_processing:
+            resume_info = self._check_and_resume_processing(dois, progress_container)
+            if resume_info['resume_possible'] and progress_container:
+                progress_container.text(f"✅ Возобновляем обработку: {resume_info['processed_dois']} уже обработано, "
+                                      f"{resume_info['unprocessed_dois']} осталось")
+
+        # Определяем, какие DOI нужно обрабатывать
+        if resume_processing:
+            dois_to_process = self.cache_manager.get_unprocessed_dois(dois, "analyzed")
+        else:
+            dois_to_process = dois
+            # Очищаем прогресс кэш, если не возобновляем
+            self.cache_manager.clear_progress_cache()
+
+        # НОВОЕ: Показываем информацию о дубликатах, если они были
+        if st.session_state.duplicate_dois_found and progress_container:
+            duplicate_count = len(st.session_state.duplicate_dois_found)
+            original_count = st.session_state.original_dois_count
+            progress_container.text(f"⚠️ Найдено {duplicate_count} дубликатов DOI из {original_count} введенных")
+            progress_container.text(f"📝 Будет обработано {len(dois_to_process)} уникальных DOI")
+
         # Обработка оригинальных DOI
         if progress_container:
-            progress_container.text("📚 Обработка оригинальных DOI...")
+            progress_container.text(f"📚 Обработка {len(dois_to_process)} уникальных DOI...")
             analyzed_progress = progress_container.progress(0)
         else:
             analyzed_progress = None
 
-        st.session_state.analyzed_results = self.doi_processor.process_doi_batch(
-            dois, "analyzed", None, True, True, Config.BATCH_SIZE, progress_container
-        )
+        st.session_state.analyzed_results.update(self.doi_processor.process_doi_batch(
+            dois_to_process, "analyzed", None, True, True, Config.BATCH_SIZE, progress_container
+        ))
 
         if analyzed_progress:
             analyzed_progress.progress(1.0)
@@ -3927,9 +4333,9 @@ class ArticleAnalyzerSystem:
 
             ref_dois_to_analyze = all_ref_dois[:10000]  # Ограничиваем для производительности
 
-            st.session_state.ref_results = self.doi_processor.process_doi_batch(
+            st.session_state.ref_results.update(self.doi_processor.process_doi_batch(
                 ref_dois_to_analyze, "ref", None, True, True, Config.BATCH_SIZE, progress_container
-            )
+            ))
 
             if ref_progress:
                 ref_progress.progress(1.0)
@@ -3958,9 +4364,9 @@ class ArticleAnalyzerSystem:
 
             cite_dois_to_analyze = all_cite_dois[:10000]  # Ограничиваем для производительности
 
-            st.session_state.citing_results = self.doi_processor.process_doi_batch(
+            st.session_state.citing_results.update(self.doi_processor.process_doi_batch(
                 cite_dois_to_analyze, "citing", None, True, True, Config.BATCH_SIZE, progress_container
-            )
+            ))
 
             if cite_progress:
                 cite_progress.progress(1.0)
@@ -3977,7 +4383,7 @@ class ArticleAnalyzerSystem:
         failed_stats = self.failed_tracker.get_stats()
         if failed_stats['total_failed'] > 0:
             if progress_container:
-                progress_container.text("🔄 Повторная обработка неудачных DOI...")
+                progress_container.text(f"🔄 Повторная обработка {failed_stats['total_failed']} неудачных DOI...")
             retry_results = self.doi_processor.retry_failed_dois(self.failed_tracker)
 
             for doi, result in retry_results.items():
@@ -3993,9 +4399,9 @@ class ArticleAnalyzerSystem:
         processing_time = time.time() - start_time
 
         # Обновляем статистику
-        self.system_stats['total_dois_processed'] += len(dois)
+        self.system_stats['total_dois_processed'] += len(dois_to_process)
         successful = sum(1 for r in st.session_state.analyzed_results.values() if r.get('status') == 'success')
-        failed = len(dois) - successful
+        failed = len(dois_to_process) - successful
 
         st.session_state.processing_complete = True
         st.rerun()
@@ -4005,7 +4411,9 @@ class ArticleAnalyzerSystem:
             'successful': successful,
             'failed': failed,
             'total_refs': self.system_stats['total_ref_dois'],
-            'total_cites': self.system_stats['total_cite_dois']
+            'total_cites': self.system_stats['total_cite_dois'],
+            'duplicates_found': len(st.session_state.duplicate_dois_found),
+            'resumed_processing': resume_info['resume_possible'] if resume_processing else False
         }
 
     def create_excel_report(self, progress_container=None):
@@ -4031,10 +4439,13 @@ class ArticleAnalyzerSystem:
         st.session_state.ref_results = {}
         st.session_state.citing_results = {}
         st.session_state.processing_complete = False
+        st.session_state.duplicate_dois_found = []
+        st.session_state.original_dois_count = 0
         self.failed_tracker.clear()
+        self.cache_manager.clear_progress_cache()
 
 # ============================================================================
-# 🎛️ ИНТЕРФЕЙС STREAMLIT
+# 🎛️ ИНТЕРФЕЙС STREAMLIT (ОБНОВЛЕННЫЙ)
 # ============================================================================
 
 def main():
@@ -4042,6 +4453,7 @@ def main():
     st.title("📚 Анализатор научных статей по DOI")
     st.markdown("""
     Анализируйте научные статьи по DOI с умным кэшированием, анализом ссылок и цитирований.
+    Возможность возобновления обработки после сбоев, удаление дубликатов DOI и улучшенное определение стран авторов.
     """)
 
     # Инициализация системы
@@ -4063,14 +4475,30 @@ def main():
             help="Количество параллельных потоков для обработки DOI"
         )
         
+        # НОВОЕ: Настройка возобновления обработки
+        resume_processing = st.checkbox(
+            "Возобновлять обработку после сбоев",
+            value=True,
+            help="Автоматически продолжать обработку с места прерывания"
+        )
+        
         st.markdown("---")
         
         # Управление кэшем
         st.subheader("🗂️ Управление кэшем")
         
-        if st.button("Очистить кэш", type="secondary"):
-            system.cache_manager.clear_all()
-            st.success("Кэш очищен!")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Очистить кэш", type="secondary", use_container_width=True):
+                system.cache_manager.clear_all()
+                st.success("Кэш очищен!")
+                st.rerun()
+        
+        with col2:
+            if st.button("Очистить прогресс", type="secondary", use_container_width=True):
+                system.cache_manager.clear_progress_cache()
+                st.success("Прогресс обработки очищен!")
+                st.rerun()
         
         # Показать статистику кэша
         cache_stats = system.cache_manager.get_stats()
@@ -4078,6 +4506,11 @@ def main():
             st.write(f"Эффективность: {cache_stats['hit_ratio']}%")
             st.write(f"API вызовов сохранено: {cache_stats['api_calls_saved']}")
             st.write(f"Размер кэша: {cache_stats['cache_size_mb']} MB")
+            st.write(f"Обработано DOI: {cache_stats['progress_cache_size']}")
+            
+            # НОВОЕ: Информация о возобновлении
+            if cache_stats['progress_cache_size'] > 0:
+                st.info(f"⚠️ Можно возобновить обработку {cache_stats['progress_cache_size']} DOI")
 
     # Основная область ввода
     st.header("📝 Ввод DOI")
@@ -4086,7 +4519,7 @@ def main():
         "Введите один или несколько DOI",
         height=150,
         placeholder="Введите DOI через запятую, точку с запятой или с новой строки.\n\nПримеры:\n10.1038/nature12373\n10.1126/science.1252914, 10.1016/j.cell.2019.11.017",
-        help="Можно вводить несколько DOI, разделяя их запятыми, точками с запятой или переносами строк"
+        help="Можно вводить несколько DOI, разделяя их запятыми, точками с запятой или переносами строк. Дубликаты будут автоматически удалены."
     )
     
     col1, col2, col3 = st.columns(3)
@@ -4113,18 +4546,28 @@ def main():
     
     # Обработка нажатий кнопок
     if process_btn and doi_input:
-        dois = system._parse_dois(doi_input)
+        # НОВОЕ: Парсим DOI с удалением дубликатов
+        dois, duplicates = system._parse_dois(doi_input)
         
         if not dois:
             st.error("❌ Не найдено валидных DOI. Проверьте формат ввода.")
         else:
-            st.info(f"🔍 Найдено {len(dois)} валидных DOI для обработки")
+            # НОВОЕ: Показываем информацию о дубликатах
+            if duplicates:
+                st.warning(f"⚠️ Найдено {len(duplicates)} дубликатов DOI (например: {', '.join(duplicates[:3])}{'...' if len(duplicates) > 3 else ''})")
+                st.info(f"📝 Будет обработано {len(dois)} уникальных DOI")
             
             # Контейнер для прогресса
             progress_container = st.container()
             
             with progress_container:
                 st.write("🚀 Начинаю обработку...")
+                
+                # Проверяем возможность возобновления
+                if resume_processing:
+                    unprocessed = system.cache_manager.get_unprocessed_dois(dois, "analyzed")
+                    if len(unprocessed) < len(dois):
+                        st.info(f"🔄 Можно возобновить обработку: {len(dois) - len(unprocessed)} уже обработано, {len(unprocessed)} осталось")
                 
                 # Создаем прогресс-бары
                 progress_bar = st.progress(0)
@@ -4135,7 +4578,8 @@ def main():
                     results = system.process_dois(
                         dois, 
                         num_workers, 
-                        progress_container
+                        progress_container,
+                        resume_processing
                     )
                     
                     # Обновляем прогресс
@@ -4145,7 +4589,11 @@ def main():
                     # Показываем результаты
                     st.success(f"✅ Обработка завершена за {results['processing_time']:.1f} секунд")
                     
-                    col1, col2, col3, col4 = st.columns(4)
+                    # НОВОЕ: Показываем информацию о возобновлении
+                    if results.get('resumed_processing'):
+                        st.info("🔄 Обработка была возобновлена с места прерывания")
+                    
+                    col1, col2, col3, col4, col5 = st.columns(5)
                     with col1:
                         st.metric("Успешно", results['successful'])
                     with col2:
@@ -4154,6 +4602,8 @@ def main():
                         st.metric("Reference DOI", results['total_refs'])
                     with col4:
                         st.metric("Citation DOI", results['total_cites'])
+                    with col5:
+                        st.metric("Дубликатов", results.get('duplicates_found', 0))
                     
                     # Показываем статистику по неудачным DOI
                     failed_stats = system.failed_tracker.get_stats()
@@ -4162,6 +4612,7 @@ def main():
                             st.write(f"• Из анализируемых: {failed_stats['analyzed_failed']}")
                             st.write(f"• Из ссылок: {failed_stats['ref_failed']}")
                             st.write(f"• Из цитирований: {failed_stats['citing_failed']}")
+                            st.write(f"• Повторных попыток: {failed_stats['retry_failed']}")
                     
                     # Показываем примеры обработанных статей
                     with st.expander("📊 Примеры обработанных статей"):
@@ -4178,6 +4629,7 @@ def main():
                 
                 except Exception as e:
                     st.error(f"❌ Ошибка при обработке: {str(e)}")
+                    st.info("⚠️ При следующем запуске обработка будет возобновлена с места прерывания")
     
     elif process_btn and not doi_input:
         st.warning("⚠️ Введите DOI для обработки")
@@ -4266,10 +4718,19 @@ def main():
             st.write(f"**Уникальных reference DOI:** {len(system.excel_exporter.references_counter)}")
             st.write(f"**Уникальных citation DOI:** {len(system.excel_exporter.citations_counter)}")
             
+            # НОВАЯ статистика
+            processor_stats = system.doi_processor.get_stats()
+            st.write(f"**Повторно успешно обработано:** {processor_stats.get('retry_successful', 0)}")
+            st.write(f"**Повторно неудачно:** {processor_stats.get('retry_failed', 0)}")
+            
             # Статистика кэша
             cache_stats = system.cache_manager.get_stats()
             st.write(f"**Эффективность кэша:** {cache_stats['hit_ratio']}%")
             st.write(f"**API вызовов сохранено:** {cache_stats['api_calls_saved']}")
+            
+            # Информация о дубликатах
+            if st.session_state.duplicate_dois_found:
+                st.write(f"**Найдено дубликатов DOI:** {len(st.session_state.duplicate_dois_found)}")
 
 # ============================================================================
 # 🏃‍♂️ ЗАПУСК ПРИЛОЖЕНИЯ
@@ -4277,4 +4738,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
