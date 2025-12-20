@@ -809,7 +809,7 @@ class FailedDOITracker:
         }
 
 # ============================================================================
-# 🌐 КЛАСС КЛИЕНТОВ API
+# 🌐 КЛАСС КЛИЕНТОВ API (ОБНОВЛЕННЫЙ С ПОВТОРНЫМИ ПОПЫТКАМИ ДЛЯ НУЛЕВЫХ ДАННЫХ)
 # ============================================================================
 
 class APIClient:
@@ -824,7 +824,8 @@ class APIClient:
         })
 
     def make_request(self, url: str, cache_key: str, params: Dict = None,
-                    timeout: int = Config.REQUEST_TIMEOUT, category: str = "api") -> Dict:
+                    timeout: int = Config.REQUEST_TIMEOUT, category: str = "api",
+                    retry_for_empty: bool = True, max_retries: int = 2) -> Dict:
 
         full_cache_key = f"{url}:{hash(str(params) if params else '')}"
 
@@ -834,53 +835,124 @@ class APIClient:
 
         wait_time = self.delay.wait_if_needed()
 
-        try:
-            start_time = time.time()
-            response = self.session.get(url, params=params, timeout=timeout)
-            response_time = time.time() - start_time
+        retry_count = 0
+        last_response = None
+        
+        while retry_count <= max_retries:
+            try:
+                start_time = time.time()
+                response = self.session.get(url, params=params, timeout=timeout)
+                response_time = time.time() - start_time
 
-            if response.status_code == 200:
-                data = response.json()
+                if response.status_code == 200:
+                    data = response.json()
+                    last_response = data
+                    
+                    # Проверяем, не пустые ли данные
+                    if retry_for_empty and self._is_empty_response(data):
+                        if retry_count < max_retries:
+                            retry_count += 1
+                            st.warning(f"⚠️ Пустой ответ от API, повторная попытка {retry_count}/{max_retries} для {url}")
+                            time.sleep(0.5 * retry_count)  # Небольшая задержка между попытками
+                            continue
+                    
+                    # Сохраняем в кэш только если данные не пустые
+                    if not self._is_empty_response(data):
+                        self.cache.set(category, full_cache_key, data)
+                        self.delay.update_delay(True, response_time)
+                    else:
+                        self.delay.update_delay(False, response_time)
+                        st.warning(f"⚠️ Пустой ответ от API после {retry_count+1} попыток для {url}")
+                    
+                    return data
 
-                self.cache.set(category, full_cache_key, data)
-                self.delay.update_delay(True, response_time)
-                return data
+                elif response.status_code == 429:
+                    self.delay.current_delay = min(self.delay.max_delay, self.delay.current_delay * 1.5)
+                    self.delay.update_delay(False, response_time)
+                    
+                    if retry_count < max_retries:
+                        retry_count += 1
+                        wait_time = self.delay.current_delay * retry_count
+                        st.warning(f"⚠️ Rate limit, ждем {wait_time:.1f} сек, попытка {retry_count}/{max_retries}")
+                        time.sleep(wait_time)
+                        continue
+                    
+                    return {"error": f"Rate limit exceeded after {max_retries} retries", "status": 429}
 
-            elif response.status_code == 429:
-                self.delay.current_delay = min(self.delay.max_delay, self.delay.current_delay * 1.5)
-                self.delay.update_delay(False, response_time)
-                return {"error": f"Rate limit exceeded, wait {self.delay.current_delay:.1f}s", "status": 429}
+                else:
+                    self.delay.update_delay(False, response_time)
+                    
+                    if retry_count < max_retries and response.status_code >= 500:
+                        retry_count += 1
+                        time.sleep(1 * retry_count)
+                        continue
+                    
+                    return {"error": f"API error {response.status_code}", "status": response.status_code}
 
-            else:
-                self.delay.update_delay(False, response_time)
-                return {"error": f"API error {response.status_code}", "status": response.status_code}
+            except requests.exceptions.Timeout:
+                self.delay.update_delay(False, timeout)
+                
+                if retry_count < max_retries:
+                    retry_count += 1
+                    time.sleep(1 * retry_count)
+                    continue
+                
+                return {"error": "Request timeout after multiple retries"}
+                
+            except Exception as e:
+                self.delay.update_delay(False, 0)
+                
+                if retry_count < max_retries:
+                    retry_count += 1
+                    time.sleep(1 * retry_count)
+                    continue
+                
+                return {"error": f"Request failed after multiple retries: {str(e)}"}
+        
+        # Если дошли до сюда, возвращаем последний ответ или ошибку
+        return last_response if last_response else {"error": f"Max retries ({max_retries}) exceeded"}
 
-        except requests.exceptions.Timeout:
-            self.delay.update_delay(False, Config.REQUEST_TIMEOUT)
-            return {"error": "Request timeout"}
-        except Exception as e:
-            self.delay.update_delay(False, 0)
-            return {"error": f"Request failed: {str(e)}"}
+    def _is_empty_response(self, data: Dict) -> bool:
+        """Проверяет, является ли ответ от API пустым или неполным"""
+        if not data:
+            return True
+            
+        # Проверяем различные случаи пустых ответов
+        if isinstance(data, dict):
+            # Для Crossref
+            if 'message' in data and not data['message']:
+                return True
+            # Для OpenAlex
+            if 'results' in data and not data['results']:
+                return True
+            if 'id' not in data and 'title' not in data and 'authors' not in data:
+                # Проверяем, есть ли хоть какие-то значимые данные
+                meaningful_keys = ['title', 'authors', 'publication_year', 'journal', 'doi']
+                if not any(key in data for key in meaningful_keys):
+                    return True
+        
+        return False
 
 class CrossrefClient(APIClient):
     def __init__(self, cache_manager: SmartCacheManager, delay_manager: AdaptiveDelayManager):
         super().__init__(cache_manager, delay_manager)
         self.base_url = Config.CROSSREF_URL
 
-    def fetch_article(self, doi: str) -> Dict:
+    def fetch_article(self, doi: str, retry_for_empty: bool = True) -> Dict:
         clean_doi = self._clean_doi(doi)
         if not clean_doi:
             return {"error": "Invalid DOI"}
 
         url = f"{self.base_url}{clean_doi}"
-        return self.make_request(url, f"crossref:{clean_doi}", category="crossref")
+        return self.make_request(url, f"crossref:{clean_doi}", category="crossref", 
+                                retry_for_empty=retry_for_empty, max_retries=2)
 
     def fetch_references(self, doi: str) -> List[str]:
         clean_doi = self._clean_doi(doi)
         if not clean_doi:
             return []
 
-        data = self.fetch_article(clean_doi)
+        data = self.fetch_article(clean_doi, retry_for_empty=True)
         references = []
 
         if 'message' in data and 'reference' in data['message']:
@@ -901,7 +973,8 @@ class CrossrefClient(APIClient):
         try:
             url = f"{self.base_url}{clean_doi}"
             params = {'filter': 'has-reference:1'}
-            data = self.make_request(url, f"crossref_citations:{clean_doi}", params=params)
+            data = self.make_request(url, f"crossref_citations:{clean_doi}", params=params,
+                                    retry_for_empty=True, max_retries=2)
 
             if 'message' in data and 'is-referenced-by' in data['message']:
                 references = data['message']['is-referenced-by']
@@ -939,13 +1012,14 @@ class OpenAlexClient(APIClient):
         self.base_url = Config.OPENALEX_URL
         self.works_url = Config.OPENALEX_WORKS_URL
 
-    def fetch_article(self, doi: str) -> Dict:
+    def fetch_article(self, doi: str, retry_for_empty: bool = True) -> Dict:
         clean_doi = self._clean_doi(doi)
         if not clean_doi:
             return {"error": "Invalid DOI"}
 
         url = f"{self.base_url}{clean_doi}"
-        return self.make_request(url, f"openalex:{clean_doi}", category="openalex")
+        return self.make_request(url, f"openalex:{clean_doi}", category="openalex",
+                                retry_for_empty=retry_for_empty, max_retries=2)
 
     def fetch_citations(self, doi: str, max_pages: int = 10) -> List[str]:
         """
@@ -959,8 +1033,8 @@ class OpenAlexClient(APIClient):
         citing_dois = []
 
         try:
-            article_data = self.fetch_article(clean_doi)
-            if 'error' in article_data:
+            article_data = self.fetch_article(clean_doi, retry_for_empty=True)
+            if 'error' in article_data or self._is_empty_response(article_data):
                 return []
 
             article_id = article_data.get('id', '').split('/')[-1]
@@ -975,28 +1049,56 @@ class OpenAlexClient(APIClient):
 
             page = 1
             has_more = True
+            retry_count = 0
+            max_retries = 2
 
             while has_more and page <= max_pages:
                 self.delay.wait_if_needed()
 
-                response = self.session.get(self.works_url, params=params)
-                if response.status_code == 200:
-                    data = response.json()
+                try:
+                    response = self.session.get(self.works_url, params=params, timeout=30)
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        
+                        if self._is_empty_response(data):
+                            if retry_count < max_retries:
+                                retry_count += 1
+                                st.warning(f"⚠️ Пустой ответ от OpenAlex для цитирований {doi}, попытка {retry_count}")
+                                time.sleep(1 * retry_count)
+                                continue
+                            else:
+                                break
+                        
+                        retry_count = 0  # Сброс счетчика после успешного ответа
+                        
+                        for work in data.get('results', []):
+                            if work.get('doi'):
+                                citing_doi = self._clean_doi(work['doi'])
+                                if citing_doi:
+                                    citing_dois.append(citing_doi)
 
-                    for work in data.get('results', []):
-                        if work.get('doi'):
-                            citing_doi = self._clean_doi(work['doi'])
-                            if citing_doi:
-                                citing_dois.append(citing_doi)
-
-                    if 'meta' in data and data['meta'].get('next_cursor'):
-                        params['cursor'] = data['meta']['next_cursor']
-                        page += 1
-                        time.sleep(0.1)
+                        if 'meta' in data and data['meta'].get('next_cursor'):
+                            params['cursor'] = data['meta']['next_cursor']
+                            page += 1
+                            time.sleep(0.1)
+                        else:
+                            has_more = False
+                    else:
+                        if retry_count < max_retries:
+                            retry_count += 1
+                            time.sleep(1 * retry_count)
+                            continue
+                        else:
+                            has_more = False
+                            
+                except Exception as e:
+                    if retry_count < max_retries:
+                        retry_count += 1
+                        time.sleep(1 * retry_count)
+                        continue
                     else:
                         has_more = False
-                else:
-                    has_more = False
 
         except Exception as e:
             st.warning(f"OpenAlex citations error for {doi}: {e}")
@@ -1020,8 +1122,8 @@ class OpenAlexClient(APIClient):
 
         try:
             # Сначала получаем work_id из DOI
-            article_data = self.fetch_article(clean_doi)
-            if 'error' in article_data:
+            article_data = self.fetch_article(clean_doi, retry_for_empty=True)
+            if 'error' in article_data or self._is_empty_response(article_data):
                 return []
 
             article_id = article_data.get('id', '').split('/')[-1]
@@ -1033,6 +1135,8 @@ class OpenAlexClient(APIClient):
             page_num = 1
             max_retries = 3
             total_collected = 0
+            empty_response_count = 0
+            max_empty_responses = 2
 
             while cursor:
                 for attempt in range(max_retries):
@@ -1055,8 +1159,16 @@ class OpenAlexClient(APIClient):
                             works = data.get('results', [])
 
                             if not works:
-                                cursor = None
-                                break
+                                empty_response_count += 1
+                                if empty_response_count >= max_empty_responses:
+                                    st.warning(f"⚠️ Слишком много пустых ответов для {clean_doi}, прерываем")
+                                    cursor = None
+                                    break
+                                else:
+                                    time.sleep(1)
+                                    continue
+                            
+                            empty_response_count = 0  # Сброс при успешном получении данных
 
                             page_citing_dois = []
                             for work in works:
@@ -1147,6 +1259,10 @@ class OpenAlexClient(APIClient):
 
         return doi.strip()
 
+# ============================================================================
+# 🏢 КЛАСС ROR КЛИЕНТА С ПАРАЛЛЕЛЬНОЙ ОБРАБОТКОЙ (ОБНОВЛЕННЫЙ)
+# ============================================================================
+
 class RORClient:
     def __init__(self, cache_manager: SmartCacheManager):
         self.cache = cache_manager
@@ -1156,7 +1272,8 @@ class RORClient:
             'Accept': 'application/json'
         })
         self.last_request_time = 0
-        self.min_delay = 0.3
+        self.min_delay = 0.1  # Уменьшена задержка для параллельной обработки
+        self.parallel_workers = 10  # Количество параллельных потоков для ROR запросов
 
     def _respect_delay(self):
         elapsed = time.time() - self.last_request_time
@@ -1241,6 +1358,123 @@ class RORClient:
         except Exception as e:
             st.warning(f"ROR error for query '{query}': {e}")
             return self._create_empty_result()
+
+    def search_organization_parallel(self, query: str) -> Dict[str, str]:
+        """Упрощенная версия для параллельной обработки"""
+        if not query or len(query.strip()) < 2:
+            return self._create_empty_result()
+
+        cache_key = f"ror_search:{query.strip().lower()}"
+        cached = self.cache.get("ror_search", cache_key)
+        if cached is not None and cached.get('ror_id'):
+            return cached
+
+        try:
+            # Небольшая задержка для соблюдения rate limits даже в параллельном режиме
+            time.sleep(0.05)
+            
+            response = self.session.get(
+                Config.ROR_API_URL,
+                params={'query': query.strip()},
+                timeout=8
+            )
+
+            if response.status_code != 200:
+                return self._create_empty_result()
+
+            data = response.json()
+            items = data.get('items', [])
+
+            if not items:
+                return self._create_empty_result()
+
+            best = self._improved_find_best_match(query.strip(), items)
+            if not best:
+                return self._create_empty_result()
+
+            colab_url = ""
+            try:
+                ror_id = best['id'].split('/')[-1]
+                colab_url = f"https://colab.ws/organizations/{ror_id}"
+            except:
+                pass
+
+            website = ""
+            try:
+                links = best.get('links', []) or []
+                for link in links:
+                    url = (link.get('value') or link.get('url') if isinstance(link, dict) else str(link)) if link else None
+                    if url and isinstance(url, str):
+                        url = url.strip()
+                        website = url if url.startswith('http') else 'https://' + url
+                        break
+            except:
+                pass
+
+            result = {
+                'ror_id': colab_url,
+                'website': website,
+                'score': best.get('score', 0),
+                'name': best.get('name', ''),
+                'acronyms': best.get('acronyms', [])
+            }
+
+            if colab_url:
+                self.cache.set("ror_search", cache_key, result, category="ror_search")
+
+            return result
+
+        except Exception as e:
+            return self._create_empty_result()
+
+    def batch_search_organizations(self, queries: List[str], progress_callback=None) -> Dict[str, Dict[str, str]]:
+        """Параллельный поиск ROR данных для списка запросов"""
+        results = {}
+        
+        # Фильтруем пустые запросы
+        valid_queries = [q for q in queries if q and len(q.strip()) >= 2]
+        
+        if not valid_queries:
+            return results
+        
+        # Проверяем кэш
+        for query in valid_queries:
+            cache_key = f"ror_search:{query.strip().lower()}"
+            cached = self.cache.get("ror_search", cache_key)
+            if cached is not None and cached.get('ror_id'):
+                results[query] = cached
+        
+        # Оставляем только те запросы, которых нет в кэше
+        remaining_queries = [q for q in valid_queries if q not in results]
+        
+        if not remaining_queries:
+            return results
+        
+        # Параллельная обработка
+        with ThreadPoolExecutor(max_workers=self.parallel_workers) as executor:
+            future_to_query = {}
+            
+            for query in remaining_queries:
+                future = executor.submit(self.search_organization_parallel, query)
+                future_to_query[future] = query
+            
+            # Обрабатываем результаты
+            completed = 0
+            total = len(remaining_queries)
+            
+            for future in as_completed(future_to_query):
+                query = future_to_query[future]
+                try:
+                    result = future.result(timeout=10)
+                    results[query] = result
+                except Exception as e:
+                    results[query] = self._create_empty_result()
+                
+                completed += 1
+                if progress_callback and total > 0:
+                    progress_callback(completed, total)
+        
+        return results
 
     def _improved_find_best_match(self, query: str, items: List[Dict]) -> Optional[Dict]:
         if not items:
@@ -1760,7 +1994,7 @@ class DataProcessor:
         return family
 
 # ============================================================================
-# 🎯 КЛАСС ОПТИМИЗИРОВАННОЙ ОБРАБОТКИ DOI (НОВЫЙ)
+# 🎯 КЛАСС ОПТИМИЗИРОВАННОЙ ОБРАБОТКИ DOI (НОВЫЙ С СОХРАНЕНИЕМ ПРОГРЕССА)
 # ============================================================================
 
 class OptimizedDOIProcessor:
@@ -1794,14 +2028,72 @@ class OptimizedDOIProcessor:
             'api_calls': 0
         }
 
+        # Состояние для восстановления прогресса
+        self.progress_state = {
+            'current_batch': [],
+            'processed_in_batch': 0,
+            'total_batches': 0,
+            'current_stage': 'not_started',  # 'analyzed', 'ref', 'citing', 'retry'
+            'start_time': None,
+            'last_checkpoint': None
+        }
+
+    def save_progress_state(self):
+        """Сохраняет состояние прогресса в session_state"""
+        if 'doi_processor_progress' not in st.session_state:
+            st.session_state.doi_processor_progress = {}
+        
+        st.session_state.doi_processor_progress = {
+            'stats': self.stats.copy(),
+            'progress_state': self.progress_state.copy(),
+            'processed_dois_count': len(self.processed_dois),
+            'reference_relationships_count': len(self.reference_relationships),
+            'citation_relationships_count': len(self.citation_relationships)
+        }
+
+    def load_progress_state(self):
+        """Загружает состояние прогресса из session_state"""
+        if 'doi_processor_progress' in st.session_state:
+            saved_state = st.session_state.doi_processor_progress
+            self.stats.update(saved_state.get('stats', self.stats))
+            self.progress_state.update(saved_state.get('progress_state', self.progress_state))
+            return True
+        return False
+
+    def clear_progress_state(self):
+        """Очищает состояние прогресса"""
+        if 'doi_processor_progress' in st.session_state:
+            del st.session_state.doi_processor_progress
+        
+        self.progress_state = {
+            'current_batch': [],
+            'processed_in_batch': 0,
+            'total_batches': 0,
+            'current_stage': 'not_started',
+            'start_time': None,
+            'last_checkpoint': None
+        }
+
     def process_doi_batch(self, dois: List[str], source_type: str = "analyzed",
                          original_doi: str = None, fetch_refs: bool = True,
                          fetch_cites: bool = True, batch_size: int = Config.BATCH_SIZE,
-                         progress_container=None) -> Dict[str, Dict]:
+                         progress_container=None, resume_from_checkpoint: bool = False) -> Dict[str, Dict]:
 
         results = {}
-        total_batches = (len(dois) + batch_size - 1) // batch_size
-
+        
+        # Инициализация состояния прогресса
+        if not resume_from_checkpoint or self.progress_state['current_stage'] != source_type:
+            self.progress_state = {
+                'current_batch': dois,
+                'processed_in_batch': 0,
+                'total_batches': (len(dois) + batch_size - 1) // batch_size,
+                'current_stage': source_type,
+                'start_time': time.time(),
+                'last_checkpoint': time.time()
+            }
+        
+        total_batches = self.progress_state['total_batches']
+        
         if progress_container:
             status_text = progress_container.text(f"🔧 Обработка {len(dois)} DOI (источник: {source_type})")
             progress_bar = progress_container.progress(0)
@@ -1810,8 +2102,18 @@ class OptimizedDOIProcessor:
             progress_bar = None
 
         monitor = ProgressMonitor(len(dois), f"Обработка {source_type}", progress_bar, status_text)
+        
+        # Восстанавливаем прогресс если нужно
+        if resume_from_checkpoint and self.progress_state['processed_in_batch'] > 0:
+            monitor.update(self.progress_state['processed_in_batch'], 'processed')
+            if progress_bar and len(dois) > 0:
+                progress_percent = (self.progress_state['processed_in_batch'] / len(dois)) * 100
+                progress_bar.progress(progress_percent / 100.0)
+            st.info(f"🔄 Восстанавливаем прогресс: обработано {self.progress_state['processed_in_batch']} из {len(dois)} DOI")
 
-        for batch_idx in range(0, len(dois), batch_size):
+        batch_start_idx = (self.progress_state['processed_in_batch'] // batch_size) * batch_size
+        
+        for batch_idx in range(batch_start_idx, len(dois), batch_size):
             batch = dois[batch_idx:batch_idx + batch_size]
             batch_results = self._process_single_batch(
                 batch, source_type, original_doi, True, True
@@ -1819,11 +2121,26 @@ class OptimizedDOIProcessor:
 
             results.update(batch_results)
 
+            # Обновляем прогресс и сохраняем состояние
+            self.progress_state['processed_in_batch'] += len(batch)
             monitor.update(len(batch), 'processed')
+            
+            # Сохраняем состояние каждые 100 DOI или каждые 30 секунд
+            current_time = time.time()
+            if (len(results) % 100 == 0 or 
+                (current_time - self.progress_state['last_checkpoint'] > 30)):
+                self.progress_state['last_checkpoint'] = current_time
+                self.save_progress_state()
+                if progress_container:
+                    progress_container.text(f"💾 Сохранен прогресс: {self.progress_state['processed_in_batch']}/{len(dois)}")
 
             batch_success = sum(1 for r in batch_results.values() if r.get('status') == 'success')
 
         monitor.complete()
+        
+        # Очищаем состояние прогресса после завершения
+        if self.progress_state['processed_in_batch'] >= len(dois):
+            self.clear_progress_state()
 
         successful = sum(1 for r in results.values() if r.get('status') == 'success')
         failed = len(dois) - successful
@@ -2404,7 +2721,7 @@ class TitleKeywordsAnalyzer:
         }
 
 # ============================================================================
-# 📊 КЛАСС ЭКСПОРТА В EXCEL (УЛУЧШЕННЫЙ С НОВЫМИ ФУНКЦИЯМИ)
+# 📊 КЛАСС ЭКСПОРТА В EXCEL (УЛУЧШЕННЫЙ С НОВЫМИ ФУНКЦИЯМИ И ROR ДАННЫМИ)
 # ============================================================================
 
 class ExcelExporter:
@@ -2474,6 +2791,13 @@ class ExcelExporter:
             'peak_count': 0
         })
 
+        # Флаг для включения ROR анализа
+        self.enable_ror_analysis = False
+
+    def set_ror_analysis_enabled(self, enabled: bool):
+        """Устанавливает флаг включения ROR анализа"""
+        self.enable_ror_analysis = enabled
+
     def _correct_country_for_author(self, author_key: str, affiliation_stats: Dict[str, Any]) -> str:
         """Correct country for author based on affiliation statistics"""
         author_info = self.author_stats[author_key]
@@ -2530,8 +2854,12 @@ class ExcelExporter:
             return 0.0
 
     def _prepare_ror_data_with_progress(self, affiliations_list: List[str], progress_container=None) -> Dict[str, Dict]:
-        """Prepare ROR data with progress bar"""
+        """Prepare ROR data with progress bar and parallel processing"""
         ror_data = {}
+        
+        if not self.enable_ror_analysis:
+            return ror_data
+            
         total_affiliations = len(affiliations_list)
         
         if progress_container:
@@ -2541,19 +2869,19 @@ class ExcelExporter:
             progress_text = None
             ror_progress_bar = None
         
-        for idx, aff in enumerate(affiliations_list):
-            if progress_text and ror_progress_bar and total_affiliations > 0:
-                progress_percent = (idx + 1) / total_affiliations
+        def progress_callback(completed, total):
+            if progress_text and ror_progress_bar and total > 0:
+                progress_percent = (completed) / total
                 ror_progress_bar.progress(progress_percent)
-                progress_text.text(f"🔍 Поиск ROR данных: {idx+1}/{total_affiliations} ({progress_percent*100:.1f}%)")
-            
-            ror_info = self.ror_client.search_organization(aff, category="summary")
-            if ror_info.get('ror_id'):
-                ror_data[aff] = ror_info
+                progress_text.text(f"🔍 Поиск ROR данных: {completed}/{total} ({progress_percent*100:.1f}%)")
+        
+        # Используем параллельную обработку ROR запросов
+        ror_data = self.ror_client.batch_search_organizations(affiliations_list, progress_callback)
         
         if progress_text and ror_progress_bar:
             ror_progress_bar.progress(1.0)
-            progress_text.text(f"✅ ROR данные собраны для {len(ror_data)} аффилиаций")
+            found_count = sum(1 for data in ror_data.values() if data.get('ror_id'))
+            progress_text.text(f"✅ ROR данные собраны для {found_count}/{total_affiliations} аффилиаций")
         
         return ror_data
 
@@ -2579,17 +2907,18 @@ class ExcelExporter:
             progress_container.text("📋 Подготовка summary данных...")
         self._prepare_summary_data()
 
-        # Подготовка ROR данных с прогресс-баром
-        affiliations_list = list(self.affiliation_stats.keys())
-        if affiliations_list and progress_container:
-            progress_container.text(f"🔍 Сбор ROR данных для {len(affiliations_list)} аффилиаций...")
-            ror_data = self._prepare_ror_data_with_progress(affiliations_list, progress_container)
-            
-            # Обновляем affiliation stats с ROR данными
-            for aff, ror_info in ror_data.items():
-                if aff in self.affiliation_stats:
-                    self.affiliation_stats[aff]['colab_id'] = ror_info.get('ror_id', '')
-                    self.affiliation_stats[aff]['website'] = ror_info.get('website', '')
+        # Подготовка ROR данных с прогресс-баром (только если включен ROR анализ)
+        if self.enable_ror_analysis:
+            affiliations_list = list(self.affiliation_stats.keys())
+            if affiliations_list and progress_container:
+                progress_container.text(f"🔍 Сбор ROR данных для {len(affiliations_list)} аффилиаций...")
+                ror_data = self._prepare_ror_data_with_progress(affiliations_list, progress_container)
+                
+                # Обновляем affiliation stats с ROR данными
+                for aff, ror_info in ror_data.items():
+                    if aff in self.affiliation_stats and ror_info.get('ror_id'):
+                        self.affiliation_stats[aff]['colab_id'] = ror_info.get('ror_id', '')
+                        self.affiliation_stats[aff]['website'] = ror_info.get('website', '')
 
         # Анализ ключевых слов в заголовках
         if progress_container:
@@ -3799,7 +4128,7 @@ class ExcelExporter:
                 counter_cite[cite] += 1
 
 # ============================================================================
-# 🚀 ГЛАВНЫЙ КЛАСС СИСТЕМЫ (АДАПТИРОВАННЫЙ ДЛЯ STREAMLIT)
+# 🚀 ГЛАВНЫЙ КЛАСС СИСТЕМЫ (АДАПТИРОВАННЫЙ ДЛЯ STREAMLIT С ДЕДУПЛИКАЦИЕЙ DOI)
 # ============================================================================
 
 class ArticleAnalyzerSystem:
@@ -3811,10 +4140,13 @@ class ArticleAnalyzerSystem:
             st.session_state.delay_manager = AdaptiveDelayManager()
         if 'failed_tracker' not in st.session_state:
             st.session_state.failed_tracker = FailedDOITracker()
+        if 'enable_ror_analysis' not in st.session_state:
+            st.session_state.enable_ror_analysis = False
 
         self.cache_manager = st.session_state.cache_manager
         self.delay_manager = st.session_state.delay_manager
         self.failed_tracker = st.session_state.failed_tracker
+        self.enable_ror_analysis = st.session_state.enable_ror_analysis
 
         self.crossref_client = CrossrefClient(self.cache_manager, self.delay_manager)
         self.openalex_client = OpenAlexClient(self.cache_manager, self.delay_manager)
@@ -3826,6 +4158,7 @@ class ArticleAnalyzerSystem:
             self.data_processor, self.failed_tracker
         )
         self.excel_exporter = ExcelExporter(self.data_processor, self.ror_client, self.failed_tracker)
+        self.excel_exporter.set_ror_analysis_enabled(self.enable_ror_analysis)
 
         # Инициализация данных в состоянии сессии
         if 'analyzed_results' not in st.session_state:
@@ -3836,6 +4169,21 @@ class ArticleAnalyzerSystem:
             st.session_state.citing_results = {}
         if 'processing_complete' not in st.session_state:
             st.session_state.processing_complete = False
+        if 'original_dois' not in st.session_state:
+            st.session_state.original_dois = []
+        if 'duplicate_dois_found' not in st.session_state:
+            st.session_state.duplicate_dois_found = []
+        if 'processing_stage' not in st.session_state:
+            st.session_state.processing_stage = 'not_started'  # 'analyzed', 'ref', 'citing', 'done'
+        if 'processing_progress' not in st.session_state:
+            st.session_state.processing_progress = {
+                'analyzed': 0,
+                'ref': 0,
+                'citing': 0,
+                'total_analyzed': 0,
+                'total_ref': 0,
+                'total_citing': 0
+            }
 
         self.system_stats = {
             'total_dois_processed': 0,
@@ -3847,28 +4195,8 @@ class ArticleAnalyzerSystem:
             'total_cite_dois': 0
         }
 
-    def _parse_dois(self, input_text: str) -> List[str]:
-        if not input_text:
-            return []
-
-        separators = [',', ';', '\n', '\t', '|']
-
-        for sep in separators:
-            if sep in input_text:
-                parts = input_text.split(sep)
-                break
-        else:
-            parts = input_text.split()
-
-        dois = []
-        for part in parts:
-            doi = self._clean_doi(part)
-            if doi and len(doi) > 5:
-                dois.append(doi)
-
-        return list(set(dois))
-
     def _clean_doi(self, doi: str) -> str:
+        """Нормализация DOI: удаляет префиксы и приводит к нижнему регистру"""
         if not doi or not isinstance(doi, str):
             return ""
 
@@ -3882,96 +4210,206 @@ class ArticleAnalyzerSystem:
 
         return doi.strip()
 
+    def _normalize_dois(self, dois: List[str]) -> List[str]:
+        """Нормализует список DOI и убирает дубликаты"""
+        normalized_dois = []
+        seen_dois = set()
+        duplicates = []
+        
+        for doi in dois:
+            clean_doi = self._clean_doi(doi)
+            if clean_doi and len(clean_doi) > 5:
+                if clean_doi.lower() in seen_dois:
+                    duplicates.append(doi)
+                else:
+                    normalized_dois.append(clean_doi)
+                    seen_dois.add(clean_doi.lower())
+        
+        return normalized_dois, duplicates
+
+    def _parse_dois(self, input_text: str) -> Tuple[List[str], List[str]]:
+        """Парсит DOI из текста с нормализацией и обнаружением дубликатов"""
+        if not input_text:
+            return [], []
+
+        separators = [',', ';', '\n', '\t', '|']
+
+        for sep in separators:
+            if sep in input_text:
+                parts = input_text.split(sep)
+                break
+        else:
+            parts = input_text.split()
+
+        raw_dois = []
+        for part in parts:
+            doi = part.strip()
+            if doi and len(doi) > 5:
+                raw_dois.append(doi)
+
+        # Нормализуем и убираем дубликаты
+        normalized_dois, duplicates = self._normalize_dois(raw_dois)
+        
+        return normalized_dois, duplicates
+
+    def set_ror_analysis_enabled(self, enabled: bool):
+        """Устанавливает флаг включения ROR анализа"""
+        self.enable_ror_analysis = enabled
+        st.session_state.enable_ror_analysis = enabled
+        self.excel_exporter.set_ror_analysis_enabled(enabled)
+
+    def save_processing_state(self):
+        """Сохраняет состояние обработки"""
+        st.session_state.processing_stage = getattr(self.doi_processor.progress_state, 'current_stage', 'not_started')
+        st.session_state.original_dois = getattr(self, '_last_processed_dois', [])
+        
+        # Сохраняем прогресс DOI процессора
+        self.doi_processor.save_progress_state()
+
+    def load_processing_state(self):
+        """Загружает состояние обработки"""
+        if hasattr(self.doi_processor, 'load_progress_state'):
+            self.doi_processor.load_progress_state()
+        
+        # Восстанавливаем стадию обработки
+        if 'processing_stage' in st.session_state:
+            current_stage = st.session_state.processing_stage
+            if current_stage != 'not_started' and current_stage != 'done':
+                return True
+        return False
+
+    def clear_processing_state(self):
+        """Очищает состояние обработки"""
+        st.session_state.processing_stage = 'not_started'
+        st.session_state.processing_progress = {
+            'analyzed': 0,
+            'ref': 0,
+            'citing': 0,
+            'total_analyzed': 0,
+            'total_ref': 0,
+            'total_citing': 0
+        }
+        
+        if hasattr(self.doi_processor, 'clear_progress_state'):
+            self.doi_processor.clear_progress_state()
+
     def process_dois(self, dois: List[str], num_workers: int = Config.DEFAULT_WORKERS,
-                    progress_container=None):
-        """Основная функция обработки DOI"""
+                    progress_container=None, resume: bool = False):
+        """Основная функция обработки DOI с сохранением прогресса"""
         
         start_time = time.time()
+        
+        # Сохраняем оригинальные DOI для возможного возобновления
+        self._last_processed_dois = dois
+        
+        # Определяем, с какой стадии начинать
+        start_stage = 'analyzed'
+        if resume and st.session_state.processing_stage != 'not_started':
+            start_stage = st.session_state.processing_stage
+            st.info(f"🔄 Возобновляем обработку с стадии: {start_stage}")
 
         # Обработка оригинальных DOI
-        if progress_container:
-            progress_container.text("📚 Обработка оригинальных DOI...")
-            analyzed_progress = progress_container.progress(0)
-        else:
-            analyzed_progress = None
+        if start_stage == 'analyzed':
+            if progress_container:
+                progress_container.text("📚 Обработка оригинальных DOI...")
+                analyzed_progress = progress_container.progress(0)
+            else:
+                analyzed_progress = None
 
-        st.session_state.analyzed_results = self.doi_processor.process_doi_batch(
-            dois, "analyzed", None, True, True, Config.BATCH_SIZE, progress_container
-        )
+            resume_analyzed = resume and st.session_state.processing_stage == 'analyzed'
+            st.session_state.analyzed_results = self.doi_processor.process_doi_batch(
+                dois, "analyzed", None, True, True, Config.BATCH_SIZE, 
+                progress_container, resume_analyzed
+            )
 
-        if analyzed_progress:
-            analyzed_progress.progress(1.0)
+            if analyzed_progress:
+                analyzed_progress.progress(1.0)
 
-        # Обновление счетчиков
-        for doi, result in st.session_state.analyzed_results.items():
-            if result.get('status') == 'success':
-                self.excel_exporter.update_counters(
-                    result.get('references', []),
-                    result.get('citations', []),
-                    "analyzed"
-                )
+            # Обновление счетчиков
+            for doi, result in st.session_state.analyzed_results.items():
+                if result.get('status') == 'success':
+                    self.excel_exporter.update_counters(
+                        result.get('references', []),
+                        result.get('citations', []),
+                        "analyzed"
+                    )
+
+            st.session_state.processing_stage = 'ref'
+            self.save_processing_state()
 
         # Сбор и обработка reference DOI
-        if progress_container:
-            progress_container.text("📎 Сбор reference DOI...")
-
-        all_ref_dois = self.doi_processor.collect_all_references(st.session_state.analyzed_results)
-        self.system_stats['total_ref_dois'] = len(all_ref_dois)
-
-        if all_ref_dois:
+        if start_stage in ['analyzed', 'ref']:
             if progress_container:
-                progress_container.text(f"📎 Найдено {len(all_ref_dois)} reference DOI для анализа")
-                ref_progress = progress_container.progress(0)
-            else:
-                ref_progress = None
+                progress_container.text("📎 Сбор reference DOI...")
 
-            ref_dois_to_analyze = all_ref_dois[:10000]  # Ограничиваем для производительности
+            all_ref_dois = self.doi_processor.collect_all_references(st.session_state.analyzed_results)
+            self.system_stats['total_ref_dois'] = len(all_ref_dois)
 
-            st.session_state.ref_results = self.doi_processor.process_doi_batch(
-                ref_dois_to_analyze, "ref", None, True, True, Config.BATCH_SIZE, progress_container
-            )
+            if all_ref_dois:
+                if progress_container:
+                    progress_container.text(f"📎 Найдено {len(all_ref_dois)} reference DOI для анализа")
+                    ref_progress = progress_container.progress(0)
+                else:
+                    ref_progress = None
 
-            if ref_progress:
-                ref_progress.progress(1.0)
+                ref_dois_to_analyze = all_ref_dois[:10000]  # Ограничиваем для производительности
 
-            for doi, result in st.session_state.ref_results.items():
-                if result.get('status') == 'success':
-                    self.excel_exporter.update_counters(
-                        result.get('references', []),
-                        result.get('citations', []),
-                        "ref"
-                    )
+                resume_ref = resume and st.session_state.processing_stage == 'ref'
+                st.session_state.ref_results = self.doi_processor.process_doi_batch(
+                    ref_dois_to_analyze, "ref", None, True, True, Config.BATCH_SIZE, 
+                    progress_container, resume_ref
+                )
+
+                if ref_progress:
+                    ref_progress.progress(1.0)
+
+                for doi, result in st.session_state.ref_results.items():
+                    if result.get('status') == 'success':
+                        self.excel_exporter.update_counters(
+                            result.get('references', []),
+                            result.get('citations', []),
+                            "ref"
+                        )
+
+                st.session_state.processing_stage = 'citing'
+                self.save_processing_state()
 
         # Сбор и обработка citation DOI
-        if progress_container:
-            progress_container.text("🔗 Сбор citation DOI...")
-
-        all_cite_dois = self.doi_processor.collect_all_citations(st.session_state.analyzed_results)
-        self.system_stats['total_cite_dois'] = len(all_cite_dois)
-
-        if all_cite_dois:
+        if start_stage in ['analyzed', 'ref', 'citing']:
             if progress_container:
-                progress_container.text(f"🔗 Найдено {len(all_cite_dois)} citation DOI для анализа")
-                cite_progress = progress_container.progress(0)
-            else:
-                cite_progress = None
+                progress_container.text("🔗 Сбор citation DOI...")
 
-            cite_dois_to_analyze = all_cite_dois[:10000]  # Ограничиваем для производительности
+            all_cite_dois = self.doi_processor.collect_all_citations(st.session_state.analyzed_results)
+            self.system_stats['total_cite_dois'] = len(all_cite_dois)
 
-            st.session_state.citing_results = self.doi_processor.process_doi_batch(
-                cite_dois_to_analyze, "citing", None, True, True, Config.BATCH_SIZE, progress_container
-            )
+            if all_cite_dois:
+                if progress_container:
+                    progress_container.text(f"🔗 Найдено {len(all_cite_dois)} citation DOI для анализа")
+                    cite_progress = progress_container.progress(0)
+                else:
+                    cite_progress = None
 
-            if cite_progress:
-                cite_progress.progress(1.0)
+                cite_dois_to_analyze = all_cite_dois[:10000]  # Ограничиваем для производительности
 
-            for doi, result in st.session_state.citing_results.items():
-                if result.get('status') == 'success':
-                    self.excel_exporter.update_counters(
-                        result.get('references', []),
-                        result.get('citations', []),
-                        "citing"
-                    )
+                resume_citing = resume and st.session_state.processing_stage == 'citing'
+                st.session_state.citing_results = self.doi_processor.process_doi_batch(
+                    cite_dois_to_analyze, "citing", None, True, True, Config.BATCH_SIZE,
+                    progress_container, resume_citing
+                )
+
+                if cite_progress:
+                    cite_progress.progress(1.0)
+
+                for doi, result in st.session_state.citing_results.items():
+                    if result.get('status') == 'success':
+                        self.excel_exporter.update_counters(
+                            result.get('references', []),
+                            result.get('citations', []),
+                            "citing"
+                        )
+
+                st.session_state.processing_stage = 'done'
+                self.save_processing_state()
 
         # Повторная обработка неудачных DOI
         failed_stats = self.failed_tracker.get_stats()
@@ -3997,6 +4435,9 @@ class ArticleAnalyzerSystem:
         successful = sum(1 for r in st.session_state.analyzed_results.values() if r.get('status') == 'success')
         failed = len(dois) - successful
 
+        # Очищаем состояние прогресса после полного завершения
+        self.clear_processing_state()
+        
         st.session_state.processing_complete = True
         st.rerun()
 
@@ -4031,10 +4472,13 @@ class ArticleAnalyzerSystem:
         st.session_state.ref_results = {}
         st.session_state.citing_results = {}
         st.session_state.processing_complete = False
+        st.session_state.original_dois = []
+        st.session_state.duplicate_dois_found = []
         self.failed_tracker.clear()
+        self.clear_processing_state()
 
 # ============================================================================
-# 🎛️ ИНТЕРФЕЙС STREAMLIT
+# 🎛️ ИНТЕРФЕЙС STREAMLIT (ОБНОВЛЕННЫЙ)
 # ============================================================================
 
 def main():
@@ -4063,6 +4507,17 @@ def main():
             help="Количество параллельных потоков для обработки DOI"
         )
         
+        # Настройка ROR анализа
+        enable_ror = st.checkbox(
+            "Включить ROR анализ",
+            value=st.session_state.get('enable_ror_analysis', False),
+            help="Собирать данные об организациях из ROR (Research Organization Registry)"
+        )
+        
+        # Обновляем флаг ROR анализа
+        if enable_ror != system.enable_ror_analysis:
+            system.set_ror_analysis_enabled(enable_ror)
+        
         st.markdown("---")
         
         # Управление кэшем
@@ -4078,6 +4533,16 @@ def main():
             st.write(f"Эффективность: {cache_stats['hit_ratio']}%")
             st.write(f"API вызовов сохранено: {cache_stats['api_calls_saved']}")
             st.write(f"Размер кэша: {cache_stats['cache_size_mb']} MB")
+        
+        # Проверка возможности возобновления обработки
+        can_resume = (st.session_state.get('processing_stage', 'not_started') != 'not_started' and 
+                     st.session_state.get('processing_stage', 'not_started') != 'done')
+        
+        if can_resume:
+            st.markdown("---")
+            st.subheader("🔄 Возобновление обработки")
+            st.info(f"Обнаружена незавершенная обработка на стадии: {st.session_state.processing_stage}")
+            st.caption("При следующем нажатии 'Обработать DOI' обработка будет возобновлена с места остановки")
 
     # Основная область ввода
     st.header("📝 Ввод DOI")
@@ -4086,8 +4551,20 @@ def main():
         "Введите один или несколько DOI",
         height=150,
         placeholder="Введите DOI через запятую, точку с запятой или с новой строки.\n\nПримеры:\n10.1038/nature12373\n10.1126/science.1252914, 10.1016/j.cell.2019.11.017",
-        help="Можно вводить несколько DOI, разделяя их запятыми, точками с запятой или переносами строк"
+        help="Можно вводить несколько DOI, разделяя их запятыми, точками с запятой или переносами строк. Дубликаты будут автоматически удалены."
     )
+    
+    # Проверка на дубликаты
+    if doi_input:
+        _, duplicates = system._parse_dois(doi_input)
+        if duplicates:
+            with st.expander("⚠️ Обнаружены дубликаты DOI"):
+                st.warning(f"Найдено {len(duplicates)} повторяющихся DOI:")
+                for dup in duplicates[:10]:  # Показываем только первые 10
+                    st.write(f"• {dup}")
+                if len(duplicates) > 10:
+                    st.write(f"... и еще {len(duplicates) - 10} дубликатов")
+                st.info("Дубликаты будут автоматически удалены перед обработкой")
     
     col1, col2, col3 = st.columns(3)
     
@@ -4113,18 +4590,33 @@ def main():
     
     # Обработка нажатий кнопок
     if process_btn and doi_input:
-        dois = system._parse_dois(doi_input)
+        dois, duplicates = system._parse_dois(doi_input)
         
         if not dois:
             st.error("❌ Не найдено валидных DOI. Проверьте формат ввода.")
         else:
+            # Сохраняем информацию о дубликатах
+            if duplicates:
+                st.session_state.duplicate_dois_found = duplicates
+                st.warning(f"⚠️ Удалено {len(duplicates)} дубликатов DOI. Будет обработано {len(dois)} уникальных DOI.")
+            
             st.info(f"🔍 Найдено {len(dois)} валидных DOI для обработки")
+            
+            # Проверяем, нужно ли возобновлять обработку
+            can_resume = (st.session_state.get('processing_stage', 'not_started') != 'not_started' and 
+                         st.session_state.get('processing_stage', 'not_started') != 'done')
+            
+            if can_resume:
+                st.info("🔄 Обнаружена незавершенная обработка. Возобновляем...")
+                resume_processing = True
+            else:
+                resume_processing = False
             
             # Контейнер для прогресса
             progress_container = st.container()
             
             with progress_container:
-                st.write("🚀 Начинаю обработку...")
+                st.write("🚀 Начинаю обработку..." + (" (возобновление)" if resume_processing else ""))
                 
                 # Создаем прогресс-бары
                 progress_bar = st.progress(0)
@@ -4135,12 +4627,13 @@ def main():
                     results = system.process_dois(
                         dois, 
                         num_workers, 
-                        progress_container
+                        progress_container,
+                        resume=resume_processing
                     )
                     
                     # Обновляем прогресс
                     progress_bar.progress(100)
-                    status_text.success("✅ Обработка завершена!")
+                    status_text.success("✅ Обработка завершена!" + (" (возобновлена)" if resume_processing else ""))
                     
                     # Показываем результаты
                     st.success(f"✅ Обработка завершена за {results['processing_time']:.1f} секунд")
@@ -4178,6 +4671,8 @@ def main():
                 
                 except Exception as e:
                     st.error(f"❌ Ошибка при обработке: {str(e)}")
+                    # Сохраняем состояние для возможного возобновления
+                    system.save_processing_state()
     
     elif process_btn and not doi_input:
         st.warning("⚠️ Введите DOI для обработки")
@@ -4195,7 +4690,8 @@ def main():
                 
                 # Создаем имя файла
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"articles_analysis_{timestamp}.xlsx"
+                ror_suffix = "_with_ROR" if system.enable_ror_analysis else ""
+                filename = f"articles_analysis_{timestamp}{ror_suffix}.xlsx"
                 
                 # Предоставляем файл для скачивания
                 st.download_button(
@@ -4206,6 +4702,10 @@ def main():
                 )
                 
                 st.success("✅ Excel отчет создан и готов к скачивания")
+                
+                # Показываем информацию о ROR данных если они включены
+                if system.enable_ror_analysis:
+                    st.info("ℹ️ Отчет включает ROR данные об организациях (Colab ID и Web Site)")
                 
             except Exception as e:
                 st.error(f"❌ Ошибка при создании отчета: {str(e)}")
@@ -4270,6 +4770,13 @@ def main():
             cache_stats = system.cache_manager.get_stats()
             st.write(f"**Эффективность кэша:** {cache_stats['hit_ratio']}%")
             st.write(f"**API вызовов сохранено:** {cache_stats['api_calls_saved']}")
+            
+            # Информация о ROR если включено
+            if system.enable_ror_analysis:
+                st.write(f"**ROR анализ:** Включен")
+                affiliations_with_ror = sum(1 for stats in system.excel_exporter.affiliation_stats.values() 
+                                          if stats.get('colab_id'))
+                st.write(f"**Организаций с ROR данными:** {affiliations_with_ror}")
 
 # ============================================================================
 # 🏃‍♂️ ЗАПУСК ПРИЛОЖЕНИЯ
