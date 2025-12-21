@@ -1479,43 +1479,50 @@ class DataProcessor:
 
     def extract_article_info(self, crossref_data: Dict, openalex_data: Dict,
                            doi: str, references: List[str], citations: List[str]) -> Dict:
-
+    
         pub_info = self._extract_publication_info(crossref_data, openalex_data)
         authors, countries_from_auth = self._extract_authors_info(crossref_data, openalex_data)
         countries = self._extract_countries_info(authors, openalex_data)
-
+    
         country_codes = [self._country_to_code(c) for c in countries]
         country_codes = list(set(filter(None, country_codes)))
-
+    
         orcid_urls = []
+        # НОВОЕ: собираем страны авторов
+        author_countries = []
         for author in authors:
             if author.get('orcid'):
                 orcid_url = self._format_orcid_id(author['orcid'])
                 if orcid_url:
                     orcid_urls.append(orcid_url)
-
+            
+            # Добавляем страну автора, если определена
+            if author.get('author_country'):
+                author_countries.append(author['author_country'])
+    
         pages_field = pub_info['pages']
         if not pages_field and pub_info['article_number']:
             pages_field = f"Article {pub_info['article_number']}"
-
+    
         # Извлекаем тематическую информацию из OpenAlex
         topics_info = self._extract_topics_info(openalex_data)
-
+    
         # Проверяем количество ссылок через OpenAlex, если в Crossref их 0
         references_count = len(references)
         if references_count == 0 and openalex_data and 'referenced_works_count' in openalex_data:
             references_count = openalex_data.get('referenced_works_count', 0)
-
+    
         quick_insights = self._extract_quick_insights(
             authors, countries, references, citations, pub_info
         )
-
+    
         return {
             'doi': doi,
             'publication_info': pub_info,
             'topics_info': topics_info,
             'authors': authors,
             'countries': country_codes,
+            'author_countries': list(set(author_countries)),  # НОВОЕ: страны авторов
             'orcid_urls': orcid_urls,
             'references': references,
             'citations': citations,
@@ -1715,26 +1722,29 @@ class DataProcessor:
     def _extract_authors_info(self, crossref_data: Dict, openalex_data: Dict) -> Tuple[List[Dict], List[str]]:
         authors = []
         countries = []
-
+    
         try:
             if openalex_data and 'authorships' in openalex_data:
                 for authorship in openalex_data['authorships']:
                     if not authorship:
                         continue
-
+    
                     author_display = authorship.get('author', {})
                     full_name = authorship.get('raw_author_name') or author_display.get('display_name', '')
-
+    
                     if not full_name:
                         continue
-
+    
                     author_info = {
                         'name': full_name,
                         'affiliation': [],
-                        'orcid': author_display.get('orcid', '')
+                        'orcid': author_display.get('orcid', ''),
+                        'author_country': ''  # НОВОЕ: добавляем страну автора
                     }
-
+    
                     institutions = authorship.get('institutions', [])
+                    institution_countries = []
+                    
                     if institutions:
                         for inst in institutions:
                             if inst and isinstance(inst, dict):
@@ -1743,39 +1753,63 @@ class DataProcessor:
                                     clean_aff = self._clean_affiliation(display_name)
                                     if clean_aff:
                                         author_info['affiliation'].append(clean_aff)
-
+                                
+                                # НОВАЯ ЛОГИКА: определяем страну из института
                                 country_code = inst.get('country_code')
-                                if country_code:
+                                if country_code and country_code != 'XX':
+                                    institution_countries.append(country_code)
                                     countries.append(country_code)
-
+                                
+                                # Если нет country_code, пытаемся определить из названия
+                                elif display_name:
+                                    country_from_name = self._get_country_from_institution_name(display_name)
+                                    if country_from_name:
+                                        institution_countries.append(country_from_name)
+                                        countries.append(country_from_name)
+                    
+                    # Определяем страну автора: берем первую страну из его институтов
+                    if institution_countries:
+                        author_info['author_country'] = institution_countries[0]
+                        
+                    # Fallback: если не нашли через институты, определяем из названия аффилиации
+                    if not author_info['author_country'] and author_info['affiliation']:
+                        for affiliation in author_info['affiliation']:
+                            country_from_aff = self._get_country_from_institution_name(affiliation)
+                            if country_from_aff:
+                                author_info['author_country'] = country_from_aff
+                                break
+    
                     authors.append(author_info)
         except Exception as e:
             st.warning(f"⚠️ OpenAlex author extraction error: {e}")
-
+    
         if not authors and crossref_data:
             try:
                 message = crossref_data.get('message', {})
                 crossref_authors = message.get('author', [])
-
+    
                 if crossref_authors:
                     for author_obj in crossref_authors:
                         if not author_obj:
                             continue
-
+    
                         given = author_obj.get('given', '')
                         family = author_obj.get('family', '')
                         full_name = f"{given} {family}".strip()
-
+    
                         if not full_name:
                             continue
-
+    
                         author_info = {
                             'name': full_name,
                             'affiliation': [],
-                            'orcid': author_obj.get('ORCID', '')
+                            'orcid': author_obj.get('ORCID', ''),
+                            'author_country': ''  # НОВОЕ: добавляем страну автора
                         }
-
+    
                         affiliations = author_obj.get('affiliation', [])
+                        affiliation_countries = []
+                        
                         if affiliations:
                             for affil in affiliations:
                                 if affil and isinstance(affil, dict):
@@ -1784,12 +1818,61 @@ class DataProcessor:
                                         clean_aff = self._clean_affiliation(affil_name)
                                         if clean_aff:
                                             author_info['affiliation'].append(clean_aff)
-
+                                            
+                                            # НОВАЯ ЛОГИКА: определяем страну из аффилиации
+                                            country_from_aff = self._get_country_from_institution_name(clean_aff)
+                                            if country_from_aff:
+                                                affiliation_countries.append(country_from_aff)
+                                                countries.append(country_from_aff)
+                        
+                        # Определяем страну автора из его аффилиаций
+                        if affiliation_countries:
+                            author_info['author_country'] = affiliation_countries[0]
+                        
+                        # Если не нашли, пытаемся определить из названия
+                        if not author_info['author_country'] and full_name:
+                            # Для Crossref данных сложнее, пропускаем
+                            pass
+    
                         authors.append(author_info)
             except Exception as e:
                 st.warning(f"⚠️ Crossref author extraction error: {e}")
-
+    
         return authors, list(set(countries))
+    
+    def _get_country_from_institution_name(self, institution_name: str) -> str:
+        """Определяет страну из названия института"""
+        if not institution_name:
+            return ""
+        
+        institution_lower = institution_name.lower()
+        
+        # Сначала проверяем явные указания стран
+        for country_name, country_code in self.country_codes.items():
+            country_lower = country_name.lower()
+            pattern = r'\b' + re.escape(country_lower) + r'\b'
+            if re.search(pattern, institution_lower):
+                return country_code
+        
+        # Проверяем коды стран
+        for country_name, country_code in self.country_codes.items():
+            if len(country_code) == 2:
+                if re.search(r'\b' + re.escape(country_code) + r'\b', institution_name, re.IGNORECASE):
+                    return country_code
+        
+        # Проверяем российские варианты
+        if re.search(r'\b(росси|рф|русск|москв|спб|сибир|урал)\b', institution_lower):
+            return 'RU'
+        
+        # Проверяем китайские варианты
+        if re.search(r'\b(china|chinese|beijing|shanghai|peking|zhejiang|tsinghua|fudan)\b', institution_lower):
+            return 'CN'
+        
+        # Проверяем американские
+        if re.search(r'\b(usa|united states|us | u\.s\.|california|massachusetts|harvard|mit|stanford)\b', institution_lower):
+            return 'US'
+        
+        return ""
 
     def _extract_author_from_crossref(self, full_name: Optional[str], crossref_data: Dict, author_obj: Dict = None) -> Optional[Dict]:
         if author_obj is None:
@@ -3638,34 +3721,44 @@ class ExcelExporter:
                 self.doi_to_source_counts[cite_doi]['citing'] += 1
                 self.source_dois['citing'].add(cite_doi)
 
-            # ИЗМЕНЕНИЕ: Обновляем статистику авторов ДЛЯ ANALYZED
+            # ИЗМЕНЕНИЕ: Update author stats for ref articles - ТОЛЬКО normalized значения
             for author in result.get('authors', []):
                 full_name = author.get('name', '')
                 if not full_name:
                     continue
-
+            
                 normalized_name = self.processor.normalize_author_name(full_name)
                 # ИСПОЛЬЗУЕМ ТОЛЬКО normalized_name как ключ
                 key = normalized_name
-
-                # Считаем абсолютное количество статей в analyzed
-                author_analyzed_counts[key] += 1
-                
+            
+                # Calculate normalized value for ref articles
+                if total_ref_articles > 0:
+                    normalized_value = 1 / total_ref_articles
+                    self.author_stats[key]['normalized_reference'] += normalized_value
+                    self.author_stats[key]['total_count'] += normalized_value
+            
                 # Обновляем ORCID как множество
                 if author.get('orcid'):
                     self.author_stats[key]['orcid'].add(self.processor._format_orcid_id(author.get('orcid', '')))
-
+            
+                # Определяем аффилиацию
                 if not self.author_stats[key]['affiliation'] and author.get('affiliation'):
                     self.author_stats[key]['affiliation'] = author.get('affiliation')[0] if author.get('affiliation') else ''
-
-                if result.get('countries'):
-                    country = result.get('countries')[0] if result.get('countries') else ''
-                    if country and not self.author_stats[key]['country']:
-                        self.author_stats[key]['country'] = country
-
-                    if self.author_stats[key]['affiliation']:
-                        self.affiliation_country_stats[self.author_stats[key]['affiliation']][country] += 1
-
+                
+                # ВАЖНОЕ ИСПРАВЛЕНИЕ: Определяем страну автора из его данных
+                if not self.author_stats[key]['country']:
+                    # 1. Пробуем взять из author_country (новое поле)
+                    if 'author_country' in author and author['author_country']:
+                        self.author_stats[key]['country'] = author['author_country']
+                    # 2. Если нет, определяем из аффилиации
+                    elif self.author_stats[key]['affiliation']:
+                        country_from_aff = self._get_author_country_from_affiliation(self.author_stats[key]['affiliation'])
+                        if country_from_aff:
+                            self.author_stats[key]['country'] = country_from_aff
+                    # 3. Fallback: из статьи
+                    elif result.get('countries'):
+                        self.author_stats[key]['country'] = result.get('countries')[0] if result.get('countries') else ''
+            
                 self.author_stats[key]['normalized_name'] = normalized_name
 
             # ИЗМЕНЕНИЕ: Обновляем статистику аффилиаций ДЛЯ ANALYZED
@@ -4373,7 +4466,7 @@ class ExcelExporter:
             data.append(row)
 
         return data
-
+    
     def _prepare_author_frequency(self, results: Dict[str, Dict], source_type: str) -> List[Dict]:
         author_counter = Counter()
         author_details = {}
@@ -4395,12 +4488,18 @@ class ExcelExporter:
                     affiliation = author['affiliation'][0] if author.get('affiliation') else ""
                     orcid = author.get('orcid', '')
                     
-                    # ВАЖНОЕ ИСПРАВЛЕНИЕ: Определяем страну из аффилиации автора, а не из статьи
+                    # ВАЖНОЕ ИСПРАВЛЕНИЕ: Используем страну автора, а не статьи
                     country = ""
-                    if affiliation:
-                        country = self._get_country_from_affiliation(affiliation)
                     
-                    # Fallback: если не удалось определить из аффилиации, берем первую страну из статьи
+                    # 1. Пробуем взять страну автора из данных (новое поле author_country)
+                    if 'author_country' in author and author['author_country']:
+                        country = author['author_country']
+                    
+                    # 2. Если нет, определяем из аффилиации автора
+                    elif affiliation:
+                        country = self._get_author_country_from_affiliation(affiliation)
+                    
+                    # 3. Fallback: если не удалось определить, берем из статьи
                     if not country and result.get('countries'):
                         country = result.get('countries', [''])[0]
     
@@ -4436,7 +4535,7 @@ class ExcelExporter:
             data.append(row)
     
         return data
-
+       
     def _prepare_author_summary(self) -> List[Dict]:
         data = []
         
@@ -4461,16 +4560,13 @@ class ExcelExporter:
             # ВАЖНОЕ ИСПРАВЛЕНИЕ: Определяем страну из аффилиации автора
             country = ""
             if stats['affiliation']:
-                country = self._get_country_from_affiliation(stats['affiliation'])
+                country = self._get_author_country_from_affiliation(stats['affiliation'])
             
-            # Fallback: если не удалось определить из аффилиации, используем сохраненную страну
-            if not country and stats['country']:
-                country = stats['country']
-            
-            # Дополнительная коррекция через существующий метод
-            corrected_country = self._correct_country_for_author(key, self.affiliation_stats)
-            if not country and corrected_country:
-                country = corrected_country
+            # Fallback: используем сохраненную страну или дополнительную коррекцию
+            if not country:
+                country = stats.get('country', '')
+                if not country:
+                    country = self._correct_country_for_author(key, self.affiliation_stats)
     
             row = {
                 'Surname + Initial_normalized': stats['normalized_name'],
@@ -5577,4 +5673,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
