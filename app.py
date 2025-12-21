@@ -3467,7 +3467,7 @@ class ExcelExporter:
                                 return most_common_country
     
         return author_info['country']
-
+        
     def _get_country_from_affiliation(self, affiliation: str) -> str:
         """Определяет страну из текста аффилиации"""
         if not affiliation:
@@ -3475,30 +3475,25 @@ class ExcelExporter:
         
         affiliation_lower = affiliation.lower()
         
-        # Ищем полные названия стран
+        # Используем тот же словарь country_codes из DataProcessor
+        # Находим его через self.processor.country_codes
         for country_name, country_code in self.processor.country_codes.items():
             country_lower = country_name.lower()
-            if country_lower in affiliation_lower:
-                # Проверяем, что это не часть другого слова
-                pattern = r'\b' + re.escape(country_lower) + r'\b'
-                if re.search(pattern, affiliation_lower):
-                    return country_code
+            # Ищем целое слово
+            pattern = r'\b' + re.escape(country_lower) + r'\b'
+            if re.search(pattern, affiliation_lower):
+                return country_code
         
-        # Ищем коды стран (US, GB, DE, etc.)
+        # Ищем коды стран
         for country_name, country_code in self.processor.country_codes.items():
             if len(country_code) == 2:
                 if re.search(r'\b' + country_code + r'\b', affiliation, re.IGNORECASE):
                     return country_code
         
-        # Ищем страны на русском
+        # Ищем на русском
         russian_countries = {
-            'россия': 'RU',
-            'рф': 'RU',
-            'российская федерация': 'RU',
-            'российская федерация': 'RU',
-            'украина': 'UA',
-            'беларусь': 'BY',
-            'казахстан': 'KZ',
+            'россия': 'RU', 'рф': 'RU', 'российская': 'RU',
+            'украина': 'UA', 'беларусь': 'BY', 'казахстан': 'KZ',
         }
         
         for ru_name, code in russian_countries.items():
@@ -5673,6 +5668,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
