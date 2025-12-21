@@ -4490,8 +4490,9 @@ class ExcelExporter:
                     if 'author_country' in author and author['author_country']:
                         country = author['author_country']
                     
-                    # 2. Если нет, определяем из аффилиации автора
+                    # 2. Если нет, определяем из аффилиации автора (ИСПРАВЛЕНИЕ)
                     elif affiliation:
+                        # Используем метод из DataProcessor через self.processor
                         country = self._get_country_from_affiliation(affiliation)
                     
                     # 3. Fallback: если не удалось определить, берем из статьи
@@ -4530,7 +4531,7 @@ class ExcelExporter:
             data.append(row)
     
         return data
-       
+    
     def _prepare_author_summary(self) -> List[Dict]:
         data = []
         
@@ -4552,10 +4553,11 @@ class ExcelExporter:
             # Преобразуем множество ORCID в строку
             orcid_str = '; '.join(sorted(stats['orcid'])) if stats['orcid'] else ''
     
-            # ВАЖНОЕ ИСПРАВЛЕНИЕ: Определяем страну из аффилиации автора
+            # ИСПРАВЛЕНИЕ: Используем метод из DataProcessor вместо несуществующего
             country = ""
             if stats['affiliation']:
-                country = self._get_author_country_from_affiliation(stats['affiliation'])
+                # Используем метод из DataProcessor для определения страны
+                country = self._get_country_from_affiliation(stats['affiliation'])
             
             # Fallback: используем сохраненную страну или дополнительную коррекцию
             if not country:
@@ -5668,6 +5670,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
