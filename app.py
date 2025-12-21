@@ -4497,7 +4497,7 @@ class ExcelExporter:
                     
                     # 2. Если нет, определяем из аффилиации автора
                     elif affiliation:
-                        country = self._get_author_country_from_affiliation(affiliation)
+                        country = self._get_country_from_affiliation(affiliation)
                     
                     # 3. Fallback: если не удалось определить, берем из статьи
                     if not country and result.get('countries'):
@@ -5673,5 +5673,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
