@@ -3343,14 +3343,21 @@ class ExcelExporter:
         author_info = self.author_stats[author_key]
         if not author_info['affiliation']:
             return author_info['country']
-
+    
         affiliation = author_info['affiliation']
+        
+        # Сначала пытаемся определить страну из самой аффилиации
+        country_from_affiliation = self._get_country_from_affiliation(affiliation)
+        if country_from_affiliation:
+            return country_from_affiliation
+        
+        # Если не получилось, используем статистику по аффилиации
         if affiliation in affiliation_stats and affiliation_stats[affiliation]['countries']:
             countries = affiliation_stats[affiliation]['countries']
             if countries:
                 country_counter = Counter(countries)
                 most_common_country = country_counter.most_common(1)[0][0]
-
+    
                 if author_info['country'] != most_common_country:
                     website = affiliation_stats[affiliation].get('website', '')
                     if website:
@@ -3365,19 +3372,58 @@ class ExcelExporter:
                                 'CN': 'CN', 'JP': 'JP', 'KR': 'KR', 'IN': 'IN',
                                 'AU': 'AU', 'CA': 'CA', 'BR': 'BR', 'MX': 'MX'
                             }
-
+    
                             if domain_zone in domain_to_country:
                                 website_country = domain_to_country[domain_zone]
                                 if website_country == most_common_country:
                                     return most_common_country
-
-                    if len(countries) >= 3:
-                        country_freq = country_counter[most_common_country] / len(countries)
-                        if country_freq >= 0.7:
-                            return most_common_country
-
+    
+                        if len(countries) >= 3:
+                            country_freq = country_counter[most_common_country] / len(countries)
+                            if country_freq >= 0.7:
+                                return most_common_country
+    
         return author_info['country']
 
+    def _get_country_from_affiliation(self, affiliation: str) -> str:
+        """Определяет страну из текста аффилиации"""
+        if not affiliation:
+            return ""
+        
+        affiliation_lower = affiliation.lower()
+        
+        # Ищем полные названия стран
+        for country_name, country_code in self.processor.country_codes.items():
+            country_lower = country_name.lower()
+            if country_lower in affiliation_lower:
+                # Проверяем, что это не часть другого слова
+                pattern = r'\b' + re.escape(country_lower) + r'\b'
+                if re.search(pattern, affiliation_lower):
+                    return country_code
+        
+        # Ищем коды стран (US, GB, DE, etc.)
+        for country_name, country_code in self.processor.country_codes.items():
+            if len(country_code) == 2:
+                if re.search(r'\b' + country_code + r'\b', affiliation, re.IGNORECASE):
+                    return country_code
+        
+        # Ищем страны на русском
+        russian_countries = {
+            'россия': 'RU',
+            'рф': 'RU',
+            'российская федерация': 'RU',
+            'российская федерация': 'RU',
+            'украина': 'UA',
+            'беларусь': 'BY',
+            'казахстан': 'KZ',
+        }
+        
+        for ru_name, code in russian_countries.items():
+            if ru_name in affiliation_lower:
+                return code
+        
+        return ""
+    
     def _calculate_annual_citation_rate(self, citation_count: int, publication_year_str: str) -> float:
         """Calculate average annual citations"""
         if not citation_count or not publication_year_str:
@@ -4331,37 +4377,46 @@ class ExcelExporter:
     def _prepare_author_frequency(self, results: Dict[str, Dict], source_type: str) -> List[Dict]:
         author_counter = Counter()
         author_details = {}
-
+    
         for doi, result in results.items():
             if result.get('status') != 'success':
                 continue
-
+    
             for author in result['authors']:
                 full_name = author['name']
                 normalized_name = self.processor.normalize_author_name(full_name)
-
+    
                 # ИСПОЛЬЗУЕМ ТОЛЬКО normalized_name как ключ
                 key = normalized_name
-
+    
                 author_counter[key] += 1
-
+    
                 if key not in author_details:
                     affiliation = author['affiliation'][0] if author.get('affiliation') else ""
                     orcid = author.get('orcid', '')
-
+                    
+                    # ВАЖНОЕ ИСПРАВЛЕНИЕ: Определяем страну из аффилиации автора, а не из статьи
+                    country = ""
+                    if affiliation:
+                        country = self._get_country_from_affiliation(affiliation)
+                    
+                    # Fallback: если не удалось определить из аффилиации, берем первую страну из статьи
+                    if not country and result.get('countries'):
+                        country = result.get('countries', [''])[0]
+    
                     author_details[key] = {
                         'orcid': self.processor._format_orcid_id(orcid) if orcid else '',
                         'affiliation': affiliation,
-                        'country': result.get('countries', [''])[0] if result.get('countries') else '',
+                        'country': country,
                         'normalized_name': normalized_name
                     }
-
+    
         sorted_authors = sorted(author_counter.items(), key=lambda x: x[1], reverse=True)
-
+    
         data = []
         for key, count in sorted_authors:
             details = author_details.get(key, {})
-
+    
             if source_type == "analyzed":
                 frequency_column = 'Frequency count {in the analyzed articles}'
             elif source_type == "ref":
@@ -4370,7 +4425,7 @@ class ExcelExporter:
                 frequency_column = 'Frequency count {in the citing articles}'
             else:
                 frequency_column = f'Frequency count {{{source_type}}}'
-
+    
             row = {
                 'Surname + Initial_normalized': details.get('normalized_name', ''),
                 frequency_column: count,
@@ -4379,7 +4434,7 @@ class ExcelExporter:
                 'Country': details.get('country', '')
             }
             data.append(row)
-
+    
         return data
 
     def _prepare_author_summary(self) -> List[Dict]:
@@ -4387,11 +4442,11 @@ class ExcelExporter:
         
         # ИЗМЕНЕНИЕ: Рассчитываем общее количество analyzed статей для нормализации
         total_analyzed_articles = len([r for r in self.analyzed_results.values() if r.get('status') == 'success'])
-
+    
         for key, stats in self.author_stats.items():
             if stats['total_count'] == 0:
                 continue
-
+    
             # ИЗМЕНЕНИЕ: Рассчитываем normalized_analyzed на основе article_count_analyzed
             normalized_analyzed = 0
             if total_analyzed_articles > 0:
@@ -4399,27 +4454,38 @@ class ExcelExporter:
             
             # ИЗМЕНЕНИЕ: Total Count должен быть суммой normalized значений, но normalized_analyzed уже правильное
             total_count = normalized_analyzed + stats['normalized_reference'] + stats['normalized_citing']
-
+    
             # Преобразуем множество ORCID в строку
             orcid_str = '; '.join(sorted(stats['orcid'])) if stats['orcid'] else ''
-
-            # Correct country
+    
+            # ВАЖНОЕ ИСПРАВЛЕНИЕ: Определяем страну из аффилиации автора
+            country = ""
+            if stats['affiliation']:
+                country = self._get_country_from_affiliation(stats['affiliation'])
+            
+            # Fallback: если не удалось определить из аффилиации, используем сохраненную страну
+            if not country and stats['country']:
+                country = stats['country']
+            
+            # Дополнительная коррекция через существующий метод
             corrected_country = self._correct_country_for_author(key, self.affiliation_stats)
-
+            if not country and corrected_country:
+                country = corrected_country
+    
             row = {
                 'Surname + Initial_normalized': stats['normalized_name'],
                 'ORCID ID': orcid_str,
                 'Affiliation': stats['affiliation'],
-                'Country': corrected_country,
+                'Country': country,
                 'Total Count': round(total_count, 4),
                 'Normalized Analyzed': round(normalized_analyzed, 4),
                 'Normalized Reference': round(stats['normalized_reference'], 4),
                 'Normalized Citing': round(stats['normalized_citing'], 4)
             }
             data.append(row)
-
+    
         data.sort(key=lambda x: x['Total Count'], reverse=True)
-
+    
         return data
 
     def _prepare_affiliation_summary(self) -> List[Dict]:
@@ -5511,3 +5577,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
