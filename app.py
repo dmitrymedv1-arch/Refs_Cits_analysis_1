@@ -3716,7 +3716,7 @@ class ExcelExporter:
                 self.doi_to_source_counts[cite_doi]['citing'] += 1
                 self.source_dois['citing'].add(cite_doi)
 
-            # ИЗМЕНЕНИЕ: Update author stats for ref articles - ТОЛЬКО normalized значения
+            # ИЗМЕНЕНИЕ: Считаем авторов в analyzed статьях
             for author in result.get('authors', []):
                 full_name = author.get('name', '')
                 if not full_name:
@@ -3725,12 +3725,23 @@ class ExcelExporter:
                 normalized_name = self.processor.normalize_author_name(full_name)
                 # ИСПОЛЬЗУЕМ ТОЛЬКО normalized_name как ключ
                 key = normalized_name
+                
+                # Увеличиваем счетчик статей для этого автора в analyzed
+                author_analyzed_counts[key] += 1
             
-                # Calculate normalized value for ref articles
-                if total_ref_articles > 0:
-                    normalized_value = 1 / total_ref_articles
-                    self.author_stats[key]['normalized_reference'] += normalized_value
-                    self.author_stats[key]['total_count'] += normalized_value
+                # Инициализируем запись автора, если еще нет
+                if key not in self.author_stats:
+                    self.author_stats[key] = {
+                        'normalized_name': normalized_name,
+                        'orcid': set(),
+                        'affiliation': '',
+                        'country': '',
+                        'total_count': 0,
+                        'normalized_analyzed': 0,
+                        'article_count_analyzed': 0,
+                        'normalized_reference': 0,
+                        'normalized_citing': 0
+                    }
             
                 # Обновляем ORCID как множество
                 if author.get('orcid'):
@@ -3747,7 +3758,7 @@ class ExcelExporter:
                         self.author_stats[key]['country'] = author['author_country']
                     # 2. Если нет, определяем из аффилиации
                     elif self.author_stats[key]['affiliation']:
-                        country_from_aff = self._get_author_country_from_affiliation(self.author_stats[key]['affiliation'])
+                        country_from_aff = self._get_country_from_affiliation(self.author_stats[key]['affiliation'])
                         if country_from_aff:
                             self.author_stats[key]['country'] = country_from_aff
                     # 3. Fallback: из статьи
@@ -3767,25 +3778,41 @@ class ExcelExporter:
             for affiliation in unique_affiliations_in_article:
                 affiliation_analyzed_counts[affiliation] += 1
                 
+                # Инициализируем запись аффилиации, если еще нет
+                if affiliation not in self.affiliation_stats:
+                    self.affiliation_stats[affiliation] = {
+                        'colab_id': '',
+                        'website': '',
+                        'countries': [],
+                        'total_count': 0,
+                        'normalized_analyzed': 0,
+                        'article_count_analyzed': 0,
+                        'normalized_reference': 0,
+                        'normalized_citing': 0
+                    }
+                
                 if result.get('countries'):
                     for country in result.get('countries'):
                         if country:
                             self.affiliation_stats[affiliation]['countries'].append(country)
 
-        # ИЗМЕНЕНИЕ: После подсчета всех analyzed статей, вычисляем normalized значения
+        # ИЗМЕНЕНИЕ: После подсчета всех analyzed статей, вычисляем normalized значения ДЛЯ АВТОРОВ
         for author_key, count in author_analyzed_counts.items():
             if total_analyzed_articles > 0:
                 normalized_value = count / total_analyzed_articles
                 self.author_stats[author_key]['normalized_analyzed'] = normalized_value
                 self.author_stats[author_key]['article_count_analyzed'] = count
-                self.author_stats[author_key]['total_count'] = normalized_value
+                # Обновляем total_count для автора
+                self.author_stats[author_key]['total_count'] += normalized_value
 
+        # ИЗМЕНЕНИЕ: После подсчета всех analyzed статей, вычисляем normalized значения ДЛЯ АФФИЛИАЦИЙ
         for affiliation, count in affiliation_analyzed_counts.items():
             if total_analyzed_articles > 0:
                 normalized_value = count / total_analyzed_articles
                 self.affiliation_stats[affiliation]['normalized_analyzed'] = normalized_value
                 self.affiliation_stats[affiliation]['article_count_analyzed'] = count
-                self.affiliation_stats[affiliation]['total_count'] = normalized_value
+                # Обновляем total_count для аффилиации
+                self.affiliation_stats[affiliation]['total_count'] += normalized_value
 
         # Process ref results
         for doi, result in self.ref_results.items():
@@ -4543,9 +4570,7 @@ class ExcelExporter:
                 continue
     
             # ИЗМЕНЕНИЕ: Рассчитываем normalized_analyzed на основе article_count_analyzed
-            normalized_analyzed = 0
-            if total_analyzed_articles > 0:
-                normalized_analyzed = stats['article_count_analyzed'] / total_analyzed_articles
+            normalized_analyzed = stats.get('normalized_analyzed', 0)
             
             # ИЗМЕНЕНИЕ: Total Count должен быть суммой normalized значений, но normalized_analyzed уже правильное
             total_count = normalized_analyzed + stats['normalized_reference'] + stats['normalized_citing']
@@ -5670,6 +5695,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
