@@ -2073,13 +2073,13 @@ class OptimizedDOIProcessor:
                 batch_results = self._process_single_batch_with_retry(
                     batch, source_type, original_doi, True, True
                 )
+
                 results.update(batch_results)
-                
+
                 # Update progress
                 processed_batch = list(batch_results.keys())
                 self.stage_progress[source_type]['processed'].extend(processed_batch)
-                remaining_dois = dois[batch_idx + batch_size:]
-                self.stage_progress[source_type]['remaining'] = remaining_dois
+                self.stage_progress[source_type]['remaining'] = dois[batch_idx + batch_size:]
                 
                 # Save progress to cache
                 self.cache.save_progress(
@@ -2087,14 +2087,6 @@ class OptimizedDOIProcessor:
                     self.stage_progress[source_type]['processed'],
                     self.stage_progress[source_type]['remaining']
                 )
-                
-                # Force Streamlit to rerun to update UI
-                if batch_idx + batch_size < len(dois):  # Not the last batch
-                    time.sleep(0.1)  # Small delay
-                    # Force UI update
-                    st.session_state.resume_available = True
-                    st.session_state.resume_stage = source_type
-                    st.session_state.resume_remaining = remaining_dois
 
                 monitor.update(len(batch), 'processed')
 
@@ -3707,7 +3699,7 @@ class ExcelExporter:
         affiliation_analyzed_counts = Counter()  # Affiliation article count in analyzed
 
         for doi, result in self.analyzed_results.items():
-            if not result or result.get('status') != 'success':
+            if result.get('status') != 'success':
                 continue
 
             self.source_dois['analyzed'].add(doi)
@@ -3923,7 +3915,7 @@ class ExcelExporter:
 
     def _update_terms_topics_stats(self, doi: str, result: Dict, source_type: str):
         """Update terms and topics statistics"""
-        if not result or result.get('status') != 'success':
+        if result.get('status') != 'success':
             return
 
         topics_info = result.get('topics_info', {})
@@ -4447,14 +4439,14 @@ class ExcelExporter:
 
     def _prepare_article_sheet(self, results: Dict[str, Dict], source_type: str) -> List[Dict]:
         data = []
-    
+
         for doi, result in results.items():
-            if not result or result.get('status') != 'success':  # <-- Добавлена проверка на None
+            if result.get('status') != 'success':
                 continue
-    
-            pub_info = result.get('publication_info', {})  # <-- Используем .get() с дефолтным значением
-            authors = result.get('authors', [])
-            topics_info = result.get('topics_info', {})
+
+            pub_info = result['publication_info']
+            authors = result['authors']
+            topics_info = result['topics_info']
 
             orcid_urls = result.get('orcid_urls', [])
             affiliations = list(set([aff for author in authors for aff in author.get('affiliation', []) if aff]))
@@ -4503,10 +4495,10 @@ class ExcelExporter:
         author_details = {}
     
         for doi, result in results.items():
-            if not result or result.get('status') != 'success':
+            if result.get('status') != 'success':
                 continue
     
-            for author in result.get('authors', []):
+            for author in result['authors']:
                 full_name = author['name']
                 normalized_name = self.processor.normalize_author_name(full_name)
     
@@ -4840,11 +4832,12 @@ class ExcelExporter:
             return None
 
     def _prepare_journal_frequency(self, results: Dict[str, Dict], source_type: str) -> List[Dict]:
+        """Prepare data for Journal freq sheet with citation metrics"""
         journal_counter = Counter()
-        journal_citation_cr = defaultdict(list)
-        journal_citation_oa = defaultdict(list)
-        journal_articles = defaultdict(list)
-    
+        journal_citation_cr = defaultdict(list)  # Crossref citations list for each journal
+        journal_citation_oa = defaultdict(list)  # OpenAlex citations list for each journal
+        journal_articles = defaultdict(list)  # Article list for each journal (for additional info)
+
         # Determine which source to take citation data from
         if source_type == "analyzed":
             source_data = self.analyzed_results
@@ -4854,12 +4847,12 @@ class ExcelExporter:
             source_data = self.citing_results
         else:
             source_data = results
-    
+
         for doi, result in results.items():
-            if not result or result.get('status') != 'success':
+            if result.get('status') != 'success':
                 continue
-    
-            journal = result.get('publication_info', {}).get('journal', '')
+
+            journal = result['publication_info'].get('journal', '')
             if journal:
                 journal_counter[journal] += 1
                 
@@ -4939,15 +4932,15 @@ class ExcelExporter:
 
     def _prepare_affiliation_frequency(self, results: Dict[str, Dict], source_type: str) -> List[Dict]:
         affiliation_counter = Counter()
-    
+
         for doi, result in results.items():
-            if not result or result.get('status') != 'success':
+            if result.get('status') != 'success':
                 continue
-    
+
             unique_affiliations_in_article = set()
             for author in result.get('authors', []):
                 for affiliation in author.get('affiliation', []):
-                      if affiliation and affiliation.strip():
+                    if affiliation and affiliation.strip():
                         clean_aff = affiliation.strip()
                         unique_affiliations_in_article.add(clean_aff)
 
@@ -4973,7 +4966,7 @@ class ExcelExporter:
         country_combined_counter = Counter()
 
         for doi, result in results.items():
-            if not result or result.get('status') != 'success':
+            if result.get('status') != 'success':
                 continue
 
             countries = result.get('countries', [])
@@ -5141,20 +5134,13 @@ class ArticleAnalyzerSystem:
     def _check_resume_availability(self):
         """Check if there is saved progress for resuming"""
         stage, processed, remaining = self.cache_manager.load_progress()
-        
-        # Check if there is non-empty remaining list
-        if stage and remaining and len(remaining) > 0:
+        if stage and remaining:
             st.session_state.resume_available = True
             st.session_state.resume_stage = stage
             st.session_state.resume_remaining = remaining
         else:
             st.session_state.resume_available = False
-            st.session_state.resume_stage = None
-            st.session_state.resume_remaining = []
-        
-        # Debug info
-        print(f"Resume check - stage: {stage}, remaining: {len(remaining) if remaining else 0}")
-    
+
     def _parse_dois(self, input_text: str) -> List[str]:
         if not input_text:
             return []
@@ -5494,20 +5480,13 @@ def main():
     
     with col1:
         process_btn = st.button("📊 Process DOI", type="primary", use_container_width=True)
-
+    
     with col2:
-        # Always check resume availability before rendering button
-        system._check_resume_availability()
-        
         if st.session_state.resume_available:
             resume_btn = st.button("🔄 Resume", type="primary", use_container_width=True)
-            if resume_btn:
-                st.info(f"Resuming from stage: {st.session_state.resume_stage}")
-                st.info(f"Remaining DOI: {len(st.session_state.resume_remaining)}")
         else:
             resume_btn = None
-            st.button("🔄 Resume", type="secondary", use_container_width=True, disabled=True,
-                     help="No saved progress found")
+            st.button("🔄 Resume", type="secondary", use_container_width=True, disabled=True)
     
     with col3:
         clear_btn = st.button("🧹 Clear data", type="secondary", use_container_width=True)
@@ -5717,7 +5696,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
