@@ -2088,8 +2088,6 @@ class OptimizedDOIProcessor:
                     self.stage_progress[source_type]['remaining']
                 )
                 
-                self._update_resume_state_in_streamlit()
-                
                 # Force Streamlit to rerun to update UI
                 if batch_idx + batch_size < len(dois):  # Not the last batch
                     time.sleep(0.1)  # Small delay
@@ -5719,6 +5717,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
