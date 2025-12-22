@@ -3699,7 +3699,7 @@ class ExcelExporter:
         affiliation_analyzed_counts = Counter()  # Affiliation article count in analyzed
 
         for doi, result in self.analyzed_results.items():
-            if result.get('status') != 'success':
+            if not result or result.get('status') != 'success':
                 continue
 
             self.source_dois['analyzed'].add(doi)
@@ -3915,7 +3915,7 @@ class ExcelExporter:
 
     def _update_terms_topics_stats(self, doi: str, result: Dict, source_type: str):
         """Update terms and topics statistics"""
-        if result.get('status') != 'success':
+        if not result or result.get('status') != 'success':
             return
 
         topics_info = result.get('topics_info', {})
@@ -4439,14 +4439,14 @@ class ExcelExporter:
 
     def _prepare_article_sheet(self, results: Dict[str, Dict], source_type: str) -> List[Dict]:
         data = []
-
+    
         for doi, result in results.items():
-            if result.get('status') != 'success':
+            if not result or result.get('status') != 'success':  # <-- Добавлена проверка на None
                 continue
-
-            pub_info = result['publication_info']
-            authors = result['authors']
-            topics_info = result['topics_info']
+    
+            pub_info = result.get('publication_info', {})  # <-- Используем .get() с дефолтным значением
+            authors = result.get('authors', [])
+            topics_info = result.get('topics_info', {})
 
             orcid_urls = result.get('orcid_urls', [])
             affiliations = list(set([aff for author in authors for aff in author.get('affiliation', []) if aff]))
@@ -4495,10 +4495,10 @@ class ExcelExporter:
         author_details = {}
     
         for doi, result in results.items():
-            if result.get('status') != 'success':
+            if not result or result.get('status') != 'success':
                 continue
     
-            for author in result['authors']:
+            for author in result.get('authors', []):
                 full_name = author['name']
                 normalized_name = self.processor.normalize_author_name(full_name)
     
@@ -4832,12 +4832,11 @@ class ExcelExporter:
             return None
 
     def _prepare_journal_frequency(self, results: Dict[str, Dict], source_type: str) -> List[Dict]:
-        """Prepare data for Journal freq sheet with citation metrics"""
         journal_counter = Counter()
-        journal_citation_cr = defaultdict(list)  # Crossref citations list for each journal
-        journal_citation_oa = defaultdict(list)  # OpenAlex citations list for each journal
-        journal_articles = defaultdict(list)  # Article list for each journal (for additional info)
-
+        journal_citation_cr = defaultdict(list)
+        journal_citation_oa = defaultdict(list)
+        journal_articles = defaultdict(list)
+    
         # Determine which source to take citation data from
         if source_type == "analyzed":
             source_data = self.analyzed_results
@@ -4847,12 +4846,12 @@ class ExcelExporter:
             source_data = self.citing_results
         else:
             source_data = results
-
+    
         for doi, result in results.items():
-            if result.get('status') != 'success':
+            if not result or result.get('status') != 'success':
                 continue
-
-            journal = result['publication_info'].get('journal', '')
+    
+            journal = result.get('publication_info', {}).get('journal', '')
             if journal:
                 journal_counter[journal] += 1
                 
@@ -4932,15 +4931,15 @@ class ExcelExporter:
 
     def _prepare_affiliation_frequency(self, results: Dict[str, Dict], source_type: str) -> List[Dict]:
         affiliation_counter = Counter()
-
+    
         for doi, result in results.items():
-            if result.get('status') != 'success':
+            if not result or result.get('status') != 'success':
                 continue
-
+    
             unique_affiliations_in_article = set()
             for author in result.get('authors', []):
                 for affiliation in author.get('affiliation', []):
-                    if affiliation and affiliation.strip():
+                      if affiliation and affiliation.strip():
                         clean_aff = affiliation.strip()
                         unique_affiliations_in_article.add(clean_aff)
 
@@ -4966,7 +4965,7 @@ class ExcelExporter:
         country_combined_counter = Counter()
 
         for doi, result in results.items():
-            if result.get('status') != 'success':
+            if not result or result.get('status') != 'success':
                 continue
 
             countries = result.get('countries', [])
@@ -5696,3 +5695,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
