@@ -5499,7 +5499,7 @@ def main():
 
     with col2:
         # Always check resume availability before rendering button
-        system._update_resume_state_in_streamlit()  # Force check
+        system._check_resume_availability()
         
         if st.session_state.resume_available:
             resume_btn = st.button("🔄 Resume", type="primary", use_container_width=True)
@@ -5719,5 +5719,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
