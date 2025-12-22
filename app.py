@@ -2073,13 +2073,13 @@ class OptimizedDOIProcessor:
                 batch_results = self._process_single_batch_with_retry(
                     batch, source_type, original_doi, True, True
                 )
-
                 results.update(batch_results)
-
+                
                 # Update progress
                 processed_batch = list(batch_results.keys())
                 self.stage_progress[source_type]['processed'].extend(processed_batch)
-                self.stage_progress[source_type]['remaining'] = dois[batch_idx + batch_size:]
+                remaining_dois = dois[batch_idx + batch_size:]
+                self.stage_progress[source_type]['remaining'] = remaining_dois
                 
                 # Save progress to cache
                 self.cache.save_progress(
@@ -2087,6 +2087,16 @@ class OptimizedDOIProcessor:
                     self.stage_progress[source_type]['processed'],
                     self.stage_progress[source_type]['remaining']
                 )
+                
+                self._update_resume_state_in_streamlit()
+                
+                # Force Streamlit to rerun to update UI
+                if batch_idx + batch_size < len(dois):  # Not the last batch
+                    time.sleep(0.1)  # Small delay
+                    # Force UI update
+                    st.session_state.resume_available = True
+                    st.session_state.resume_stage = source_type
+                    st.session_state.resume_remaining = remaining_dois
 
                 monitor.update(len(batch), 'processed')
 
@@ -5133,13 +5143,20 @@ class ArticleAnalyzerSystem:
     def _check_resume_availability(self):
         """Check if there is saved progress for resuming"""
         stage, processed, remaining = self.cache_manager.load_progress()
-        if stage and remaining:
+        
+        # Check if there is non-empty remaining list
+        if stage and remaining and len(remaining) > 0:
             st.session_state.resume_available = True
             st.session_state.resume_stage = stage
             st.session_state.resume_remaining = remaining
         else:
             st.session_state.resume_available = False
-
+            st.session_state.resume_stage = None
+            st.session_state.resume_remaining = []
+        
+        # Debug info
+        print(f"Resume check - stage: {stage}, remaining: {len(remaining) if remaining else 0}")
+    
     def _parse_dois(self, input_text: str) -> List[str]:
         if not input_text:
             return []
@@ -5479,13 +5496,20 @@ def main():
     
     with col1:
         process_btn = st.button("📊 Process DOI", type="primary", use_container_width=True)
-    
+
     with col2:
+        # Always check resume availability before rendering button
+        system._update_resume_state_in_streamlit()  # Force check
+        
         if st.session_state.resume_available:
             resume_btn = st.button("🔄 Resume", type="primary", use_container_width=True)
+            if resume_btn:
+                st.info(f"Resuming from stage: {st.session_state.resume_stage}")
+                st.info(f"Remaining DOI: {len(st.session_state.resume_remaining)}")
         else:
             resume_btn = None
-            st.button("🔄 Resume", type="secondary", use_container_width=True, disabled=True)
+            st.button("🔄 Resume", type="secondary", use_container_width=True, disabled=True,
+                     help="No saved progress found")
     
     with col3:
         clear_btn = st.button("🧹 Clear data", type="secondary", use_container_width=True)
@@ -5695,4 +5719,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
