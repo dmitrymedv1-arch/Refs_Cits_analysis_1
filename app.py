@@ -2554,63 +2554,63 @@ class OptimizedDOIProcessor:
         self.cache.mark_as_failed("full_analysis", doi, error)
 
     def _validate_result_before_caching(self, result: Dict, doi: str, source_type: str) -> Dict:
-    """Валидация результата перед кэшированием"""
-    try:
-        if result is None:
-            raise ValueError("Result is None")
+        """Валидация результата перед кэшированием"""
+        try:
+            if result is None:
+                raise ValueError("Result is None")
+                
+            if not isinstance(result, dict):
+                raise ValueError(f"Result is not dict, type: {type(result)}")
             
-        if not isinstance(result, dict):
-            raise ValueError(f"Result is not dict, type: {type(result)}")
-        
-        # Проверяем обязательные поля
-        if 'doi' not in result:
-            result['doi'] = doi
-            
-        if 'status' not in result:
-            result['status'] = 'success' if result.get('publication_info') else 'failed'
-            
-        # Проверяем публикационную информацию
-        if 'publication_info' not in result:
-            result['publication_info'] = {}
-        elif result['publication_info'] is None:
-            result['publication_info'] = {}
-            
-        # Проверяем авторов
-        if 'authors' not in result:
-            result['authors'] = []
-        elif result['authors'] is None:
-            result['authors'] = []
-            
-        # Проверяем страны
-        if 'countries' not in result:
-            result['countries'] = []
-        elif result['countries'] is None:
-            result['countries'] = []
-            
-        # Проверяем темы
-        if 'topics_info' not in result:
-            result['topics_info'] = {}
-        elif result['topics_info'] is None:
-            result['topics_info'] = {}
-            
-        # Проверяем ORCID
-        if 'orcid_urls' not in result:
-            result['orcid_urls'] = []
-        elif result['orcid_urls'] is None:
-            result['orcid_urls'] = []
-            
-        # Проверяем ссылки и цитирования
-        if 'references' not in result:
-            result['references'] = []
-        elif result['references'] is None:
-            result['references'] = []
-            
-        if 'citations' not in result:
-            result['citations'] = []
-        elif result['citations'] is None:
-            result['citations'] = []
-            
-        return result
+            # Проверяем обязательные поля
+            if 'doi' not in result:
+                result['doi'] = doi
+                
+            if 'status' not in result:
+                result['status'] = 'success' if result.get('publication_info') else 'failed'
+                
+            # Проверяем публикационную информацию
+            if 'publication_info' not in result:
+                result['publication_info'] = {}
+            elif result['publication_info'] is None:
+                result['publication_info'] = {}
+                
+            # Проверяем авторов
+            if 'authors' not in result:
+                result['authors'] = []
+            elif result['authors'] is None:
+                result['authors'] = []
+                
+            # Проверяем страны
+            if 'countries' not in result:
+                result['countries'] = []
+            elif result['countries'] is None:
+                result['countries'] = []
+                
+            # Проверяем темы
+            if 'topics_info' not in result:
+                result['topics_info'] = {}
+            elif result['topics_info'] is None:
+                result['topics_info'] = {}
+                
+            # Проверяем ORCID
+            if 'orcid_urls' not in result:
+                result['orcid_urls'] = []
+            elif result['orcid_urls'] is None:
+                result['orcid_urls'] = []
+                
+            # Проверяем ссылки и цитирования
+            if 'references' not in result:
+                result['references'] = []
+            elif result['references'] is None:
+                result['references'] = []
+                
+            if 'citations' not in result:
+                result['citations'] = []
+            elif result['citations'] is None:
+                result['citations'] = []
+                
+            return result
         
     except Exception as e:
         st.warning(f"⚠️ Validation error for {doi} ({source_type}): {str(e)}")
@@ -5938,4 +5938,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
