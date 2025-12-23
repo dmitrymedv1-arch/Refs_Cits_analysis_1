@@ -2389,12 +2389,13 @@ class OptimizedDOIProcessor:
                 processed_batch = list(batch_results.keys())
                 self.stage_progress[source_type]['processed'].extend(processed_batch)
                 self.stage_progress[source_type]['remaining'] = dois[batch_idx + batch_size:]
-                
-                # Save progress to cache
-                self.cache.save_progress(
-                    source_type,
-                    self.stage_progress[source_type]['processed'],
-                    self.stage_progress[source_type]['remaining']
+
+                self.cache.save_batch_progress(
+                    stage=source_type,
+                    batch_id=batch_idx // batch_size,
+                    processed_dois=list(batch_results.keys()),
+                    failed_dois=[doi for doi in batch if doi not in batch_results or batch_results.get(doi, {}).get('status') == 'failed'],
+                    total_count=len(dois)
                 )
 
                 monitor.update(len(batch), 'processed')
@@ -6011,4 +6012,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
