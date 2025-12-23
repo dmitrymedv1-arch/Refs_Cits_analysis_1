@@ -616,6 +616,43 @@ class SmartCacheManager:
         except:
             pass
 
+    def _save_batch_progress_to_disk(self, batch_key: str, batch_data: Dict):
+        """Save batch progress to disk"""
+        try:
+            # Create directory for batch progress if not exists
+            batch_dir = os.path.join(self.cache_dir, "batch_progress")
+            os.makedirs(batch_dir, exist_ok=True)
+            
+            # Save batch data to file
+            batch_file = os.path.join(batch_dir, f"{batch_key}.json")
+            with open(batch_file, 'w') as f:
+                json.dump(batch_data, f, indent=2, default=str)
+        except Exception as e:
+            st.warning(f"⚠️ Failed to save batch progress to disk: {e}")
+    
+    def _flush_progress_to_disk(self):
+        """Flush incremental progress to disk"""
+        try:
+            progress_file = os.path.join(self.cache_dir, "incremental_progress.json")
+            with open(progress_file, 'w') as f:
+                json.dump(self.incremental_progress, f, indent=2, default=str)
+        except Exception as e:
+            st.warning(f"⚠️ Failed to flush progress to disk: {e}")
+            
+    def _save_incremental_progress(self, identifier: str, stage: str, data: Dict):
+        """Save incremental progress"""
+        progress_key = f"progress:{stage}:{identifier}"
+        progress_data = {
+            'doi': identifier,
+            'stage': stage,
+            'data': data,
+            'timestamp': time.time(),
+            'status': 'processing'
+        }
+        
+        # Сохраняем во временный кэш прогресса
+        self.incremental_progress[progress_key] = progress_data
+    
     def load_progress(self) -> Tuple[Optional[str], List[str], List[str]]:
         """Load saved processing progress"""
         progress_file = os.path.join(self.cache_dir, "progress_cache.json")
@@ -6144,6 +6181,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
