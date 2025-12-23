@@ -2166,8 +2166,12 @@ class OptimizedDOIProcessor:
             batch = dois[batch_idx:batch_idx + batch_size]
             batch_id = batch_idx // batch_size
             
-            # Создаем контрольную точку перед обработкой батча
-            self._create_checkpoint(source_type, batch_id, batch_idx, len(dois))
+            # Сохраняем прогресс в кэш менеджере вместо создания контрольной точки
+            self.cache.save_progress(
+                source_type,
+                self.stage_progress[source_type]['processed'],
+                self.stage_progress[source_type]['remaining']
+            )
             
             # Обрабатываем батч
             batch_results = self._process_batch_with_checkpoints(
@@ -6119,6 +6123,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
