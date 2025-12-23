@@ -5598,13 +5598,13 @@ class ArticleAnalyzerSystem:
                 progress_container
             )
 
-                for doi, result in st.session_state.ref_results.items():
-                    if result.get('status') == 'success':
-                        self.excel_exporter.update_counters(
-                            result.get('references', []),
-                            result.get('citations', []),
-                            "ref"
-                        )
+            for doi, result in st.session_state.ref_results.items():
+                if result.get('status') == 'success':
+                    self.excel_exporter.update_counters(
+                        result.get('references', []),
+                        result.get('citations', []),
+                        "ref"
+                    )
 
             # Collect and process citation DOI
             if progress_container:
@@ -6129,6 +6129,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
