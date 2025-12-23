@@ -5609,17 +5609,6 @@ def main():
             "Number of threads",
             min_value=Config.MIN_WORKERS,
             max_value=Config.MAX_WORKERS,
-            value=Config.DEFAULT
-
-    # Sidebar for settings
-    with st.sidebar:
-        st.header("⚙️ Settings")
-        
-        # Parallelism settings
-        num_workers = st.slider(
-            "Number of threads",
-            min_value=Config.MIN_WORKERS,
-            max_value=Config.MAX_WORKERS,
             value=Config.DEFAULT_WORKERS,
             help="Number of parallel threads for DOI processing"
         )
@@ -5884,4 +5873,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
