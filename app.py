@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""📚 Анализатор научных статей по DOI с умным кэшированием и экспортом в Excel
-Адаптирован для Streamlit
+"""📚 Scientific Article Analyzer by DOI with smart caching and Excel export
+Adapted for Streamlit
 """
 
 # ============================================================================
-# 📦 ИМПОРТЫ И НАСТРОЙКА
+# 📦 IMPORTS AND SETUP
 # ============================================================================
 
 import streamlit as st
@@ -35,18 +35,19 @@ import tempfile
 import base64
 from io import BytesIO
 import joblib
-from fuzzywuzzy import fuzz  # Добавляем для ROR поиска
+from fuzzywuzzy import fuzz
+import concurrent.futures
 
-# Настройка страницы Streamlit
+# Streamlit page configuration
 st.set_page_config(
-    page_title="📚 Анализатор научных статей по DOI",
+    page_title="📚 Scientific Article Analyzer by DOI",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 # ============================================================================
-# ⚙️ КОНФИГУРАЦИЯ
+# ⚙️ CONFIGURATION
 # ============================================================================
 
 class Config:
@@ -62,7 +63,7 @@ class Config:
     MIN_DELAY = 0.1
     INITIAL_DELAY = 0.2
 
-    # Для Streamlit используем временную директорию в сессии
+    # For Streamlit use temporary directory in session
     CACHE_DIR = tempfile.mkdtemp(prefix="article_analyzer_cache_")
     TTL_HOURS = 24
     MAX_CACHE_SIZE_MB = 50
@@ -75,33 +76,6 @@ class Config:
 
     TOP_PERCENTILE_FOR_DEEP_ANALYSIS = 10
     MIN_CITATIONS_FOR_DEEP_ANALYSIS = 10
-
-    # Пороговые значения для анализа неэтичных практик
-    QUICK_CHECK_THRESHOLDS = {
-        'journal_concentration': 0.7,  # >70% из одного журнала
-        'author_self_citation': 0.3,   # >30% с общими авторами
-        'affiliation_self_citation': 0.6,  # >60% из той же аффилиации
-        'single_country': 0.8,         # >80% из одной страны
-        'citation_velocity': 20,       # >20 цитирований в год
-        'first_year_share': 0.5        # >50% в первый год
-    }
-
-    MEDIUM_INSIGHT_THRESHOLDS = {
-        'first_two_years': 0.7,        # >70% за первые 2 года
-        'top_journal_share': 0.6,      # >60% из топ-1 журнала
-        'cluster_coefficient': 0.8,    # коэффициент кластеризации >0.8
-        'geographic_bias': 0.9         # географический bias >0.9
-    }
-
-    # Конфигурация для анализа Frontiers & Hot Topics
-    FRONTIERS_ANALYSIS_CONFIG = {
-        'min_term_frequency': 3,           # Минимальная частота термина
-        'min_topic_publications': 10,      # Минимум публикаций для темы
-        'burst_score_threshold': 70,       # Порог для burst detection
-        'growth_period_years': 3,          # Период для анализа роста
-        'hot_topics_limit': 50,            # Лимит вывода hot topics
-        'ngram_max_size': 3                # Максимальный размер N-gram
-    }
 
     COUNTRY_CODES = {
         'USA': 'US', 'United States': 'US', 'US': 'US',
@@ -179,7 +153,7 @@ class Config:
     }
 
 # ============================================================================
-# 🗂️ КЛАСС УМНОГО КЭШИРОВАНИЯ (УЛУЧШЕННЫЙ)
+# 🗂️ SMART CACHE MANAGER
 # ============================================================================
 
 class SmartCacheManager:
@@ -221,24 +195,11 @@ class SmartCacheManager:
             'mutual_citations': {}
         }
 
-        # Кэш для результатов анализа неэтичных практик
-        self.ethical_analysis_cache = {
-            'quick_checks': {},
-            'medium_insights': {},
-            'deep_analysis': {},
-            'citing_relationships': {}
-        }
-
-        # Кэш для результатов анализа Frontiers & Hot Topics
-        self.frontiers_analysis_cache = {
-            'title_terms': {},
-            'topic_growth': {},
-            'term_topic_convergence': {},
-            'citation_bursts': {},
-            'early_adopters': {},
-            'frontier_candidates': {},
-            'temporal_hotspots': {},
-            'predictive_horizons': {}
+        # New cache for processing progress
+        self.progress_cache = {
+            'last_processed': {},
+            'remaining_dois': {},
+            'current_stage': {}
         }
 
         if not os.path.exists(cache_dir):
@@ -247,6 +208,7 @@ class SmartCacheManager:
         self._clean_expired_cache()
 
         self._load_popular_dois()
+        self._load_progress_cache()
 
     def _get_cache_key(self, source: str, identifier: str) -> str:
         key_str = f"v3:{source}:{identifier}"
@@ -297,7 +259,7 @@ class SmartCacheManager:
                 self._evict_old_cache_items()
 
         except Exception as e:
-            st.warning(f"⚠️ Ошибка очистки кэша: {e}")
+            st.warning(f"⚠️ Cache cleanup error: {e}")
 
     def _evict_old_cache_items(self):
         try:
@@ -328,7 +290,7 @@ class SmartCacheManager:
                 cache_size = self._calculate_cache_size()
 
         except Exception as e:
-            st.warning(f"⚠️ Ошибка удаления старых элементов кэша: {e}")
+            st.warning(f"⚠️ Old cache item deletion error: {e}")
 
     def get(self, source: str, identifier: str, category: str = "default") -> Optional[Any]:
         failed_key = f"failed:{source}:{identifier}"
@@ -429,7 +391,7 @@ class SmartCacheManager:
             self.stats['api_calls_saved'] += 1
 
         except Exception as e:
-            st.warning(f"⚠️ Ошибка сохранения в кэш: {e}")
+            st.warning(f"⚠️ Cache save error: {e}")
 
     def mark_as_failed(self, source: str, identifier: str, error: str = ""):
         failed_key = f"failed:{source}:{identifier}"
@@ -503,20 +465,17 @@ class SmartCacheManager:
                 'geo_bubbles': {}, 'temporal_patterns': {}, 'hyper_citation': {},
                 'citation_cascades': {}, 'mutual_citations': {}
             }
-            self.ethical_analysis_cache = {
-                'quick_checks': {}, 'medium_insights': {}, 'deep_analysis': {}, 'citing_relationships': {}
-            }
-            self.frontiers_analysis_cache = {
-                'title_terms': {}, 'topic_growth': {}, 'term_topic_convergence': {},
-                'citation_bursts': {}, 'early_adopters': {}, 'frontier_candidates': {},
-                'temporal_hotspots': {}, 'predictive_horizons': {}
+            self.progress_cache = {
+                'last_processed': {},
+                'remaining_dois': {},
+                'current_stage': {}
             }
             self.stats = {k: 0 for k in self.stats.keys()}
 
-            st.success("✅ Кэш полностью очищен")
+            st.success("✅ Cache completely cleared")
 
         except Exception as e:
-            st.error(f"⚠️ Ошибка очистки кэша: {e}")
+            st.error(f"⚠️ Cache clear error: {e}")
 
     def get_ror_cache(self, category: str, query: str) -> Optional[Dict]:
         if category in self.ror_cache and query in self.ror_cache[category]:
@@ -557,52 +516,68 @@ class SmartCacheManager:
             for insight in self.insights_cache:
                 self.insights_cache[insight].clear()
 
-    # Методы для кэширования анализа неэтичных практик
-    def get_ethical_analysis(self, analysis_type: str, doi: str) -> Optional[Dict]:
-        if analysis_type in self.ethical_analysis_cache and doi in self.ethical_analysis_cache[analysis_type]:
-            return self.ethical_analysis_cache[analysis_type][doi]
-        return None
+    # New methods for saving and loading processing progress
+    def save_progress(self, stage: str, processed_dois: List[str], remaining_dois: List[str]):
+        """Save processing progress to resume from interruption"""
+        self.progress_cache['current_stage'] = stage
+        self.progress_cache['last_processed'][stage] = processed_dois
+        self.progress_cache['remaining_dois'][stage] = remaining_dois
+        
+        # Save to disk
+        progress_file = os.path.join(self.cache_dir, "progress_cache.json")
+        try:
+            with open(progress_file, 'w') as f:
+                json.dump(self.progress_cache, f, indent=2)
+        except:
+            pass
 
-    def set_ethical_analysis(self, analysis_type: str, doi: str, data: Dict):
-        if analysis_type not in self.ethical_analysis_cache:
-            self.ethical_analysis_cache[analysis_type] = {}
-        self.ethical_analysis_cache[analysis_type][doi] = {
-            'data': data,
-            'timestamp': time.time()
+    def load_progress(self) -> Tuple[Optional[str], List[str], List[str]]:
+        """Load saved processing progress"""
+        progress_file = os.path.join(self.cache_dir, "progress_cache.json")
+        if os.path.exists(progress_file):
+            try:
+                with open(progress_file, 'r') as f:
+                    self.progress_cache = json.load(f)
+                
+                stage = self.progress_cache.get('current_stage')
+                if stage:
+                    processed = self.progress_cache.get('last_processed', {}).get(stage, [])
+                    remaining = self.progress_cache.get('remaining_dois', {}).get(stage, [])
+                    return stage, processed, remaining
+            except:
+                pass
+        return None, [], []
+
+    def clear_progress(self):
+        """Clear saved progress"""
+        self.progress_cache = {
+            'last_processed': {},
+            'remaining_dois': {},
+            'current_stage': {}
         }
+        progress_file = os.path.join(self.cache_dir, "progress_cache.json")
+        if os.path.exists(progress_file):
+            try:
+                os.remove(progress_file)
+            except:
+                pass
 
-    def clear_ethical_analysis(self, analysis_type: str = None):
-        if analysis_type:
-            if analysis_type in self.ethical_analysis_cache:
-                self.ethical_analysis_cache[analysis_type].clear()
-        else:
-            for analysis in self.ethical_analysis_cache:
-                self.ethical_analysis_cache[analysis].clear()
-
-    # Методы для кэширования анализа Frontiers & Hot Topics
-    def get_frontiers_analysis(self, analysis_type: str, key: str) -> Optional[Dict]:
-        if analysis_type in self.frontiers_analysis_cache and key in self.frontiers_analysis_cache[analysis_type]:
-            return self.frontiers_analysis_cache[analysis_type][key]
-        return None
-
-    def set_frontiers_analysis(self, analysis_type: str, key: str, data: Dict):
-        if analysis_type not in self.frontiers_analysis_cache:
-            self.frontiers_analysis_cache[analysis_type] = {}
-        self.frontiers_analysis_cache[analysis_type][key] = {
-            'data': data,
-            'timestamp': time.time()
-        }
-
-    def clear_frontiers_analysis(self, analysis_type: str = None):
-        if analysis_type:
-            if analysis_type in self.frontiers_analysis_cache:
-                self.frontiers_analysis_cache[analysis_type].clear()
-        else:
-            for analysis in self.frontiers_analysis_cache:
-                self.frontiers_analysis_cache[analysis].clear()
+    def _load_progress_cache(self):
+        """Load progress cache from disk during initialization"""
+        progress_file = os.path.join(self.cache_dir, "progress_cache.json")
+        if os.path.exists(progress_file):
+            try:
+                with open(progress_file, 'r') as f:
+                    self.progress_cache = json.load(f)
+            except:
+                self.progress_cache = {
+                    'last_processed': {},
+                    'remaining_dois': {},
+                    'current_stage': {}
+                }
 
 # ============================================================================
-# 🚀 КЛАСС АДАПТИВНЫХ ЗАДЕРЖЕК
+# 🚀 ADAPTIVE DELAY MANAGER
 # ============================================================================
 
 class AdaptiveDelayManager:
@@ -679,11 +654,11 @@ class AdaptiveDelayManager:
         }
 
 # ============================================================================
-# 📊 КЛАСС МОНИТОРИНГА ПРОГРЕССА (АДАПТИРОВАН ДЛЯ STREAMLIT)
+# 📊 PROGRESS MONITOR (ADAPTED FOR STREAMLIT)
 # ============================================================================
 
 class ProgressMonitor:
-    def __init__(self, total_items: int, stage_name: str = "Обработка", progress_bar=None, status_text=None):
+    def __init__(self, total_items: int, stage_name: str = "Processing", progress_bar=None, status_text=None):
         self.total_items = total_items
         self.processed_items = 0
         self.start_time = time.time()
@@ -691,7 +666,7 @@ class ProgressMonitor:
         self.last_progress_time = self.start_time
         self.processing_speeds = []
         
-        # Streamlit элементы
+        # Streamlit elements
         self.progress_bar = progress_bar
         self.status_text = status_text
         self.progress_container = None
@@ -715,12 +690,12 @@ class ProgressMonitor:
             else:
                 self.stats[item_type] = count
 
-        # Обновляем прогресс бар Streamlit
+        # Update Streamlit progress bar
         if self.progress_bar is not None and self.total_items > 0:
             progress_percent = (self.processed_items / self.total_items) * 100
             self.progress_bar.progress(progress_percent / 100.0)
             
-        # Обновляем статус текст
+        # Update status text
         if self.status_text is not None:
             self._update_status_text()
 
@@ -749,7 +724,7 @@ class ProgressMonitor:
                 eta_seconds = remaining_items / avg_speed
                 eta_str = self._format_time(eta_seconds)
             else:
-                eta_str = "расчет..."
+                eta_str = "calculating..."
 
             stats_str = ""
             for stat_type, count in self.stats.items():
@@ -758,21 +733,21 @@ class ProgressMonitor:
 
             status_message = f"{self.stage_name}: {self.processed_items}/{self.total_items} " \
                            f"({progress_percent:.1f}%), " \
-                           f"скорость: {items_per_min:.1f} DOI/мин, " \
-                           f"осталось: {eta_str}{stats_str}"
+                           f"speed: {items_per_min:.1f} DOI/min, " \
+                           f"remaining: {eta_str}{stats_str}"
             
             if self.status_text is not None:
                 self.status_text.text(status_message)
 
     def _format_time(self, seconds: float) -> str:
         if seconds < 60:
-            return f"{seconds:.0f} сек"
+            return f"{seconds:.0f} sec"
         elif seconds < 3600:
             minutes = seconds / 60
-            return f"{minutes:.0f} мин"
+            return f"{minutes:.0f} min"
         else:
             hours = seconds / 3600
-            return f"{hours:.1f} ч"
+            return f"{hours:.1f} hr"
 
     def get_summary(self) -> Dict[str, Any]:
         elapsed = time.time() - self.start_time
@@ -808,14 +783,14 @@ class ProgressMonitor:
             self.progress_bar.progress(1.0)
             
         if self.status_text is not None:
-            self.status_text.text(f"✅ {self.stage_name} завершена! "
-                                  f"Обработано: {self.processed_items} ({progress_percent:.1f}%), "
-                                  f"время: {self._format_time(elapsed)}")
+            self.status_text.text(f"✅ {self.stage_name} completed! "
+                                  f"Processed: {self.processed_items} ({progress_percent:.1f}%), "
+                                  f"time: {self._format_time(elapsed)}")
 
         return summary
 
 # ============================================================================
-# 📝 КЛАСС ТРЕКИНГА НЕУДАЧНЫХ DOI (НОВЫЙ)
+# 📝 FAILED DOI TRACKER
 # ============================================================================
 
 class FailedDOITracker:
@@ -865,11 +840,11 @@ class FailedDOITracker:
         for doi, info in self.failed_dois.items():
             relationship_info = ""
             if info['original_doi']:
-                relationship_info = f"Источник: {info['original_doi']}"
+                relationship_info = f"Source: {info['original_doi']}"
             elif info['related_dois']:
-                relationship_info = f"Связан с: {', '.join(info['related_dois'][:3])}"
+                relationship_info = f"Related to: {', '.join(info['related_dois'][:3])}"
                 if len(info['related_dois']) > 3:
-                    relationship_info += f"... (еще {len(info['related_dois']) - 3})"
+                    relationship_info += f"... (more {len(info['related_dois']) - 3})"
 
             row = {
                 'DOI': doi,
@@ -908,7 +883,7 @@ class FailedDOITracker:
         }
 
 # ============================================================================
-# 🌐 КЛАСС КЛИЕНТОВ API
+# 🌐 API CLIENTS
 # ============================================================================
 
 class APIClient:
@@ -1029,7 +1004,7 @@ class CrossrefClient(APIClient):
         return doi.strip()
 
 # ============================================================================
-# 🌐 КЛАСС КЛИЕНТОВ API (ОБНОВЛЕННЫЙ)
+# 🌐 UPDATED API CLIENTS
 # ============================================================================
 
 class OpenAlexClient(APIClient):
@@ -1048,8 +1023,8 @@ class OpenAlexClient(APIClient):
 
     def fetch_citations(self, doi: str, max_pages: int = 10) -> List[str]:
         """
-        Старая логика сбора цитирований - используется для reference и citing articles
-        Собирает только до 2000 цитирований (200 * max_pages)
+        Old citation collection logic - used for reference and citing articles
+        Collects only up to 2000 citations (200 * max_pages)
         """
         clean_doi = self._clean_doi(doi)
         if not clean_doi:
@@ -1104,21 +1079,21 @@ class OpenAlexClient(APIClient):
 
     def fetch_all_citations_for_analyzed_article(self, doi: str) -> List[str]:
         """
-        НОВАЯ ЛОГИКА: Полный сбор ВСЕХ цитирований для analyzed articles
-        Использует cursor-based пагинацию и собирает все страницы
+        NEW LOGIC: Complete collection of ALL citations for analyzed articles
+        Uses cursor-based pagination and collects all pages
         """
         clean_doi = self._clean_doi(doi)
         if not clean_doi:
             return []
 
-        # Проверяем кэш для полных цитирований
+        # Check cache for full citations
         cache_key = f"full_citations:{clean_doi}"
         cached_result = self.cache.get("full_citations", cache_key)
         if cached_result is not None:
             return cached_result
 
         try:
-            # Сначала получаем work_id из DOI
+            # First get work_id from DOI
             article_data = self.fetch_article(clean_doi)
             if 'error' in article_data:
                 return []
@@ -1148,7 +1123,7 @@ class OpenAlexClient(APIClient):
                             data = response.json()
 
                             if not isinstance(data, dict):
-                                st.warning(f"⚠️ Некорректный формат ответа на странице {page_num} для {clean_doi}")
+                                st.warning(f"⚠️ Invalid response format on page {page_num} for {clean_doi}")
                                 break
 
                             works = data.get('results', [])
@@ -1167,18 +1142,18 @@ class OpenAlexClient(APIClient):
                             all_citing_dois.extend(page_citing_dois)
                             total_collected += len(page_citing_dois)
 
-                            # Получаем следующий курсор
+                            # Get next cursor
                             meta = data.get('meta', {})
                             next_cursor = meta.get('next_cursor')
 
                             if next_cursor:
                                 cursor = next_cursor
                                 page_num += 1
-                                time.sleep(0.5)  # Пауза между страницами для соблюдения rate limits
+                                time.sleep(0.5)  # Pause between pages for rate limits
                             else:
                                 cursor = None
 
-                            break  # Успешно, выходим из retry цикла
+                            break  # Success, exit retry loop
 
                         elif response.status_code == 429:
                             self.delay.update_delay(False, response_time)
@@ -1187,7 +1162,7 @@ class OpenAlexClient(APIClient):
                             continue
 
                         elif response.status_code == 404:
-                            st.warning(f"⚠️ Статья {clean_doi} не найдена в OpenAlex")
+                            st.warning(f"⚠️ Article {clean_doi} not found in OpenAlex")
                             cursor = None
                             break
 
@@ -1204,23 +1179,23 @@ class OpenAlexClient(APIClient):
                         time.sleep(5)
                         continue
 
-                else:  # Все попытки исчерпаны
+                else:  # All retries exhausted
                     break
 
-            # Убираем дубликаты и сохраняем в кэш
+            # Remove duplicates and save to cache
             unique_citing_dois = list(set(all_citing_dois))
 
-            # Сохраняем в кэш с отдельной категорией для полных цитирований
+            # Save to cache with separate category for full citations
             self.cache.set("full_citations", cache_key, unique_citing_dois, category="full_citations_analyzed")
 
             return unique_citing_dois
 
         except Exception as e:
-            st.error(f"❌ Критическая ошибка при сборе цитирований для {clean_doi}: {str(e)}")
+            st.error(f"❌ Critical error collecting citations for {clean_doi}: {str(e)}")
             return []
 
     def _safe_get(self, data, *keys, default=''):
-        """Безопасное получение значения из словаря (вспомогательная функция)"""
+        """Safe value extraction from dictionary (helper function)"""
         if not isinstance(data, dict):
             return default
 
@@ -1246,6 +1221,10 @@ class OpenAlexClient(APIClient):
 
         return doi.strip()
 
+# ============================================================================
+# 🔍 UPDATED RORClient (WITH PARALLEL PROCESSING)
+# ============================================================================
+
 class RORClient:
     def __init__(self, cache_manager: SmartCacheManager):
         self.cache = cache_manager
@@ -1256,6 +1235,7 @@ class RORClient:
         })
         self.last_request_time = 0
         self.min_delay = 0.3
+        self.parallel_workers = 10  # Number of parallel threads for ROR API
 
     def _respect_delay(self):
         elapsed = time.time() - self.last_request_time
@@ -1264,6 +1244,7 @@ class RORClient:
         self.last_request_time = time.time()
 
     def search_organization(self, query: str, category: str = "summary") -> Dict[str, str]:
+        """Main method for searching organization in ROR"""
         if not query or len(query.strip()) < 2:
             return self._create_empty_result()
 
@@ -1341,6 +1322,81 @@ class RORClient:
             st.warning(f"ROR error for query '{query}': {e}")
             return self._create_empty_result()
 
+    def search_organization_parallel(self, query: str) -> Dict[str, str]:
+        """Wrapper for parallel processing"""
+        return self.search_organization(query, "summary")
+        
+    def search_multiple_organizations(self, queries: List[str], progress_container=None) -> Dict[str, Dict[str, str]]:
+        """Parallel search for multiple organizations"""
+        results = {}
+        
+        if not queries:
+            st.warning("ROR search query list is empty")
+            return results
+        
+        # Remove duplicates
+        unique_queries = list(set(queries))
+        
+        # Setup progress bar
+        if progress_container:
+            # Create new progress elements inside container
+            progress_text = progress_container.text(f"🔍 Searching ROR data for {len(unique_queries)} affiliations...")
+            ror_progress_bar = progress_container.progress(0)
+            status_text = progress_container.empty()
+            
+            # Update initial status
+            status_text.text(f"🔍 Initializing search...")
+        else:
+            progress_text = None
+            ror_progress_bar = None
+            status_text = None
+        
+        st.info(f"Starting ROR search for {len(unique_queries)} unique affiliations...")
+        
+        # Use ThreadPoolExecutor for parallel processing
+        with ThreadPoolExecutor(max_workers=self.parallel_workers) as executor:
+            # Create dictionary future -> query
+            future_to_query = {}
+            for query in unique_queries:
+                future = executor.submit(self.search_organization_parallel, query)
+                future_to_query[future] = query
+            
+            # Process results as they arrive
+            completed = 0
+            total = len(unique_queries)
+            
+            for future in concurrent.futures.as_completed(future_to_query):
+                query = future_to_query[future]
+                try:
+                    result = future.result()
+                    if result and result.get('ror_id'):
+                        results[query] = result
+                        if len(results) % 10 == 0 and status_text:
+                            status_text.text(f"🔍 Found {len(results)} ROR records...")
+                    elif result and not result.get('ror_id'):
+                        # Record results even if no ROR ID found
+                        results[query] = result
+                except Exception as e:
+                    st.warning(f"ROR search error for '{query}': {e}")
+                    # Create empty record in case of error
+                    results[query] = {'ror_id': '', 'website': '', 'score': 0, 'name': '', 'acronyms': []}
+                
+                completed += 1
+                if ror_progress_bar and total > 0:
+                    progress_percent = completed / total
+                    ror_progress_bar.progress(progress_percent)
+                    if status_text:
+                        status_text.text(f"🔍 Processed: {completed}/{total} ({progress_percent*100:.1f}%), ROR found: {len([r for r in results.values() if r.get('ror_id')])}")
+        
+        if ror_progress_bar:
+            ror_progress_bar.progress(1.0)
+            if status_text:
+                status_text.text(f"✅ ROR data collected for {len(results)} affiliations (ROR ID found: {len([r for r in results.values() if r.get('ror_id')])})")
+        
+        st.success(f"✅ ROR search completed. Found {len([r for r in results.values() if r.get('ror_id')])} ROR ID from {len(unique_queries)} queries")
+        
+        return results
+    
     def _improved_find_best_match(self, query: str, items: List[Dict]) -> Optional[Dict]:
         if not items:
             return None
@@ -1414,7 +1470,7 @@ class RORClient:
         }
 
 # ============================================================================
-# 🛠️ КЛАСС ОБРАБОТКИ ДАННЫХ
+# 🛠️ DATA PROCESSOR
 # ============================================================================
 
 class DataProcessor:
@@ -1424,41 +1480,131 @@ class DataProcessor:
 
     def extract_article_info(self, crossref_data: Dict, openalex_data: Dict,
                            doi: str, references: List[str], citations: List[str]) -> Dict:
-
+    
         pub_info = self._extract_publication_info(crossref_data, openalex_data)
         authors, countries_from_auth = self._extract_authors_info(crossref_data, openalex_data)
         countries = self._extract_countries_info(authors, openalex_data)
-
+    
         country_codes = [self._country_to_code(c) for c in countries]
         country_codes = list(set(filter(None, country_codes)))
-
+    
         orcid_urls = []
+        # NEW: collect author countries
+        author_countries = []
         for author in authors:
             if author.get('orcid'):
                 orcid_url = self._format_orcid_id(author['orcid'])
                 if orcid_url:
                     orcid_urls.append(orcid_url)
-
+            
+            # Add author country if defined
+            if author.get('author_country'):
+                author_countries.append(author['author_country'])
+    
         pages_field = pub_info['pages']
         if not pages_field and pub_info['article_number']:
             pages_field = f"Article {pub_info['article_number']}"
-
+    
+        # Extract topic information from OpenAlex
+        topics_info = self._extract_topics_info(openalex_data)
+    
+        # Check reference count via OpenAlex if Crossref shows 0
+        references_count = len(references)
+        if references_count == 0 and openalex_data and 'referenced_works_count' in openalex_data:
+            references_count = openalex_data.get('referenced_works_count', 0)
+    
         quick_insights = self._extract_quick_insights(
             authors, countries, references, citations, pub_info
         )
-
+    
         return {
             'doi': doi,
             'publication_info': pub_info,
+            'topics_info': topics_info,
             'authors': authors,
             'countries': country_codes,
+            'author_countries': list(set(author_countries)),  # NEW: author countries
             'orcid_urls': orcid_urls,
             'references': references,
             'citations': citations,
+            'references_count': references_count,
             'pages_formatted': pages_field,
             'status': 'success',
             'quick_insights': quick_insights
         }
+
+    def _extract_topics_info(self, openalex_data: Dict) -> Dict:
+        """Extract topic, subfield, field, domain and concepts information from OpenAlex"""
+        topics_info = {
+            'topic': '',
+            'subfield': '',
+            'field': '',
+            'domain': '',
+            'concepts': []
+        }
+
+        if not openalex_data:
+            return topics_info
+
+        try:
+            # Extract concepts
+            concepts = openalex_data.get('concepts', [])
+            concept_names = []
+            
+            for concept in concepts:
+                if isinstance(concept, dict):
+                    display_name = concept.get('display_name', '')
+                    if display_name:
+                        concept_names.append(display_name)
+            
+            topics_info['concepts'] = concept_names
+
+            # Extract topic information (use first concept as topic)
+            if concept_names:
+                topics_info['topic'] = concept_names[0] if concept_names else ''
+                
+                # For subfield, field and domain use concept hierarchy
+                # In real application need to extract from 'subfield', 'field', 'domain' fields
+                # but in OpenAlex they are often within concepts
+                if len(concept_names) > 1:
+                    topics_info['subfield'] = concept_names[1] if len(concept_names) > 1 else ''
+                if len(concept_names) > 2:
+                    topics_info['field'] = concept_names[2] if len(concept_names) > 2 else ''
+                if len(concept_names) > 3:
+                    topics_info['domain'] = concept_names[3] if len(concept_names) > 3 else ''
+
+            # Check for fields in OpenAlex structure
+            if 'topics' in openalex_data and openalex_data['topics']:
+                topics = openalex_data['topics']
+                if isinstance(topics, list) and topics:
+                    if isinstance(topics[0], dict):
+                        topics_info['topic'] = topics[0].get('display_name', topics_info['topic'])
+
+            if 'subfield' in openalex_data and openalex_data['subfield']:
+                subfield = openalex_data['subfield']
+                if isinstance(subfield, dict):
+                    topics_info['subfield'] = subfield.get('display_name', topics_info['subfield'])
+                elif isinstance(subfield, str):
+                    topics_info['subfield'] = subfield
+
+            if 'field' in openalex_data and openalex_data['field']:
+                field = openalex_data['field']
+                if isinstance(field, dict):
+                    topics_info['field'] = field.get('display_name', topics_info['field'])
+                elif isinstance(field, str):
+                    topics_info['field'] = field
+
+            if 'domain' in openalex_data and openalex_data['domain']:
+                domain = openalex_data['domain']
+                if isinstance(domain, dict):
+                    topics_info['domain'] = domain.get('display_name', topics_info['domain'])
+                elif isinstance(domain, str):
+                    topics_info['domain'] = domain
+
+        except Exception as e:
+            st.warning(f"⚠️ Topics info extraction error: {e}")
+
+        return topics_info
 
     def _extract_quick_insights(self, authors: List[Dict], countries: List[str],
                                references: List[str], citations: List[str],
@@ -1510,14 +1656,14 @@ class DataProcessor:
             pub_info['title'] = msg.get('title', [''])[0] if msg.get('title') else ''
             pub_info['journal'] = msg.get('container-title', [''])[0] if msg.get('container-title') else ''
 
-            # Улучшенный парсинг даты из Crossref
+            # Improved date parsing from Crossref
             pub_date = None
             if 'created' in msg and 'date-parts' in msg['created']:
                 created_date = msg.get('created', {})
                 if 'date-parts' in created_date and created_date['date-parts']:
                     pub_date = created_date['date-parts'][0]
 
-            # Если не нашли в created, тогда используем license как fallback
+            # If not found in created, use license as fallback
             if not pub_date and 'license' in msg:
                 for license_item in msg['license']:
                     if isinstance(license_item, dict) and 'start' in license_item:
@@ -1526,13 +1672,13 @@ class DataProcessor:
                             pub_date = start_date['date-parts'][0]
                             break
 
-            # Если не нашли в license, ищем в created
+            # If not found in license, search in created
             if not pub_date and 'created' in msg:
                 created_date = msg.get('created', {})
                 if 'date-parts' in created_date and created_date['date-parts']:
                     pub_date = created_date['date-parts'][0]
 
-            # Если не нашли в created, используем старую логику
+            # If not found in created, use old logic
             if not pub_date and 'published' in msg and 'date-parts' in msg['published']:
                 pub_date = msg['published']['date-parts'][0]
 
@@ -1577,26 +1723,29 @@ class DataProcessor:
     def _extract_authors_info(self, crossref_data: Dict, openalex_data: Dict) -> Tuple[List[Dict], List[str]]:
         authors = []
         countries = []
-
+    
         try:
             if openalex_data and 'authorships' in openalex_data:
                 for authorship in openalex_data['authorships']:
                     if not authorship:
                         continue
-
+    
                     author_display = authorship.get('author', {})
                     full_name = authorship.get('raw_author_name') or author_display.get('display_name', '')
-
+    
                     if not full_name:
                         continue
-
+    
                     author_info = {
                         'name': full_name,
                         'affiliation': [],
-                        'orcid': author_display.get('orcid', '')
+                        'orcid': author_display.get('orcid', ''),
+                        'author_country': ''  # NEW: add author country
                     }
-
+    
                     institutions = authorship.get('institutions', [])
+                    institution_countries = []
+                    
                     if institutions:
                         for inst in institutions:
                             if inst and isinstance(inst, dict):
@@ -1605,39 +1754,63 @@ class DataProcessor:
                                     clean_aff = self._clean_affiliation(display_name)
                                     if clean_aff:
                                         author_info['affiliation'].append(clean_aff)
-
+                                
+                                # NEW LOGIC: determine country from institution
                                 country_code = inst.get('country_code')
-                                if country_code:
+                                if country_code and country_code != 'XX':
+                                    institution_countries.append(country_code)
                                     countries.append(country_code)
-
+                                
+                                # If no country_code, try to determine from name
+                                elif display_name:
+                                    country_from_name = self._get_country_from_institution_name(display_name)
+                                    if country_from_name:
+                                        institution_countries.append(country_from_name)
+                                        countries.append(country_from_name)
+                    
+                    # Determine author country: take first country from his institutions
+                    if institution_countries:
+                        author_info['author_country'] = institution_countries[0]
+                        
+                    # Fallback: if not found through institutions, determine from affiliation name
+                    if not author_info['author_country'] and author_info['affiliation']:
+                        for affiliation in author_info['affiliation']:
+                            country_from_aff = self._get_country_from_institution_name(affiliation)
+                            if country_from_aff:
+                                author_info['author_country'] = country_from_aff
+                                break
+    
                     authors.append(author_info)
         except Exception as e:
             st.warning(f"⚠️ OpenAlex author extraction error: {e}")
-
+    
         if not authors and crossref_data:
             try:
                 message = crossref_data.get('message', {})
                 crossref_authors = message.get('author', [])
-
+    
                 if crossref_authors:
                     for author_obj in crossref_authors:
                         if not author_obj:
                             continue
-
+    
                         given = author_obj.get('given', '')
                         family = author_obj.get('family', '')
                         full_name = f"{given} {family}".strip()
-
+    
                         if not full_name:
                             continue
-
+    
                         author_info = {
                             'name': full_name,
                             'affiliation': [],
-                            'orcid': author_obj.get('ORCID', '')
+                            'orcid': author_obj.get('ORCID', ''),
+                            'author_country': ''  # NEW: add author country
                         }
-
+    
                         affiliations = author_obj.get('affiliation', [])
+                        affiliation_countries = []
+                        
                         if affiliations:
                             for affil in affiliations:
                                 if affil and isinstance(affil, dict):
@@ -1646,12 +1819,61 @@ class DataProcessor:
                                         clean_aff = self._clean_affiliation(affil_name)
                                         if clean_aff:
                                             author_info['affiliation'].append(clean_aff)
-
+                                            
+                                            # NEW LOGIC: determine country from affiliation
+                                            country_from_aff = self._get_country_from_institution_name(clean_aff)
+                                            if country_from_aff:
+                                                affiliation_countries.append(country_from_aff)
+                                                countries.append(country_from_aff)
+                        
+                        # Determine author country from his affiliations
+                        if affiliation_countries:
+                            author_info['author_country'] = affiliation_countries[0]
+                        
+                        # If not found, try to determine from name
+                        if not author_info['author_country'] and full_name:
+                            # For Crossref data it's more complex, skip
+                            pass
+    
                         authors.append(author_info)
             except Exception as e:
                 st.warning(f"⚠️ Crossref author extraction error: {e}")
-
+    
         return authors, list(set(countries))
+    
+    def _get_country_from_institution_name(self, institution_name: str) -> str:
+        """Determine country from institution name"""
+        if not institution_name:
+            return ""
+        
+        institution_lower = institution_name.lower()
+        
+        # First check for explicit country mentions
+        for country_name, country_code in self.country_codes.items():
+            country_lower = country_name.lower()
+            pattern = r'\b' + re.escape(country_lower) + r'\b'
+            if re.search(pattern, institution_lower):
+                return country_code
+        
+        # Check country codes
+        for country_name, country_code in self.country_codes.items():
+            if len(country_code) == 2:
+                if re.search(r'\b' + re.escape(country_code) + r'\b', institution_name, re.IGNORECASE):
+                    return country_code
+        
+        # Check Russian variants
+        if re.search(r'\b(росси|рф|русск|москв|спб|сибир|урал)\b', institution_lower):
+            return 'RU'
+        
+        # Check Chinese variants
+        if re.search(r'\b(china|chinese|beijing|shanghai|peking|zhejiang|tsinghua|fudan)\b', institution_lower):
+            return 'CN'
+        
+        # Check American
+        if re.search(r'\b(usa|united states|us | u\.s\.|california|massachusetts|harvard|mit|stanford)\b', institution_lower):
+            return 'US'
+        
+        return ""
 
     def _extract_author_from_crossref(self, full_name: Optional[str], crossref_data: Dict, author_obj: Dict = None) -> Optional[Dict]:
         if author_obj is None:
@@ -1711,7 +1933,7 @@ class DataProcessor:
                 for inst in authorship.get('institutions', []):
                     if 'country_code' in inst and inst['country_code']:
                         countries.append(inst['country_code'])
-
+        
         if not countries:
             for author in authors:
                 for affil in author['affiliation']:
@@ -1776,7 +1998,7 @@ class DataProcessor:
         return family
 
 # ============================================================================
-# 🎯 КЛАСС ОПТИМИЗИРОВАННОЙ ОБРАБОТКИ DOI (НОВЫЙ)
+# 🎯 OPTIMIZED DOI PROCESSOR (UPDATED WITH RESUME CAPABILITY)
 # ============================================================================
 
 class OptimizedDOIProcessor:
@@ -1810,45 +2032,182 @@ class OptimizedDOIProcessor:
             'api_calls': 0
         }
 
-    def process_doi_batch(self, dois: List[str], source_type: str = "analyzed",
-                         original_doi: str = None, fetch_refs: bool = True,
-                         fetch_cites: bool = True, batch_size: int = Config.BATCH_SIZE,
-                         progress_container=None) -> Dict[str, Dict]:
+        # New variables for resume management
+        self.current_stage = None
+        self.stage_progress = {
+            'analyzed': {'processed': [], 'remaining': []},
+            'ref': {'processed': [], 'remaining': []},
+            'citing': {'processed': [], 'remaining': []}
+        }
+
+    def process_doi_batch_with_resume(self, dois: List[str], source_type: str = "analyzed",
+                                    original_doi: str = None, fetch_refs: bool = True,
+                                    fetch_cites: bool = True, batch_size: int = Config.BATCH_SIZE,
+                                    progress_container=None, resume: bool = False) -> Dict[str, Dict]:
+
+        # Check if can resume from interrupted point
+        if resume and source_type in self.stage_progress:
+            if self.stage_progress[source_type]['remaining']:
+                # Continue from interrupted point
+                dois = self.stage_progress[source_type]['remaining']
+                st.info(f"🔄 Resuming {source_type} processing with {len(dois)} remaining DOI")
+            else:
+                # No saved progress, start from beginning
+                self.stage_progress[source_type] = {'processed': [], 'remaining': dois}
 
         results = {}
         total_batches = (len(dois) + batch_size - 1) // batch_size
 
         if progress_container:
-            status_text = progress_container.text(f"🔧 Обработка {len(dois)} DOI (источник: {source_type})")
+            status_text = progress_container.text(f"🔧 Processing {len(dois)} DOI (source: {source_type})")
             progress_bar = progress_container.progress(0)
         else:
             status_text = None
             progress_bar = None
 
-        monitor = ProgressMonitor(len(dois), f"Обработка {source_type}", progress_bar, status_text)
+        monitor = ProgressMonitor(len(dois), f"Processing {source_type}", progress_bar, status_text)
 
-        for batch_idx in range(0, len(dois), batch_size):
-            batch = dois[batch_idx:batch_idx + batch_size]
-            batch_results = self._process_single_batch(
-                batch, source_type, original_doi, True, True
-            )
+        try:
+            for batch_idx in range(0, len(dois), batch_size):
+                batch = dois[batch_idx:batch_idx + batch_size]
+                batch_results = self._process_single_batch_with_retry(
+                    batch, source_type, original_doi, True, True
+                )
 
-            results.update(batch_results)
+                results.update(batch_results)
 
-            monitor.update(len(batch), 'processed')
+                # Update progress
+                processed_batch = list(batch_results.keys())
+                self.stage_progress[source_type]['processed'].extend(processed_batch)
+                self.stage_progress[source_type]['remaining'] = dois[batch_idx + batch_size:]
+                
+                # Save progress to cache
+                self.cache.save_progress(
+                    source_type,
+                    self.stage_progress[source_type]['processed'],
+                    self.stage_progress[source_type]['remaining']
+                )
 
-            batch_success = sum(1 for r in batch_results.values() if r.get('status') == 'success')
+                monitor.update(len(batch), 'processed')
 
-        monitor.complete()
+                batch_success = sum(1 for r in batch_results.values() if r.get('status') == 'success')
 
-        successful = sum(1 for r in results.values() if r.get('status') == 'success')
-        failed = len(dois) - successful
+            # Clear saved progress after successful completion
+            self.stage_progress[source_type] = {'processed': [], 'remaining': []}
+            self.cache.clear_progress()
 
-        self.stats['total_processed'] += len(dois)
-        self.stats['successful'] += successful
-        self.stats['failed'] += failed
+            monitor.complete()
+
+            successful = sum(1 for r in results.values() if r.get('status') == 'success')
+            failed = len(dois) - successful
+
+            self.stats['total_processed'] += len(dois)
+            self.stats['successful'] += successful
+            self.stats['failed'] += failed
+
+            return results
+
+        except Exception as e:
+            # Save progress on exception
+            st.warning(f"⚠️ {source_type} processing interrupted: {e}")
+            st.info(f"📊 Progress saved. Can resume from interruption point.")
+            return results
+
+    def _process_single_batch_with_retry(self, batch: List[str], source_type: str,
+                                       original_doi: str, fetch_refs: bool, fetch_cites: bool) -> Dict[str, Dict]:
+        """Process DOI batch with retries for empty results"""
+        results = {}
+
+        with ThreadPoolExecutor(max_workers=min(Config.MAX_WORKERS, len(batch))) as executor:
+            future_to_doi = {}
+
+            for doi in batch:
+                future = executor.submit(
+                    self._process_single_doi_with_validation,
+                    doi, source_type, original_doi, True, True
+                )
+                future_to_doi[future] = doi
+
+            for future in as_completed(future_to_doi):
+                doi = future_to_doi[future]
+                try:
+                    result = future.result(timeout=60)
+                    
+                    # Check result for emptiness and retry if needed
+                    if self._is_empty_result(result):
+                        st.warning(f"⚠️ Empty result for {doi}, retrying...")
+                        # Retry without exponential delays
+                        result = self._retry_process_single_doi(doi, source_type, original_doi)
+                    
+                    results[doi] = result
+                    
+                except Exception as e:
+                    self._handle_processing_error(doi, str(e), source_type, original_doi)
+                    results[doi] = {
+                        'doi': doi,
+                        'status': 'failed',
+                        'error': f"Processing timeout: {str(e)}"
+                    }
 
         return results
+
+    def _is_empty_result(self, result: Dict) -> bool:
+        """Check if result is empty (insufficient data)"""
+        if result.get('status') != 'success':
+            return False
+        
+        pub_info = result.get('publication_info', {})
+        title = pub_info.get('title', '')
+        authors = result.get('authors', [])
+        
+        # Check main fields for emptiness
+        empty_fields = [
+            not title or title in ['Title not found', 'Request timeout', 'Network error', 'Retrieval error'],
+            not authors,
+            not pub_info.get('journal', ''),
+            not pub_info.get('year', '')
+        ]
+        
+        # If all main fields empty
+        if all(empty_fields):
+            return True
+        
+        return False
+
+    def _retry_process_single_doi(self, doi: str, source_type: str, original_doi: str) -> Dict:
+        """Retry processing DOI without exponential delays"""
+        try:
+            # Save current delay settings
+            original_delay = self.delay.current_delay
+            
+            # Temporarily set basic delay for retry
+            self.delay.current_delay = Config.INITIAL_DELAY
+            
+            result = self._process_single_doi_optimized(
+                doi, source_type, original_doi, True, True
+            )
+            
+            # Restore original delay
+            self.delay.current_delay = original_delay
+            
+            return result
+            
+        except Exception as e:
+            self._handle_processing_error(doi, str(e), source_type, original_doi)
+            return {
+                'doi': doi,
+                'status': 'failed',
+                'error': f"Retry processing error: {str(e)}"
+            }
+
+    def process_doi_batch(self, dois: List[str], source_type: str = "analyzed",
+                         original_doi: str = None, fetch_refs: bool = True,
+                         fetch_cites: bool = True, batch_size: int = Config.BATCH_SIZE,
+                         progress_container=None) -> Dict[str, Dict]:
+        return self.process_doi_batch_with_resume(
+            dois, source_type, original_doi, fetch_refs, fetch_cites, 
+            batch_size, progress_container, resume=False
+        )
 
     def _process_single_batch(self, batch: List[str], source_type: str,
                              original_doi: str, fetch_refs: bool, fetch_cites: bool) -> Dict[str, Dict]:
@@ -1873,7 +2232,7 @@ class OptimizedDOIProcessor:
                     results[doi] = {
                         'doi': doi,
                         'status': 'failed',
-                        'error': f"Таймаут обработки: {str(e)}"
+                        'error': f"Processing timeout: {str(e)}"
                     }
 
         return results
@@ -1889,7 +2248,23 @@ class OptimizedDOIProcessor:
             return {
                 'doi': doi,
                 'status': 'failed',
-                'error': f"Ошибка обработки: {str(e)}"
+                'error': f"Processing error: {str(e)}"
+            }
+
+    def _process_single_doi_with_validation(self, doi: str, source_type: str,
+                                          original_doi: str, fetch_refs: bool, fetch_cites: bool) -> Dict:
+        """Wrapper for processing with result validation"""
+        try:
+            result = self._process_single_doi_optimized(
+                doi, source_type, original_doi, True, True
+            )
+            return result
+        except Exception as e:
+            self._handle_processing_error(doi, str(e), source_type, original_doi)
+            return {
+                'doi': doi,
+                'status': 'failed',
+                'error': f"Processing error: {str(e)}"
             }
 
     def _process_single_doi_optimized(self, doi: str, source_type: str,
@@ -1909,7 +2284,7 @@ class OptimizedDOIProcessor:
             crossref_data = self.crossref_client.fetch_article(doi)
             openalex_data = self.openalex_client.fetch_article(doi)
         except Exception as e:
-            error_msg = f"Ошибка получения данных: {str(e)}"
+            error_msg = f"Data retrieval error: {str(e)}"
             self._handle_processing_error(doi, error_msg, source_type, original_doi)
             return {
                 'doi': doi,
@@ -1926,7 +2301,7 @@ class OptimizedDOIProcessor:
             openalex_error = openalex_data.get('error')
 
         if crossref_error and openalex_error:
-            error_msg = f"Ошибки API: Crossref - {crossref_error}, OpenAlex - {openalex_error}"
+            error_msg = f"API errors: Crossref - {crossref_error}, OpenAlex - {openalex_error}"
             self._handle_processing_error(doi, error_msg, source_type, original_doi)
             return {
                 'doi': doi,
@@ -1949,12 +2324,12 @@ class OptimizedDOIProcessor:
 
         citations = []
         try:
-            # ВАЖНОЕ ИЗМЕНЕНИЕ: Разная логика сбора цитирований в зависимости от типа статьи
+            # IMPORTANT CHANGE: Different citation collection logic depending on article type
             if source_type == "analyzed":
-                # Для analyzed articles: собираем ВСЕ цитирования через новую логику
+                # For analyzed articles: collect ALL citations through new logic
                 cites_openalex = self.openalex_client.fetch_all_citations_for_analyzed_article(doi)
 
-                # Также получаем цитирования из Crossref для полноты данных
+                # Also get citations from Crossref for data completeness
                 cites_crossref = self.crossref_client.fetch_citations(doi)
                 cites_crossref = cites_crossref if isinstance(cites_crossref, list) else []
 
@@ -1964,7 +2339,7 @@ class OptimizedDOIProcessor:
                     self.citation_relationships[doi] = citations
 
             else:
-                # Для reference и citing articles: используем старую логику (только до 2000)
+                # For reference and citing articles: use old logic (only up to 2000)
                 cites_openalex = self.openalex_client.fetch_citations(doi)
                 cites_crossref = self.crossref_client.fetch_citations(doi)
 
@@ -1977,8 +2352,8 @@ class OptimizedDOIProcessor:
                     self.citation_relationships[doi] = citations
         except Exception as e:
             st.warning(f"⚠️ Error fetching citations for {doi}: {e}")
-            # Если произошла ошибка при сборе цитирований для analyzed статьи,
-            # пытаемся использовать старую логику как fallback
+            # If error collecting citations for analyzed article,
+            # try to use old logic as fallback
             if source_type == "analyzed":
                 try:
                     cites_openalex = self.openalex_client.fetch_citations(doi)
@@ -1990,7 +2365,7 @@ class OptimizedDOIProcessor:
                     if citations:
                         self.citation_relationships[doi] = citations
                 except Exception as e2:
-                    st.warning(f"❌ Fallback тоже не сработал для {doi}: {e2}")
+                    st.warning(f"❌ Fallback also failed for {doi}: {e2}")
 
         result = self.data_processor.extract_article_info(
             crossref_data, openalex_data, doi, references, citations
@@ -2116,2468 +2491,861 @@ class OptimizedDOIProcessor:
 
         return retry_results
 
+    def load_resume_state(self):
+        """Load state for resume processing"""
+        stage, processed, remaining = self.cache.load_progress()
+        if stage and stage in self.stage_progress:
+            self.stage_progress[stage]['processed'] = processed
+            self.stage_progress[stage]['remaining'] = remaining
+            return stage
+        return None
+
 # ============================================================================
-# 🔍 КЛАСС ИЕРАРХИЧЕСКОГО АНАЛИЗА ДАННЫХ (НОВЫЙ)
+# 📊 TITLE KEYWORDS ANALYZER (WITH LEMMATIZATION)
 # ============================================================================
 
-class HierarchicalDataAnalyzer:
-    def __init__(self, cache_manager: SmartCacheManager, data_processor: DataProcessor,
-                 doi_processor: OptimizedDOIProcessor):
-        self.cache = cache_manager
-        self.processor = data_processor
-        self.doi_processor = doi_processor
-
-        # Иерархические уровни данных
-        self.data_levels = {
-            'level_0': set(),  # DOI и базовые метаданные
-            'level_1': set(),  # + авторы, аффилиации, годы
-            'level_2': set(),  # + полные метаданные цитирующих
-            'level_3': set()   # + сетевой анализ и ML
+class TitleKeywordsAnalyzer:
+    def __init__(self):
+        # Initialize stopwords and lemmatizer
+        try:
+            import nltk
+            from nltk.corpus import stopwords
+            from nltk.stem import WordNetLemmatizer
+            
+            # Load necessary NLTK resources
+            try:
+                nltk.download('wordnet', quiet=True)
+                nltk.download('omw-eng', quiet=True)
+                nltk.download('stopwords', quiet=True)
+                nltk.download('punkt', quiet=True)
+            except:
+                pass
+            
+            self.stop_words = set(stopwords.words('english'))
+            self.lemmatizer = WordNetLemmatizer()
+            
+            # Rules for special cases
+            self.irregular_plurals = {
+                'analyses': 'analysis',
+                'axes': 'axis',
+                'bases': 'basis',
+                'crises': 'crisis',
+                'criteria': 'criterion',
+                'data': 'datum',
+                'diagnoses': 'diagnosis',
+                'ellipses': 'ellipsis',
+                'emphases': 'emphasis',
+                'genera': 'genus',
+                'hypotheses': 'hypothesis',
+                'indices': 'index',
+                'media': 'medium',
+                'memoranda': 'memorandum',
+                'parentheses': 'parenthesis',
+                'phenomena': 'phenomenon',
+                'prognoses': 'prognosis',
+                'radii': 'radius',
+                'stimuli': 'stimulus',
+                'syntheses': 'synthesis',
+                'theses': 'thesis',
+                'vertebrae': 'vertebra',
+                # Add scientific terms
+                'oxides': 'oxide',
+                'composites': 'composite',
+                'applications': 'application',
+                'materials': 'material',
+                'methods': 'method',
+                'systems': 'system',
+                'techniques': 'technique',
+                'properties': 'property',
+                'structures': 'structure',
+                'devices': 'device',
+                'processes': 'process',
+                'mechanisms': 'mechanism',
+                'models': 'model',
+                'approaches': 'approach',
+                'frameworks': 'framework',
+                'strategies': 'strategy',
+                'solutions': 'solution',
+                'technologies': 'technology',
+                'materials': 'material',
+                'nanoparticles': 'nanoparticle',
+                'nanostructures': 'nanostructure',
+                'polymers': 'polymer',
+                'composites': 'composite',
+                'ceramics': 'ceramic',
+                'alloys': 'alloy',
+                'coatings': 'coating',
+                'films': 'film',
+                'layers': 'layer',
+                'interfaces': 'interface',
+                'surfaces': 'surface',
+                'catalysts': 'catalyst',
+                'sensors': 'sensor',
+                'actuators': 'actuator',
+                'transistors': 'transistor',
+                'diodes': 'diode',
+                'circuits': 'circuit',
+                'networks': 'network',
+                'algorithms': 'algorithm',
+                'protocols': 'protocol',
+                'databases': 'database',
+                'architectures': 'architecture',
+                'platforms': 'platform',
+                'environments': 'environment',
+                'simulations': 'simulation',
+                'experiments': 'experiment',
+                'measurements': 'measurement',
+                'observations': 'observation',
+                'analyses': 'analysis',
+                'evaluations': 'evaluation',
+                'assessments': 'assessment',
+                'comparisons': 'comparison',
+                'classifications': 'classification',
+                'predictions': 'prediction',
+                'optimizations': 'optimization',
+                'characterizations': 'characterization',
+                'syntheses': 'synthesis',
+                'fabrications': 'fabrication',
+                'preparations': 'preparation',
+                'treatments': 'treatment',
+                'modifications': 'modification',
+                'enhancements': 'enhancement',
+                'improvements': 'improvement',
+                'developments': 'development',
+                'innovations': 'innovation',
+                'discoveries': 'discovery',
+                'inventions': 'invention',
+                'applications': 'application',
+                'implementations': 'implementation',
+                'utilizations': 'utilization',
+                'integrations': 'integration',
+                'combinations': 'combination',
+                'interactions': 'interaction',
+                'relationships': 'relationship',
+                'dependencies': 'dependency',
+                'correlations': 'correlation',
+                'associations': 'association',
+                'connections': 'connection',
+                'communications': 'communication',
+                'collaborations': 'collaboration',
+                'cooperations': 'cooperation',
+                'competitions': 'competition',
+                'conflicts': 'conflict',
+                'challenges': 'challenge',
+                'problems': 'problem',
+                'solutions': 'solution',
+                'alternatives': 'alternative',
+                'options': 'option',
+                'variants': 'variant',
+                'versions': 'version',
+                'editions': 'edition',
+                'releases': 'release',
+                'updates': 'update',
+                'revisions': 'revision',
+                'modifications': 'modification',
+                'adaptations': 'adaptation',
+                'customizations': 'customization',
+                'personalizations': 'personalization',
+                'localizations': 'localization',
+                'internationalizations': 'internationalization',
+                'standardizations': 'standardization',
+                'normalizations': 'normalization',
+                'optimizations': 'optimization',
+                'maximizations': 'maximization',
+                'minimizations': 'minimization',
+                'reductions': 'reduction',
+                'increases': 'increase',
+                'improvements': 'improvement',
+                'enhancements': 'enhancement',
+                'advancements': 'advancement',
+                'progresses': 'progress',
+                'developments': 'development',
+                'evolutions': 'evolution',
+                'revolutions': 'revolution',
+                'transformations': 'transformation',
+                'changes': 'change',
+                'variations': 'variation',
+                'fluctuations': 'fluctuation',
+                'oscillations': 'oscillation',
+                'vibrations': 'vibration',
+                'rotations': 'rotation',
+                'translations': 'translation',
+                'movements': 'movement',
+                'motions': 'motion',
+                'dynamics': 'dynamic',
+                'kinematics': 'kinematic',
+                'mechanics': 'mechanic',
+                'thermodynamics': 'thermodynamic',
+                'electrodynamics': 'electrodynamic',
+                'hydrodynamics': 'hydrodynamic',
+                'aerodynamics': 'aerodynamic',
+                'biomechanics': 'biomechanic',
+                'geomechanics': 'geomechanic',
+                'chemomechanics': 'chemomechanic',
+                'tribology': 'tribology',
+                'rheology': 'rheology',
+                'viscoelasticity': 'viscoelastic',
+                'plasticity': 'plastic',
+                'elasticity': 'elastic',
+                'viscosity': 'viscous',
+                'conductivity': 'conductive',
+                'resistivity': 'resistive',
+                'permeability': 'permeable',
+                'porosity': 'porous',
+                'density': 'dense',
+                'hardness': 'hard',
+                'stiffness': 'stiff',
+                'strength': 'strong',
+                'toughness': 'tough',
+                'brittleness': 'brittle',
+                'ductility': 'ductile',
+                'malleability': 'malleable',
+                'flexibility': 'flexible',
+                'rigidity': 'rigid',
+                'stability': 'stable',
+                'instability': 'unstable',
+                'reliability': 'reliable',
+                'durability': 'durable',
+                'sustainability': 'sustainable',
+                'efficiency': 'efficient',
+                'effectiveness': 'effective',
+                'performance': 'perform',
+                'productivity': 'productive',
+                'quality': 'qualitative',
+                'quantity': 'quantitative',
+                'accuracy': 'accurate',
+                'precision': 'precise',
+                'reliability': 'reliable',
+                'validity': 'valid',
+                'reproducibility': 'reproducible',
+                'repeatability': 'repeatable',
+                'consistency': 'consistent',
+                'homogeneity': 'homogeneous',
+                'heterogeneity': 'heterogeneous',
+                'isotropy': 'isotropic',
+                'anisotropy': 'anisotropic',
+                'symmetry': 'symmetric',
+                'asymmetry': 'asymmetric',
+                'regularity': 'regular',
+                'irregularity': 'irregular',
+                'periodicity': 'periodic',
+                'aperiodicity': 'aperiodic',
+                'randomness': 'random',
+                'determinism': 'deterministic',
+                'stochasticity': 'stochastic',
+                'probability': 'probable',
+                'statistics': 'statistic',
+                'distributions': 'distribution',
+                'functions': 'function',
+                'equations': 'equation',
+                'formulas': 'formula',
+                'theorems': 'theorem',
+                'lemmas': 'lemma',
+                'corollaries': 'corollary',
+                'proofs': 'proof',
+                'demonstrations': 'demonstration',
+                'verifications': 'verification',
+                'validations': 'validation',
+                'confirmations': 'confirmation',
+                'tests': 'test',
+                'experiments': 'experiment',
+                'trials': 'trial',
+                'studies': 'study',
+                'investigations': 'investigation',
+                'examinations': 'examination',
+                'inspections': 'inspection',
+                'audits': 'audit',
+                'reviews': 'review',
+                'surveys': 'survey',
+                'polls': 'poll',
+                'questionnaires': 'questionnaire',
+                'interviews': 'interview',
+                'observations': 'observation',
+                'measurements': 'measurement',
+                'calculations': 'calculation',
+                'computations': 'computation',
+                'simulations': 'simulation',
+                'modelings': 'modeling',
+                'analyses': 'analysis',
+                'syntheses': 'synthesis',
+                'evaluations': 'evaluation',
+                'assessments': 'assessment',
+                'appraisals': 'appraisal',
+                'estimations': 'estimation',
+                'approximations': 'approximation',
+                'predictions': 'prediction',
+                'forecasts': 'forecast',
+                'projections': 'projection',
+                'extrapolations': 'extrapolation',
+                'interpolations': 'interpolation',
+                'regressions': 'regression',
+                'correlations': 'correlation',
+                'classifications': 'classification',
+                'clusters': 'cluster',
+                'segments': 'segment',
+                'groups': 'group',
+                'categories': 'category',
+                'types': 'type',
+                'classes': 'class',
+                'kinds': 'kind',
+                'sorts': 'sort',
+                'varieties': 'variety',
+                'forms': 'form',
+                'shapes': 'shape',
+                'sizes': 'size',
+                'dimensions': 'dimension',
+                'volumes': 'volume',
+                'areas': 'area',
+                'lengths': 'length',
+                'widths': 'width',
+                'heights': 'height',
+                'depths': 'depth',
+                'thicknesses': 'thickness',
+                'diameters': 'diameter',
+                'radii': 'radius',
+                'circumferences': 'circumference',
+                'perimeters': 'perimeter',
+                'surfaces': 'surface',
+                'interfaces': 'interface',
+                'boundaries': 'boundary',
+                'edges': 'edge',
+                'corners': 'corner',
+                'vertices': 'vertex',
+                'nodes': 'node',
+                'points': 'point',
+                'lines': 'line',
+                'curves': 'curve',
+                'planes': 'plane',
+                'spaces': 'space',
+                'regions': 'region',
+                'zones': 'zone',
+                'sectors': 'sector',
+                'segments': 'segment',
+                'parts': 'part',
+                'components': 'component',
+                'elements': 'element',
+                'units': 'unit',
+                'modules': 'module',
+                'blocks': 'block',
+                'pieces': 'piece',
+                'fragments': 'fragment',
+                'particles': 'particle',
+                'atoms': 'atom',
+                'molecules': 'molecule',
+                'ions': 'ion',
+                'electrons': 'electron',
+                'protons': 'proton',
+                'neutrons': 'neutron',
+                'photons': 'photon',
+                'quarks': 'quark',
+                'leptons': 'lepton',
+                'bosons': 'boson',
+                'fermions': 'fermion',
+                'hadrons': 'hadron',
+                'mesons': 'meson',
+                'baryons': 'baryon',
+                'nuclei': 'nucleus',
+                'isotopes': 'isotope',
+                'elements': 'element',
+                'compounds': 'compound',
+                'mixtures': 'mixture',
+                'solutions': 'solution',
+                'suspensions': 'suspension',
+                'colloids': 'colloid',
+                'emulsions': 'emulsion',
+                'foams': 'foam',
+                'gels': 'gel',
+                'solids': 'solid',
+                'liquids': 'liquid',
+                'gases': 'gas',
+                'plasmas': 'plasma',
+                'crystals': 'crystal',
+                'amorphous': 'amorphous',
+                'polymers': 'polymer',
+                'monomers': 'monomer',
+                'oligomers': 'oligomer',
+                'copolymers': 'copolymer',
+                'homopolymers': 'homopolymer',
+                'biopolymers': 'biopolymer',
+                'proteins': 'protein',
+                'enzymes': 'enzyme',
+                'antibodies': 'antibody',
+                'antigens': 'antigen',
+                'vaccines': 'vaccine',
+                'drugs': 'drug',
+                'medicines': 'medicine',
+                'therapies': 'therapy',
+                'treatments': 'treatment',
+                'diagnoses': 'diagnosis',
+                'prognoses': 'prognosis',
+                'symptoms': 'symptom',
+                'diseases': 'disease',
+                'disorders': 'disorder',
+                'conditions': 'condition',
+                'syndromes': 'syndrome',
+                'infections': 'infection',
+                'inflammations': 'inflammation',
+                'tumors': 'tumor',
+                'cancers': 'cancer',
+                'metastases': 'metastasis',
+                'remissions': 'remission',
+                'recurrences': 'recurrence',
+                'survivals': 'survival',
+                'mortality': 'mortal',
+                'morbidity': 'morbid',
+                'epidemiology': 'epidemiologic',
+                'pathology': 'pathologic',
+                'physiology': 'physiologic',
+                'anatomy': 'anatomic',
+                'histology': 'histologic',
+                'cytology': 'cytologic',
+                'genetics': 'genetic',
+                'genomics': 'genomic',
+                'proteomics': 'proteomic',
+                'metabolomics': 'metabolomic',
+                'transcriptomics': 'transcriptomic',
+                'epigenetics': 'epigenetic',
+                'bioinformatics': 'bioinformatic',
+                'biotechnology': 'biotechnologic',
+                'nanotechnology': 'nanotechnologic',
+                'microtechnology': 'microtechnologic',
+                'microfabrication': 'microfabricate',
+                'nanofabrication': 'nanofabricate',
+                'lithography': 'lithographic',
+                'photolithography': 'photolithographic',
+                'electron-beam': 'electron-beam',
+                'ion-beam': 'ion-beam',
+                'focused-ion-beam': 'focused-ion-beam',
+                'atomic-force': 'atomic-force',
+                'scanning-tunneling': 'scanning-tunneling',
+                'transmission-electron': 'transmission-electron',
+                'scanning-electron': 'scanning-electron',
+                'optical': 'optical',
+                'confocal': 'confocal',
+                'fluorescence': 'fluorescent',
+                'phosphorescence': 'phosphorescent',
+                'luminescence': 'luminescent',
+                'chemiluminescence': 'chemiluminescent',
+                'bioluminescence': 'bioluminescent',
+                'electroluminescence': 'electroluminescent',
+                'photoluminescence': 'photoluminescent',
+                'cathodoluminescence': 'cathodoluminescent',
+                'thermoluminescence': 'thermoluminescent',
+                'radioluminescence': 'radioluminescent',
+                'sonoluminescence': 'sonoluminescent',
+                'triboluminescence': 'triboluminescent',
+                'crystalloluminescence': 'crystalloluminescent',
+                'electroluminescence': 'electroluminescent',
+                'magnetoluminescence': 'magnetoluminescent',
+            }
+            
+            # Suffixes that need conversion
+            self.suffix_replacements = {
+                'ies': 'y',
+                'es': '',
+                's': '',
+                'ed': '',
+                'ing': '',
+                'ly': '',
+                'ally': 'al',
+                'ically': 'ic',
+                'ization': 'ize',
+                'isation': 'ise',
+                'ment': '',
+                'ness': '',
+                'ity': '',
+                'ty': '',
+                'ic': '',
+                'ical': '',
+                'ive': '',
+                'ous': '',
+                'ful': '',
+                'less': '',
+                'est': '',
+                'er': '',
+                'ors': 'or',
+                'ors': 'or',
+                'ings': 'ing',
+                'ments': 'ment',
+            }
+            
+        except:
+            # Fallback if nltk not available
+            self.stop_words = {'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'}
+            self.lemmatizer = None
+            self.irregular_plurals = {}
+            self.suffix_replacements = {}
+        
+        # Scientific stopwords (already lemmatized)
+        self.scientific_stopwords = {
+            'activate', 'adapt', 'advance', 'analyze', 'apply',
+            'approach', 'architect', 'artificial', 'assess',
+            'base', 'behave', 'capacity', 'characterize',
+            'coat', 'compare', 'compute', 'composite',
+            'control', 'cycle', 'damage', 'data', 'density', 'design',
+            'detect', 'develop', 'device', 'diagnose', 'discover',
+            'dynamic', 'economic', 'effect', 'efficacy',
+            'efficient', 'energy', 'engineer', 'enhance', 'environment',
+            'evaluate', 'experiment', 'explore', 'factor', 'fail',
+            'fabricate', 'field', 'film', 'flow', 'framework', 'frequency',
+            'function', 'grow', 'high', 'impact', 'improve',
+            'induce', 'influence', 'inform', 'innovate', 'intelligent',
+            'interact', 'interface', 'investigate', 'know',
+            'layer', 'learn', 'magnetic', 'manage', 'material',
+            'measure', 'mechanism', 'medical',
+            'method', 'model', 'modify', 'modulate',
+            'molecule', 'monitor', 'motion', 'nanoparticle',
+            'nanostructure', 'network', 'neural', 'new', 'nonlinear',
+            'novel', 'numerical', 'optical', 'optimize', 'pattern', 'perform',
+            'phenomenon', 'potential', 'power', 'predict', 'prepare', 'process',
+            'produce', 'progress', 'property', 'quality', 'regulate', 'relate',
+            'reliable', 'remote', 'repair', 'research', 'resist', 'respond',
+            'review', 'risk', 'role', 'safe', 'sample', 'scale', 'screen',
+            'separate', 'signal', 'simulate', 'specific', 'stable', 'state',
+            'store', 'strain', 'strength', 'stress', 'structure', 'study',
+            'sustain', 'synergy', 'synthesize', 'system', 'target',
+            'technique', 'technology', 'test', 'theoretical', 'therapy',
+            'thermal', 'tissue', 'tolerate', 'toxic', 'transform', 'transition',
+            'transmit', 'transport', 'type', 'understand', 'use', 'validate',
+            'value', 'vary', 'virtual', 'waste', 'wave',
+            # Add scientific stopwords that frequently appear
+            'application', 'approach', 'assessment', 'behavior', 'capability',
+            'characterization', 'comparison', 'concept', 'condition', 'configuration',
+            'construction', 'contribution', 'demonstration', 'description', 'detection',
+            'determination', 'development', 'effectiveness', 'efficiency', 'evaluation',
+            'examination', 'experimentation', 'explanation', 'exploration', 'fabrication',
+            'formation', 'implementation', 'improvement', 'indication', 'investigation',
+            'management', 'manufacture', 'measurement', 'modification', 'observation',
+            'operation', 'optimization', 'performance', 'preparation', 'presentation',
+            'production', 'realization', 'recognition', 'regulation', 'representation',
+            'simulation', 'solution', 'specification', 'synthesis', 'transformation',
+            'treatment', 'utilization', 'validation', 'verification'
         }
+    
+    def _get_lemma(self, word: str) -> str:
+        """Get word lemma considering special rules"""
+        if not word or len(word) < 3:
+            return word
+        
+        # Convert to lowercase for processing
+        lower_word = word.lower()
+        
+        # Check irregular plurals FIRST
+        if lower_word in self.irregular_plurals:
+            return self.irregular_plurals[lower_word]
+        
+        # Check regular plurals
+        # If word ends with 's' or 'es' but not 'ss' or 'us'
+        if lower_word.endswith('s') and not (lower_word.endswith('ss') or lower_word.endswith('us')):
+            # Try to remove 's' or 'es'
+            if lower_word.endswith('es') and len(lower_word) > 2:
+                base_word = lower_word[:-2]
+                # Check that after removing 'es' word not too short
+                if len(base_word) >= 3:
+                    return base_word
+            elif len(lower_word) > 1:
+                base_word = lower_word[:-1]
+                # Check that after removing 's' word not too short
+                if len(base_word) >= 3:
+                    return base_word
+        
+        # Use lemmatizer if available
+        if self.lemmatizer:
+            # Try different parts of speech
+            for pos in ['n', 'v', 'a', 'r']:  # noun, verb, adjective, adverb
+                lemma = self.lemmatizer.lemmatize(lower_word, pos=pos)
+                if lemma != lower_word:
+                    return lemma
+        
+        # Apply suffix rules in reverse order (long to short)
+        sorted_suffixes = sorted(self.suffix_replacements.keys(), key=len, reverse=True)
+        for suffix in sorted_suffixes:
+            if lower_word.endswith(suffix) and len(lower_word) > len(suffix) + 2:
+                replacement = self.suffix_replacements[suffix]
+                base = lower_word[:-len(suffix)] + replacement
+                # Check result not too short
+                if len(base) >= 3:
+                    # Also check base doesn't end with double consonant
+                    if len(base) >= 4 and base[-1] == base[-2]:
+                        base = base[:-1]
+                    return base
+        
+        return lower_word
+    
+    def _get_base_form(self, word: str) -> str:
+        """Get base word form with aggressive lemmatization"""
+        lemma = self._get_lemma(word)
+        
+        # Additional rules for scientific terms
+        if lemma.endswith('isation'):
+            return lemma[:-7] + 'ize'
+        elif lemma.endswith('ization'):
+            return lemma[:-7] + 'ize'
+        elif lemma.endswith('ication'):
+            return lemma[:-7] + 'y'
+        elif lemma.endswith('ation'):
+            return lemma[:-5] + 'e'
+        elif lemma.endswith('ition'):
+            return lemma[:-5] + 'e'
+        elif lemma.endswith('ution'):
+            return lemma[:-5] + 'e'
+        elif lemma.endswith('ment'):
+            return lemma[:-4]
+        elif lemma.endswith('ness'):
+            return lemma[:-4]
+        elif lemma.endswith('ity'):
+            return lemma[:-3] + 'e'
+        elif lemma.endswith('ty'):
+            base = lemma[:-2]
+            if base.endswith('i'):
+                return base[:-1] + 'y'
+            return base
+        elif lemma.endswith('ic'):
+            return lemma[:-2] + 'y'
+        elif lemma.endswith('al'):
+            return lemma[:-2]
+        elif lemma.endswith('ive'):
+            return lemma[:-3] + 'e'
+        elif lemma.endswith('ous'):
+            return lemma[:-3]
+        
+        return lemma
+    
+    def preprocess_content_words(self, text: str) -> List[Dict]:
+        """Clean and normalize content words, return dictionaries with lemmas and forms"""
+        if not text or text in ['Title not found', 'Request timeout', 'Network error', 'Retrieval error']:
+            return []
 
-        # Временные метрики для анализа
-        self.citation_timestamps = defaultdict(list)
-        self.journal_citation_counts = defaultdict(Counter)
-        self.author_citation_network = defaultdict(set)
-        self.affiliation_citation_network = defaultdict(set)
+        text = text.lower()
+        text = re.sub(r'[^a-zA-Z\s-]', ' ', text)
+        text = re.sub(r'\s+', ' ', text).strip()
 
-        # ML модели для аномалий
-        self.isolation_forest = None
-        self.scaler = StandardScaler()
+        words = text.split()
+        content_words = []
 
-    def analyze_quick_checks(self, analyzed_results: Dict[str, Dict],
-                            citing_results: Dict[str, Dict]) -> List[Dict]:
-        """Быстрые проверки (5-10 секунд на статью)"""
-        quick_checks = []
-
-        for doi, result in analyzed_results.items():
-            if result.get('status') != 'success':
+        for word in words:
+            # EXCLUDE word "sub"
+            if word == 'sub':
                 continue
-
-            # Получаем цитирующие статьи для этой DOI
-            citing_dois = result.get('citations', [])
-            citing_data = {}
-            for cite_doi in citing_dois:
-                if cite_doi in citing_results and citing_results[cite_doi].get('status') == 'success':
-                    citing_data[cite_doi] = citing_results[cite_doi]
-
-            # Анализ
-            analysis = self._perform_quick_check_analysis(doi, result, citing_data)
-            quick_checks.append(analysis)
-
-            # Кэшируем результаты
-            self.cache.set_ethical_analysis('quick_checks', doi, analysis)
-
-        return sorted(quick_checks, key=lambda x: x['Quick_Risk_Score'], reverse=True)
-
-    def _perform_quick_check_analysis(self, doi: str, result: Dict,
-                                     citing_data: Dict[str, Dict]) -> Dict:
-        """Выполняет быстрые проверки для одной статьи"""
-
-        pub_info = result['publication_info']
-        authors = result.get('authors', [])
-        analyzed_countries = result.get('countries', [])
-
-        # 1. Journal Citation Concentration
-        journal_concentration = self._calculate_journal_concentration(citing_data)
-
-        # 2. Author Self-Citation Rate
-        author_self_citation = self._calculate_author_self_citation(authors, citing_data)
-
-        # 3. Affiliation Self-Citation
-        affiliation_self_citation = self._calculate_affiliation_self_citation(authors, citing_data)
-
-        # 4. Single Country Concentration
-        single_country = self._calculate_single_country_concentration(citing_data, analyzed_countries)
-
-        # 5. Citation Velocity
-        citation_velocity = self._calculate_citation_velocity(result, citing_data)
-
-        # 6. First Year Share
-        first_year_share = self._calculate_first_year_share(result, citing_data)
-
-        # 7. Future Citations
-        future_citations = self._check_future_citations(result, citing_data)
-
-        # Подсчет красных флагов
-        red_flags = 0
-        flags = []
-
-        if journal_concentration > Config.QUICK_CHECK_THRESHOLDS['journal_concentration']:
-            red_flags += 1
-            flags.append(f"Journal concentration: {journal_concentration:.1%}")
-
-        if author_self_citation > Config.QUICK_CHECK_THRESHOLDS['author_self_citation']:
-            red_flags += 1
-            flags.append(f"Author self-citation: {author_self_citation:.1%}")
-
-        if affiliation_self_citation > Config.QUICK_CHECK_THRESHOLDS['affiliation_self_citation']:
-            red_flags += 1
-            flags.append(f"Affiliation self-citation: {affiliation_self_citation:.1%}")
-
-        if single_country > Config.QUICK_CHECK_THRESHOLDS['single_country']:
-            red_flags += 1
-            flags.append(f"Single country: {single_country:.1%}")
-
-        if citation_velocity > Config.QUICK_CHECK_THRESHOLDS['citation_velocity']:
-            red_flags += 1
-            flags.append(f"Citation velocity: {citation_velocity:.1f}/year")
-
-        if first_year_share > Config.QUICK_CHECK_THRESHOLDS['first_year_share']:
-            red_flags += 1
-            flags.append(f"First year share: {first_year_share:.1%}")
-
-        if future_citations > 0:
-            red_flags += 1
-            flags.append(f"Future citations: {future_citations}")
-
-        # Расчет риска
-        quick_risk_score = self._calculate_quick_risk_score(
-            journal_concentration, author_self_citation, affiliation_self_citation,
-            single_country, citation_velocity, first_year_share, future_citations
-        )
-
-        # Рекомендуемое действие
-        recommended_action = self._determine_recommended_action(quick_risk_score, red_flags)
-
-        return {
-            'DOI': doi,
-            'Title': pub_info.get('title', '')[:50] + ('...' if len(pub_info.get('title', '')) > 50 else ''),
-            'Quick_Risk_Score': quick_risk_score,
-            'Red_Flags': red_flags,
-            'Flag_1_Journal_Concentration': journal_concentration > Config.QUICK_CHECK_THRESHOLDS['journal_concentration'],
-            'Flag_2_Author_Self_Citation': author_self_citation > Config.QUICK_CHECK_THRESHOLDS['author_self_citation'],
-            'Flag_3_Affiliation_Self_Citation': affiliation_self_citation > Config.QUICK_CHECK_THRESHOLDS['affiliation_self_citation'],
-            'Flag_4_Single_Country': single_country > Config.QUICK_CHECK_THRESHOLDS['single_country'],
-            'Flag_5_Citation_Velocity': citation_velocity > Config.QUICK_CHECK_THRESHOLDS['citation_velocity'],
-            'Flag_6_First_Year_Share': first_year_share > Config.QUICK_CHECK_THRESHOLDS['first_year_share'],
-            'Flag_7_Future_Citations': future_citations > 0,
-            'Future_Citations_Count': future_citations,
-            'Journal_Concentration_Rate': round(journal_concentration * 100, 1),
-            'Author_Self_Citation_Rate': round(author_self_citation * 100, 1),
-            'Affiliation_Self_Citation_Rate': round(affiliation_self_citation * 100, 1),
-            'Single_Country_Percent': round(single_country * 100, 1),
-            'Citation_Velocity_Annual': round(citation_velocity, 1),
-            'First_Year_Share_Percent': round(first_year_share * 100, 1),
-            'Recommended_Action': recommended_action,
-            'Flags_Details': '; '.join(flags) if flags else 'None'
-        }
-
-    def _calculate_journal_concentration(self, citing_data: Dict[str, Dict]) -> float:
-        """Рассчитывает концентрацию цитирований по журналам"""
-        if not citing_data:
-            return 0.0
-
-        journal_counter = Counter()
-        for cite_result in citing_data.values():
-            journal = cite_result.get('publication_info', {}).get('journal', '')
-            if journal:
-                journal_counter[journal] += 1
-
-        if not journal_counter:
-            return 0.0
-
-        total_citations = sum(journal_counter.values())
-        top_journal_count = journal_counter.most_common(1)[0][1]
-
-        return top_journal_count / total_citations
-
-    def _calculate_author_self_citation(self, analyzed_authors: List[Dict],
-                                       citing_data: Dict[str, Dict]) -> float:
-        """Рассчитывает процент self-citation по авторам"""
-        if not citing_data or not analyzed_authors:
-            return 0.0
-
-        analyzed_author_names = {author['name'] for author in analyzed_authors}
-        total_citations = len(citing_data)
-        self_citations = 0
-
-        for cite_result in citing_data.values():
-            citing_authors = cite_result.get('authors', [])
-            citing_author_names = {author['name'] for author in citing_authors}
-
-            # Проверяем наличие общих авторов
-            common_authors = analyzed_author_names.intersection(citing_author_names)
-            if common_authors:
-                self_citations += 1
-
-        return self_citations / total_citations if total_citations > 0 else 0.0
-
-    def _calculate_affiliation_self_citation(self, analyzed_authors: List[Dict],
-                                           citing_data: Dict[str, Dict]) -> float:
-        """Рассчитывает процент self-citation по аффилиациям"""
-        if not citing_data or not analyzed_authors:
-            return 0.0
-
-        # Собираем аффилиации анализируемой статьи
-        analyzed_affiliations = set()
-        for author in analyzed_authors:
-            analyzed_affiliations.update(author.get('affiliation', []))
-
-        if not analyzed_affiliations:
-            return 0.0
-
-        total_citations = len(citing_data)
-        self_citations = 0
-
-        for cite_result in citing_data.values():
-            citing_authors = cite_result.get('authors', [])
-            citing_affiliations = set()
-
-            for author in citing_authors:
-                citing_affiliations.update(author.get('affiliation', []))
-
-            # Проверяем наличие общих аффилиаций
-            common_affiliations = analyzed_affiliations.intersection(citing_affiliations)
-            if common_affiliations:
-                self_citations += 1
-
-        return self_citations / total_citations if total_citations > 0 else 0.0
-
-    def _calculate_single_country_concentration(self, citing_data: Dict[str, Dict],
-                                              analyzed_countries: List[str]) -> float:
-        """Рассчитывает концентрацию цитирований по странам"""
-        if not citing_data:
-            return 0.0
-
-        country_counter = Counter()
-        for cite_result in citing_data.values():
-            countries = cite_result.get('countries', [])
-            for country in countries:
-                if country:
-                    country_counter[country] += 1
-
-        if not country_counter:
-            return 0.0
-
-        total_citations = sum(country_counter.values())
-        top_country_count = country_counter.most_common(1)[0][1]
-
-        return top_country_count / total_citations
-
-    def _calculate_citation_velocity(self, result: Dict, citing_data: Dict[str, Dict]) -> float:
-        """Рассчитывает скорость цитирования (цитирований в год)"""
-        if not citing_data:
-            return 0.0
-
-        pub_year_str = result.get('publication_info', {}).get('year', '')
-        if not pub_year_str:
-            return 0.0
-
-        try:
-            pub_year = int(pub_year_str)
-            current_year = datetime.now().year
-            years_passed = max(1, current_year - pub_year)
-
-            return len(citing_data) / years_passed
-        except:
-            return 0.0
-
-    def _calculate_first_year_share(self, result: Dict, citing_data: Dict[str, Dict]) -> float:
-        """Рассчитывает долю цитирований в первый год"""
-        if not citing_data:
-            return 0.0
-
-        pub_year_str = result.get('publication_info', {}).get('year', '')
-        if not pub_year_str:
-            return 0.0
-
-        try:
-            pub_year = int(pub_year_str)
-            first_year_citations = 0
-            total_citations = len(citing_data)
-
-            for cite_doi, cite_result in citing_data.items():
-                cite_year_str = cite_result.get('publication_info', {}).get('year', '')
-                if cite_year_str:
-                    try:
-                        cite_year = int(cite_year_str)
-                        if cite_year == pub_year:
-                            first_year_citations += 1
-                    except:
-                        pass
-
-            return first_year_citations / total_citations if total_citations > 0 else 0.0
-        except:
-            return 0.0
-
-    def _check_future_citations(self, result: Dict, citing_data: Dict[str, Dict]) -> int:
-        """Проверяет цитирования из будущего"""
-        if not citing_data:
-            return 0
-
-        pub_date_str = result.get('publication_info', {}).get('publication_date', '')
-        if not pub_date_str:
-            return 0
-
-        try:
-            pub_date = datetime.strptime(pub_date_str[:10], '%Y-%m-%d')
-            future_citations = 0
-
-            for cite_result in citing_data.values():
-                cite_date_str = cite_result.get('publication_info', {}).get('publication_date', '')
-                if cite_date_str:
-                    try:
-                        cite_date = datetime.strptime(cite_date_str[:10], '%Y-%m-%d')
-                        if cite_date < pub_date:
-                            future_citations += 1
-                    except:
-                        pass
-
-            return future_citations
-        except:
-            return 0
-
-    def _calculate_quick_risk_score(self, *metrics) -> int:
-        """Рассчитывает общий скоринговый риск"""
-        score = 0
-
-        # Весовые коэффициенты для разных метрик
-        weights = [20, 15, 15, 10, 10, 15, 15]
-
-        for metric, weight in zip(metrics, weights):
-            if isinstance(metric, float):
-                score += int(metric * weight)
-            elif isinstance(metric, int):
-                score += metric * 5
-
-        return min(100, score)
-
-    def _determine_recommended_action(self, risk_score: int, red_flags: int) -> str:
-        """Определяет рекомендуемое действие на основе оценки риска"""
-        if risk_score > 80 or red_flags >= 5:
-            return "IMMEDIATE INVESTIGATION"
-        elif risk_score > 60 or red_flags >= 3:
-            return "DETAILED REVIEW REQUIRED"
-        elif risk_score > 40 or red_flags >= 2:
-            return "MONITOR AND REVIEW"
-        elif risk_score > 20:
-            return "MINOR REVIEW SUGGESTED"
-        else:
-            return "ETHICALLY ACCEPTABLE"
-
-    def analyze_medium_insights(self, analyzed_results: Dict[str, Dict],
-                               citing_results: Dict[str, Dict]) -> List[Dict]:
-        """Средние инсайты (15-30 секунд на статью)"""
-        medium_insights = []
-
-        # Собираем статистику по журналам для сравнения
-        journal_stats = self._collect_journal_statistics(analyzed_results, citing_results)
-
-        for doi, result in analyzed_results.items():
-            if result.get('status') != 'success':
+            if '-' in word:
                 continue
-
-            # Получаем цитирующие статьи
-            citing_dois = result.get('citations', [])
-            citing_data = {}
-            for cite_doi in citing_dois:
-                if cite_doi in citing_results and citing_results[cite_doi].get('status') == 'success':
-                    citing_data[cite_doi] = citing_results[cite_doi]
-
-            # Анализ
-            analysis = self._perform_medium_insight_analysis(doi, result, citing_data, journal_stats)
-            medium_insights.append(analysis)
-
-            # Кэшируем результаты
-            self.cache.set_ethical_analysis('medium_insights', doi, analysis)
-
-        return sorted(medium_insights, key=lambda x: x['Anomaly_Score'], reverse=True)
-
-    def _collect_journal_statistics(self, analyzed_results: Dict[str, Dict],
-                                   citing_results: Dict[str, Dict]) -> Dict[str, Dict]:
-        """Собирает статистику по журналам для нормализации"""
-        journal_data = defaultdict(list)
-
-        # Собираем данные по всем статьям
-        all_results = list(analyzed_results.values()) + list(citing_results.values())
-
-        for result in all_results:
-            if result.get('status') != 'success':
-                continue
-
-            pub_info = result.get('publication_info', {})
-            journal = pub_info.get('journal', '')
-            citation_count = pub_info.get('citation_count_crossref', 0)
-            year_str = pub_info.get('year', '')
-
-            if journal and year_str:
-                try:
-                    year = int(year_str)
-                    current_year = datetime.now().year
-                    age = max(1, current_year - year)
-                    annual_citations = citation_count / age
-
-                    journal_data[journal].append({
-                        'annual_citations': annual_citations,
-                        'citation_count': citation_count,
-                        'year': year
+            if len(word) > 2 and word not in self.stop_words:
+                lemma = self._get_base_form(word)
+                if lemma not in self.scientific_stopwords:
+                    content_words.append({
+                        'original': word,
+                        'lemma': lemma,
+                        'type': 'content'
                     })
-                except:
+
+        return content_words
+
+    def extract_compound_words(self, text: str) -> List[Dict]:
+        """Extract hyphenated compound words"""
+        if not text or text in ['Title not found', 'Request timeout', 'Network error', 'Retrieval error']:
+            return []
+
+        text = text.lower()
+        compound_words = re.findall(r'\b[a-z]{2,}-[a-z]{2,}(?:-[a-z]{2,})*\b', text)
+
+        compounds = []
+        for word in compound_words:
+            parts = word.split('-')
+            if not any(part in self.stop_words for part in parts):
+                # For compound words lemmatize each part
+                lemmatized_parts = []
+                for part in parts:
+                    lemma = self._get_base_form(part)
+                    lemmatized_parts.append(lemma)
+                
+                compounds.append({
+                    'original': word,
+                    'lemma': '-'.join(lemmatized_parts),
+                    'type': 'compound'
+                })
+
+        return compounds
+
+    def extract_scientific_stopwords(self, text: str) -> List[Dict]:
+        """Extract scientific stopwords"""
+        if not text or text in ['Title not found', 'Request timeout', 'Network error', 'Retrieval error']:
+            return []
+
+        text = text.lower()
+        text = re.sub(r'[^a-zA-Z\s]', ' ', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+
+        words = text.split()
+        scientific_words = []
+
+        for word in words:
+            if len(word) > 2:
+                lemma = self._get_base_form(word)
+                if lemma in self.scientific_stopwords:
+                    scientific_words.append({
+                        'original': word,
+                        'lemma': lemma,
+                        'type': 'scientific'
+                    })
+
+        return scientific_words
+
+    def analyze_titles(self, analyzed_titles: List[str], reference_titles: List[str], citing_titles: List[str]) -> dict:
+        """Analyze keywords in analyzed, reference and citing article titles"""
+        
+        # Analyze analyzed articles
+        analyzed_words = []
+        valid_analyzed_titles = [t for t in analyzed_titles if t and t not in ['Title not found', 'Request timeout', 'Network error', 'Retrieval error']]
+        
+        for title in valid_analyzed_titles:
+            analyzed_words.extend(self.preprocess_content_words(title))
+            analyzed_words.extend(self.extract_compound_words(title))
+            analyzed_words.extend(self.extract_scientific_stopwords(title))
+        
+        # Analyze reference articles
+        reference_words = []
+        valid_reference_titles = [t for t in reference_titles if t and t not in ['Title not found', 'Request timeout', 'Network error', 'Retrieval error']]
+        
+        for title in valid_reference_titles:
+            reference_words.extend(self.preprocess_content_words(title))
+            reference_words.extend(self.extract_compound_words(title))
+            reference_words.extend(self.extract_scientific_stopwords(title))
+        
+        # Analyze citing articles
+        citing_words = []
+        valid_citing_titles = [t for t in citing_titles if t and t not in ['Title not found', 'Request timeout', 'Network error', 'Retrieval error']]
+        
+        for title in valid_citing_titles:
+            citing_words.extend(self.preprocess_content_words(title))
+            citing_words.extend(self.extract_compound_words(title))
+            citing_words.extend(self.extract_scientific_stopwords(title))
+        
+        # Create aggregated data by lemmas
+        def aggregate_by_lemma(word_list):
+            lemma_dict = {}
+            for word_info in word_list:
+                lemma = word_info['lemma']
+                original = word_info['original']
+                
+                # Exclude too short lemmas
+                if len(lemma) < 3:
                     continue
-
-        # Рассчитываем медианы и квартили
-        journal_stats = {}
-        for journal, data_list in journal_data.items():
-            if len(data_list) >= 3:  # Нужно минимум 3 статьи для статистики
-                annual_citations = [d['annual_citations'] for d in data_list]
-                annual_citations.sort()
-
-                median_index = len(annual_citations) // 2
-                q1_index = len(annual_citations) // 4
-                q3_index = 3 * len(annual_citations) // 4
-
-                journal_stats[journal] = {
-                    'median_annual_citations': annual_citations[median_index],
-                    'q1_annual_citations': annual_citations[q1_index],
-                    'q3_annual_citations': annual_citations[q3_index],
-                    'count': len(data_list),
-                    'min': min(annual_citations),
-                    'max': max(annual_citations),
-                    # Добавляем 'median' для совместимости со старым кодом
-                    'median': annual_citations[median_index]
-                }
-
-        return journal_stats
-
-    def _perform_medium_insight_analysis(self, doi: str, result: Dict,
-                                        citing_data: Dict[str, Dict],
-                                        journal_stats: Dict[str, Dict]) -> Dict:
-        """Выполняет средний анализ для одной статьи"""
-
-        pub_info = result['publication_info']
-        authors = result.get('authors', [])
-        countries = result.get('countries', [])
-
-        # 1. Temporal Citation Pattern
-        temporal_pattern = self._analyze_temporal_pattern(result, citing_data)
-
-        # 2. Journal Concentration Analysis
-        journal_concentration = self._analyze_journal_concentration(citing_data)
-
-        # 3. Author Network Analysis
-        author_network = self._analyze_author_network(authors, citing_data)
-
-        # 4. Geographic Bias Analysis
-        geographic_bias = self._analyze_geographic_bias(countries, citing_data)
-
-        # 5. Comparison with Journal Norms
-        journal_comparison = self._compare_with_journal_norms(pub_info, journal_stats)
-
-        # Расчет аномального скора
-        anomaly_score = self._calculate_anomaly_score(
-            temporal_pattern, journal_concentration, author_network,
-            geographic_bias, journal_comparison
-        )
-
-        # Определение категории риска
-        risk_category, investigation_priority = self._determine_risk_category(anomaly_score)
-
-        return {
-            'Article_DOI': doi,
-            'Publication_Year': pub_info.get('year', ''),
-            'Total_Citations': len(citing_data),
-            'Annual_Citation_Rate': round(temporal_pattern.get('annual_rate', 0), 2),
-            'Citations_Year_1': temporal_pattern.get('year_1', 0),
-            'Citations_Year_2': temporal_pattern.get('year_2', 0),
-            'First_2_Years_Percent': round(temporal_pattern.get('first_2_years_percent', 0) * 100, 1),
-            'Temporal_Anomaly_Index': round(temporal_pattern.get('anomaly_index', 0), 3),
-            'Top_Journal_Citing': journal_concentration.get('top_journal', ''),
-            'Top_Journal_Percent': round(journal_concentration.get('top_journal_percent', 0) * 100, 1),
-            'Journal_Concentration_Index': round(journal_concentration.get('concentration_index', 0), 3),
-            'Journal_Diversity_Index': round(journal_concentration.get('diversity_index', 0), 3),
-            'Author_Self_Citation_Rate': round(author_network.get('self_citation_rate', 0) * 100, 1),
-            'Author_Cluster_Coefficient': round(author_network.get('cluster_coefficient', 0), 3),
-            'Author_Network_Density': round(author_network.get('network_density', 0), 3),
-            'Top_Country': geographic_bias.get('top_country', ''),
-            'Top_Country_Percent': round(geographic_bias.get('top_country_percent', 0) * 100, 1),
-            'Country_Diversity_Index': round(geographic_bias.get('diversity_index', 0), 3),
-            'Geographic_Bias_Index': round(geographic_bias.get('bias_index', 0), 3),
-            'Journal_Median_Annual_Cite': round(journal_comparison.get('journal_median', 0), 2),
-            'Citation_Ratio_vs_Journal': round(journal_comparison.get('citation_ratio', 0), 2),
-            'Journal_Percentile': round(journal_comparison.get('percentile', 0), 1),
-            'Anomaly_Score': round(anomaly_score, 1),
-            'Risk_Category': risk_category,
-            'Investigation_Priority': investigation_priority,
-            'Temporal_Red_Flags': temporal_pattern.get('red_flags', 0),
-            'Journal_Red_Flags': journal_concentration.get('red_flags', 0),
-            'Author_Red_Flags': author_network.get('red_flags', 0),
-            'Geographic_Red_Flags': geographic_bias.get('red_flags', 0)
-        }
-
-    def _analyze_temporal_pattern(self, result: Dict, citing_data: Dict[str, Dict]) -> Dict:
-        """Анализирует временные паттерны цитирования"""
-        if not citing_data:
-            return {'annual_rate': 0, 'year_1': 0, 'year_2': 0,
-                    'first_2_years_percent': 0, 'anomaly_index': 0, 'red_flags': 0}
-
-        pub_year_str = result.get('publication_info', {}).get('year', '')
-        if not pub_year_str:
-            return {'annual_rate': 0, 'year_1': 0, 'year_2': 0,
-                    'first_2_years_percent': 0, 'anomaly_index': 0, 'red_flags': 0}
-
-        try:
-            pub_year = int(pub_year_str)
-            current_year = datetime.now().year
-            years_passed = max(1, current_year - pub_year)
-
-            # Распределение по годам
-            year_distribution = Counter()
-            for cite_result in citing_data.values():
-                cite_year_str = cite_result.get('publication_info', {}).get('year', '')
-                if cite_year_str:
-                    try:
-                        cite_year = int(cite_year_str)
-                        if cite_year >= pub_year:
-                            year_distribution[cite_year] += 1
-                    except:
-                        pass
-
-            # Основные метрики
-            total_citations = len(citing_data)
-            annual_rate = total_citations / years_passed
-
-            year_1 = year_distribution.get(pub_year, 0)
-            year_2 = year_distribution.get(pub_year + 1, 0)
-
-            first_2_years = year_1 + year_2
-            first_2_years_percent = first_2_years / total_citations if total_citations > 0 else 0
-
-            # Индекс аномалии (чем выше, тем более аномальное распределение)
-            expected_per_year = total_citations / max(1, len(year_distribution))
-            anomaly_sum = 0
-            for year, count in year_distribution.items():
-                if expected_per_year > 0:
-                    anomaly_sum += abs(count - expected_per_year) / expected_per_year
-
-            anomaly_index = anomaly_sum / len(year_distribution) if year_distribution else 0
-
-            # Красные флаги
-            red_flags = 0
-            if first_2_years_percent > Config.MEDIUM_INSIGHT_THRESHOLDS['first_two_years']:
-                red_flags += 1
-            if anomaly_index > 0.5:  # Сильное отклонение от равномерного распределения
-                red_flags += 1
-
-            return {
-                'annual_rate': annual_rate,
-                'year_1': year_1,
-                'year_2': year_2,
-                'first_2_years_percent': first_2_years_percent,
-                'anomaly_index': anomaly_index,
-                'red_flags': red_flags
-            }
-
-        except Exception as e:
-            st.warning(f"⚠️ Temporal pattern analysis error: {e}")
-            return {'annual_rate': 0, 'year_1': 0, 'year_2': 0,
-                    'first_2_years_percent': 0, 'anomaly_index': 0, 'red_flags': 0}
-
-    def _analyze_journal_concentration(self, citing_data: Dict[str, Dict]) -> Dict:
-        """Анализирует концентрацию цитирований по журналам"""
-        if not citing_data:
-            return {'top_journal': '', 'top_journal_percent': 0,
-                    'concentration_index': 0, 'diversity_index': 0, 'red_flags': 0}
-
-        journal_counter = Counter()
-        for cite_result in citing_data.values():
-            journal = cite_result.get('publication_info', {}).get('journal', '')
-            if journal:
-                journal_counter[journal] += 1
-
-        if not journal_counter:
-            return {'top_journal': '', 'top_journal_percent': 0,
-                    'concentration_index': 0, 'diversity_index': 0, 'red_flags': 0}
-
-        total_citations = sum(journal_counter.values())
-
-        # Топ журнал и его доля
-        top_journal, top_count = journal_counter.most_common(1)[0]
-        top_journal_percent = top_count / total_citations
-
-        # Индекс концентрации Херфиндаля-Хиршмана
-        hhi = sum((count / total_citations) ** 2 for count in journal_counter.values())
-        concentration_index = hhi
-
-        # Индекс разнообразия (1 - HHI)
-        diversity_index = 1 - hhi
-
-        # Красные флаги
-        red_flags = 0
-        if top_journal_percent > Config.MEDIUM_INSIGHT_THRESHOLDS['top_journal_share']:
-            red_flags += 1
-        if concentration_index > 0.25:  # Высокая концентрация
-            red_flags += 1
-
-        return {
-            'top_journal': top_journal[:50],
-            'top_journal_percent': top_journal_percent,
-            'concentration_index': concentration_index,
-            'diversity_index': diversity_index,
-            'red_flags': red_flags
-        }
-
-    def _analyze_author_network(self, analyzed_authors: List[Dict],
-                               citing_data: Dict[str, Dict]) -> Dict:
-        """Анализирует сеть авторов цитирований"""
-        if not citing_data or not analyzed_authors:
-            return {'self_citation_rate': 0, 'cluster_coefficient': 0,
-                    'network_density': 0, 'red_flags': 0}
-
-        analyzed_author_names = {author['name'] for author in analyzed_authors}
-
-        # Строим сеть авторов цитирующих статей
-        author_network = defaultdict(set)
-        all_citing_authors = set()
-
-        for cite_result in citing_data.values():
-            citing_authors = cite_result.get('authors', [])
-            citing_author_names = {author['name'] for author in citing_authors}
-            all_citing_authors.update(citing_author_names)
-
-            # Добавляем связи между всеми авторами одной статьи
-            author_list = list(citing_author_names)
-            for i in range(len(author_list)):
-                for j in range(i + 1, len(author_list)):
-                    author_network[author_list[i]].add(author_list[j])
-                    author_network[author_list[j]].add(author_list[i])
-
-        # Self-citation rate
-        total_citations = len(citing_data)
-        self_citations = 0
-
-        for cite_result in citing_data.values():
-            citing_authors = cite_result.get('authors', [])
-            citing_author_names = {author['name'] for author in citing_authors}
-
-            if analyzed_author_names.intersection(citing_author_names):
-                self_citations += 1
-
-        self_citation_rate = self_citations / total_citations if total_citations > 0 else 0
-
-        # Коэффициент кластеризации (упрощенный)
-        if len(author_network) > 0:
-            total_possible_connections = len(author_network) * (len(author_network) - 1) / 2
-            actual_connections = sum(len(neighbors) for neighbors in author_network.values()) / 2
-
-            if total_possible_connections > 0:
-                network_density = actual_connections / total_possible_connections
-
-                # Упрощенный коэффициент кластеризации
-                cluster_coefficient = network_density
-            else:
-                network_density = 0
-                cluster_coefficient = 0
-        else:
-            network_density = 0
-            cluster_coefficient = 0
-
-        # Красные флаги
-        red_flags = 0
-        if self_citation_rate > 0.3:
-            red_flags += 1
-        if cluster_coefficient > Config.MEDIUM_INSIGHT_THRESHOLDS['cluster_coefficient']:
-            red_flags += 1
-
-        return {
-            'self_citation_rate': self_citation_rate,
-            'cluster_coefficient': cluster_coefficient,
-            'network_density': network_density,
-            'red_flags': red_flags
-        }
-
-    def _analyze_geographic_bias(self, analyzed_countries: List[str],
-                                citing_data: Dict[str, Dict]) -> Dict:
-        """Анализирует географическую предвзятость"""
-        if not citing_data:
-            return {'top_country': '', 'top_country_percent': 0,
-                    'diversity_index': 0, 'bias_index': 0, 'red_flags': 0}
-
-        country_counter = Counter()
-        for cite_result in citing_data.values():
-            countries = cite_result.get('countries', [])
-            for country in countries:
-                if country:
-                    country_counter[country] += 1
-
-        if not country_counter:
-            return {'top_country': '', 'top_country_percent': 0,
-                    'diversity_index': 0, 'bias_index': 0, 'red_flags': 0}
-
-        total_citations = sum(country_counter.values())
-
-        # Топ страна и ее доля
-        top_country, top_count = country_counter.most_common(1)[0]
-        top_country_percent = top_count / total_citations
-
-        # Индекс разнообразия
-        hhi = sum((count / total_citations) ** 2 for count in country_counter.values())
-        diversity_index = 1 - hhi
-
-        # Индекс географической предвзятости
-        # (доля из той же страны, что и анализируемая статья)
-        same_country_share = 0
-        if analyzed_countries:
-            for country in analyzed_countries:
-                same_country_share += country_counter.get(country, 0) / total_citations
-
-        bias_index = same_country_share
-
-        # Красные флаги
-        red_flags = 0
-        if top_country_percent > 0.8:
-            red_flags += 1
-        if bias_index > Config.MEDIUM_INSIGHT_THRESHOLDS['geographic_bias']:
-            red_flags += 1
-
-        return {
-            'top_country': top_country,
-            'top_country_percent': top_country_percent,
-            'diversity_index': diversity_index,
-            'bias_index': bias_index,
-            'red_flags': red_flags
-        }
-
-    def _compare_with_journal_norms(self, pub_info: Dict,
-                                   journal_stats: Dict[str, Dict]) -> Dict:
-        """Сравнивает с нормами журнала"""
-        journal = pub_info.get('journal', '')
-        citation_count = pub_info.get('citation_count_crossref', 0)
-        year_str = pub_info.get('year', '')
-
-        if not journal or not year_str or journal not in journal_stats:
-            return {'journal_median': 0, 'citation_ratio': 0, 'percentile': 50}
-
-        try:
-            year = int(year_str)
-            current_year = datetime.now().year
-            age = max(1, current_year - year)
-            annual_citations = citation_count / age
-
-            stats = journal_stats[journal]
-            journal_median = stats.get('median_annual_citations', 0.1)
-
-            if journal_median > 0:
-                citation_ratio = annual_citations / journal_median
-            else:
-                citation_ratio = 0
-
-            # Процентиль относительно журнальных норм
-            all_citations = [annual_citations]
-            # Добавляем статистические значения из журнальных норм
-            all_citations.append(stats.get('min', annual_citations * 0.5))
-            all_citations.append(stats.get('median_annual_citations', annual_citations))
-            all_citations.append(stats.get('max', annual_citations * 2))
-            all_citations.sort()
-
-            position = all_citations.index(annual_citations) + 1
-            percentile = (position / len(all_citations)) * 100
-
-            return {
-                'journal_median': journal_median,
-                'citation_ratio': citation_ratio,
-                'percentile': percentile
-            }
-
-        except Exception as e:
-            st.warning(f"⚠️ Journal comparison error: {e}")
-            return {'journal_median': 0, 'citation_ratio': 0, 'percentile': 50}
-
-    def _calculate_anomaly_score(self, temporal_pattern: Dict, journal_concentration: Dict,
-                                author_network: Dict, geographic_bias: Dict,
-                                journal_comparison: Dict) -> float:
-        """Рассчитывает общий аномальный скор"""
-        score = 0
-
-        # Временные аномалии (макс 25)
-        score += min(25, temporal_pattern.get('anomaly_index', 0) * 50)
-        if temporal_pattern.get('first_2_years_percent', 0) > 0.7:
-            score += 15
-
-        # Концентрация журналов (макс 20)
-        score += min(20, journal_concentration.get('concentration_index', 0) * 80)
-        if journal_concentration.get('top_journal_percent', 0) > 0.6:
-            score += 10
-
-        # Сеть авторов (макс 25)
-        score += min(25, author_network.get('self_citation_rate', 0) * 83)
-        score += min(15, author_network.get('cluster_coefficient', 0) * 20)
-
-        # Географическая предвзятость (макс 15)
-        score += min(15, geographic_bias.get('bias_index', 0) * 30)
-        if geographic_bias.get('top_country_percent', 0) > 0.8:
-            score += 5
-
-        # Отклонение от журнальных норм (макс 15)
-        citation_ratio = journal_comparison.get('citation_ratio', 0)
-        if citation_ratio > 3:
-            score += 15
-        elif citation_ratio > 2:
-            score += 10
-        elif citation_ratio > 1.5:
-            score += 5
-
-        return min(100, score)
-
-    def _determine_risk_category(self, anomaly_score: float) -> Tuple[str, int]:
-        """Определяет категорию риска и приоритет расследования"""
-        if anomaly_score > 80:
-            return "CRITICAL", 5
-        elif anomaly_score > 60:
-            return "HIGH", 4
-        elif anomaly_score > 40:
-            return "MEDIUM", 3
-        elif anomaly_score > 20:
-            return "LOW", 2
-        else:
-            return "MINIMAL", 1
-
-    def analyze_deep_analysis(self, analyzed_results: Dict[str, Dict],
-                             citing_results: Dict[str, Dict],
-                             ref_results: Dict[str, Dict] = None) -> List[Dict]:
-        """Глубокий анализ (60-120 секунд на статью)"""
-        deep_analysis = []
-
-        # Строим полную сеть для сетевого анализа
-        full_network = self._build_citation_network(analyzed_results, citing_results, ref_results)
-
-        for doi, result in analyzed_results.items():
-            if result.get('status') != 'success':
-                continue
-
-            # Получаем связанные данные
-            citing_dois = result.get('citations', [])
-            citing_data = {}
-            for cite_doi in citing_dois:
-                if cite_doi in citing_results and citing_results[cite_doi].get('status') == 'success':
-                    citing_data[cite_doi] = citing_results[cite_doi]
-
-            # Выполняем глубокий анализ
-            analysis = self._perform_deep_analysis(doi, result, citing_data, full_network)
-            deep_analysis.append(analysis)
-
-            # Кэшируем результаты
-            self.cache.set_ethical_analysis('deep_analysis', doi, analysis)
-
-        return sorted(deep_analysis, key=lambda x: x['Machine_Learning_Risk_Score'], reverse=True)
-
-    def _build_citation_network(self, analyzed_results: Dict[str, Dict],
-                               citing_results: Dict[str, Dict],
-                               ref_results: Dict[str, Dict] = None) -> nx.DiGraph:
-        """Строит направленный граф цитирований"""
-        G = nx.DiGraph()
-
-        # Добавляем анализируемые статьи
-        for doi, result in analyzed_results.items():
-            if result.get('status') == 'success':
-                G.add_node(doi, type='analyzed',
-                          year=result.get('publication_info', {}).get('year', ''))
-
-        # Добавляем цитирующие статьи
-        for doi, result in citing_results.items():
-            if result.get('status') == 'success':
-                G.add_node(doi, type='citing',
-                          year=result.get('publication_info', {}).get('year', ''))
-
-        # Добавляем референсы если есть
-        if ref_results:
-            for doi, result in ref_results.items():
-                if result.get('status') == 'success':
-                    G.add_node(doi, type='reference',
-                              year=result.get('publication_info', {}).get('year', ''))
-
-        # Добавляем ребра цитирований
-        for analyzed_doi, result in analyzed_results.items():
-            if result.get('status') == 'success':
-                citing_dois = result.get('citations', [])
-                for cite_doi in citing_dois:
-                    if cite_doi in G:
-                        G.add_edge(cite_doi, analyzed_doi)  # cite_doi → analyzed_doi
-
-        return G
-
-    def _perform_deep_analysis(self, doi: str, result: Dict,
-                              citing_data: Dict[str, Dict],
-                              citation_network: nx.DiGraph) -> Dict:
-        """Выполняет глубокий анализ для одной статьи"""
-
-        # 1. Network Analysis
-        network_metrics = self._analyze_network_metrics(doi, citation_network)
-
-        # 2. Temporal Pattern Mining
-        temporal_patterns = self._mine_temporal_patterns(result, citing_data)
-
-        # 3. Geographic Cluster Analysis
-        geographic_clusters = self._analyze_geographic_clusters(result, citing_data)
-
-        # 4. Journal Network Analysis
-        journal_network = self._analyze_journal_network(result, citing_data)
-
-        # 5. Statistical Anomaly Detection
-        statistical_anomalies = self._detect_statistical_anomalies(result, citing_data)
-
-        # 6. Machine Learning Risk Assessment
-        ml_risk_score = self._calculate_ml_risk_score(
-            network_metrics, temporal_patterns, geographic_clusters,
-            journal_network, statistical_anomalies
-        )
-
-        # Определяем необходимость экспертного обзора
-        expert_review_required = self._determine_expert_review_requirement(
-            network_metrics, ml_risk_score, len(citing_data)
-        )
-
-        return {
-            'Article_DOI': doi,
-            'Author_Cluster_ID': network_metrics.get('author_cluster_id', 'N/A'),
-            'Cluster_Size': network_metrics.get('cluster_size', 0),
-            'Internal_Citation_Density': round(network_metrics.get('internal_density', 0), 3),
-            'Cross_Cluster_Citations': network_metrics.get('cross_cluster_citations', 0),
-            'Betweenness_Centrality': round(network_metrics.get('betweenness_centrality', 0), 4),
-            'Clustering_Coefficient': round(network_metrics.get('clustering_coefficient', 0), 3),
-            'Eigenvector_Centrality': round(network_metrics.get('eigenvector_centrality', 0), 4),
-            'Quarterly_Citation_Peaks': temporal_patterns.get('quarterly_peaks', 0),
-            'Seasonal_Pattern_Detected': temporal_patterns.get('seasonal_pattern', False),
-            'Citation_Wave_Length': temporal_patterns.get('wave_length', 0),
-            'Burst_Detection_Score': round(temporal_patterns.get('burst_score', 0), 3),
-            'Geographic_Cluster_Strength': round(geographic_clusters.get('cluster_strength', 0), 3),
-            'Cross_Country_Citation_Bias': round(geographic_clusters.get('cross_country_bias', 0), 3),
-            'Region_Homophily_Index': round(geographic_clusters.get('homophily_index', 0), 3),
-            'Journal_Citation_Circle': journal_network.get('citation_circle', False),
-            'Journal_Reciprocity_Index': round(journal_network.get('reciprocity_index', 0), 3),
-            'Predatory_Journal_Flags': journal_network.get('predatory_flags', 0),
-            'Journal_Network_Modularity': round(journal_network.get('modularity', 0), 3),
-            'Citation_Gini_Coefficient': round(statistical_anomalies.get('gini_coefficient', 0), 3),
-            'Z_Score_Anomaly': round(statistical_anomalies.get('z_score', 0), 2),
-            'Power_Law_Fit': round(statistical_anomalies.get('power_law_fit', 0), 3),
-            'Statistical_Outlier_Flag': statistical_anomalies.get('outlier_flag', False),
-            'Temporal_Anomaly_Score': round(temporal_patterns.get('temporal_anomaly_score', 0), 1),
-            'Network_Centrality_Score': round(network_metrics.get('centrality_score', 0), 1),
-            'Pattern_Anomaly_Score': round(temporal_patterns.get('pattern_anomaly_score', 0), 1),
-            'Machine_Learning_Risk_Score': round(ml_risk_score, 1),
-            'Expert_Review_Required': expert_review_required,
-            'Suggested_Audit_Focus': self._suggest_audit_focus(network_metrics, temporal_patterns,
-                                                             geographic_clusters, journal_network),
-            'Confidence_Level': self._calculate_confidence_level(len(citing_data), ml_risk_score)
-        }
-
-    def _analyze_network_metrics(self, doi: str, citation_network: nx.DiGraph) -> Dict:
-        """Анализирует сетевые метрики"""
-        if doi not in citation_network:
-            return {'author_cluster_id': 'N/A', 'cluster_size': 0, 'internal_density': 0,
-                    'cross_cluster_citations': 0, 'betweenness_centrality': 0,
-                    'clustering_coefficient': 0, 'eigenvector_centrality': 0,
-                    'centrality_score': 0}
-
-        try:
-            # Вычисляем центральности
-            betweenness = nx.betweenness_centrality(citation_network, normalized=True).get(doi, 0)
-            clustering = nx.clustering(citation_network.to_undirected()).get(doi, 0)
-
-            # Eigenvector centrality (требует связного графа)
-            try:
-                eigenvector = nx.eigenvector_centrality_numpy(citation_network.to_undirected()).get(doi, 0)
-            except:
-                eigenvector = 0
-
-            # Анализ сообществ (упрощенный)
-            try:
-                # Используем greedy modularity communities
-                communities = list(nx.algorithms.community.greedy_modularity_communities(
-                    citation_network.to_undirected()))
-
-                # Находим сообщество текущей статьи
-                article_community = None
-                for i, community in enumerate(communities):
-                    if doi in community:
-                        article_community = i
-                        break
-
-                if article_community is not None:
-                    community_nodes = communities[article_community]
-                    cluster_size = len(community_nodes)
-
-                    # Плотность внутри сообщества
-                    subgraph = citation_network.subgraph(community_nodes)
-                    internal_edges = subgraph.number_of_edges()
-                    possible_edges = len(community_nodes) * (len(community_nodes) - 1)
-                    internal_density = internal_edges / possible_edges if possible_edges > 0 else 0
-
-                    # Цитирования между сообществами
-                    cross_cluster_citations = 0
-                    for node in community_nodes:
-                        for neighbor in citation_network.neighbors(node):
-                            if neighbor not in community_nodes:
-                                cross_cluster_citations += 1
-
-                    author_cluster_id = f"COMM_{article_community:03d}"
-                else:
-                    cluster_size = 1
-                    internal_density = 0
-                    cross_cluster_citations = 0
-                    author_cluster_id = "ISOLATED"
-
-            except:
-                cluster_size = 1
-                internal_density = 0
-                cross_cluster_citations = 0
-                author_cluster_id = "UNKNOWN"
-
-            # Общий скоринг центральности
-            centrality_score = min(100, (
-                betweenness * 40 +
-                eigenvector * 30 +
-                (1 - clustering) * 30  # Низкий коэффициент кластеризации = выше центральность
-            ))
-
-            return {
-                'author_cluster_id': author_cluster_id,
-                'cluster_size': cluster_size,
-                'internal_density': internal_density,
-                'cross_cluster_citations': cross_cluster_citations,
-                'betweenness_centrality': betweenness,
-                'clustering_coefficient': clustering,
-                'eigenvector_centrality': eigenvector,
-                'centrality_score': centrality_score
-            }
-
-        except Exception as e:
-            st.warning(f"⚠️ Network analysis error for {doi}: {e}")
-            return {'author_cluster_id': 'N/A', 'cluster_size': 0, 'internal_density': 0,
-                    'cross_cluster_citations': 0, 'betweenness_centrality': 0,
-                    'clustering_coefficient': 0, 'eigenvector_centrality': 0,
-                    'centrality_score': 0}
-
-    def _mine_temporal_patterns(self, result: Dict, citing_data: Dict[str, Dict]) -> Dict:
-        """Анализирует временные паттерны цитирования"""
-        if not citing_data:
-            return {'quarterly_peaks': 0, 'seasonal_pattern': False,
-                    'wave_length': 0, 'burst_score': 0,
-                    'temporal_anomaly_score': 0, 'pattern_anomaly_score': 0}
-
-        pub_date_str = result.get('publication_info', {}).get('publication_date', '')
-        if not pub_date_str:
-            return {'quarterly_peaks': 0, 'seasonal_pattern': False,
-                    'wave_length': 0, 'burst_score': 0,
-                    'temporal_anomaly_score': 0, 'pattern_anomaly_score': 0}
-
-        try:
-            pub_date = datetime.strptime(pub_date_str[:10], '%Y-%m-%d')
-
-            # Собираем даты цитирований
-            citation_dates = []
-            for cite_result in citing_data.values():
-                cite_date_str = cite_result.get('publication_info', {}).get('publication_date', '')
-                if cite_date_str:
-                    try:
-                        cite_date = datetime.strptime(cite_date_str[:10], '%Y-%m-%d')
-                        if cite_date >= pub_date:  # Только будущие цитирования
-                            citation_dates.append(cite_date)
-                    except:
-                        pass
-
-            if not citation_dates:
-                return {'quarterly_peaks': 0, 'seasonal_pattern': False,
-                    'wave_length': 0, 'burst_score': 0,
-                    'temporal_anomaly_score': 0, 'pattern_anomaly_score': 0}
-
-            # Анализ по кварталам
-            quarterly_counts = Counter()
-            for date in citation_dates:
-                quarter = f"{date.year}-Q{(date.month - 1) // 3 + 1}"
-                quarterly_counts[quarter] += 1
-
-            # Пики цитирований (кварталы с >30% от общего)
-            total_citations = len(citation_dates)
-            quarterly_peaks = 0
-            for quarter, count in quarterly_counts.items():
-                if count / total_citations > 0.3:
-                    quarterly_peaks += 1
-
-            # Сезонность (цитирования концентрируются в определенные месяцы)
-            monthly_counts = Counter()
-            for date in citation_dates:
-                monthly_counts[date.month] += 1
-
-            # Проверка на сезонность (более 40% в 2 месяца)
-            sorted_months = sorted(monthly_counts.items(), key=lambda x: x[1], reverse=True)
-            top_2_months_share = sum(count for _, count in sorted_months[:2]) / total_citations
-            seasonal_pattern = top_2_months_share > 0.4
-
-            # Длина "волны" цитирований (в днях)
-            if len(citation_dates) >= 2:
-                citation_dates.sort()
-                time_spread = (citation_dates[-1] - citation_dates[0]).days
-
-                # Нормализованная длина волны (0-1)
-                if time_spread > 0:
-                    wave_length = min(1.0, total_citations / (time_spread / 30.44))  # нормализация к месяцам
-                else:
-                    wave_length = 1.0
-            else:
-                wave_length = 0
-
-            # Оценка "burst" активности
-            if len(citation_dates) >= 3:
-                # Среднее время между цитированиями
-                citation_dates.sort()
-                time_diffs = []
-                for i in range(1, len(citation_dates)):
-                    diff = (citation_dates[i] - citation_dates[i-1]).days
-                    time_diffs.append(diff)
-
-                if time_diffs:
-                    avg_diff = sum(time_diffs) / len(time_diffs)
-                    # Burst score: чем больше отклонение от среднего, тем выше
-                    burst_variance = sum((d - avg_diff) ** 2 for d in time_diffs) / len(time_diffs)
-                    burst_score = min(1.0, burst_variance / (avg_diff ** 2) if avg_diff > 0 else 0)
-                else:
-                    burst_score = 0
-            else:
-                burst_score = 0
-
-            # Временной аномальный скор
-            temporal_anomaly_score = min(100, (
-                quarterly_peaks * 20 +
-                (1 if seasonal_pattern else 0) * 30 +
-                wave_length * 25 +
-                burst_score * 25
-            ))
-
-            # Паттерн аномальный скор
-            pattern_anomaly_score = min(100, (
-                (quarterly_peaks / max(1, len(quarterly_counts))) * 40 +
-                top_2_months_share * 30 +
-                burst_score * 30
-            ))
-
-            return {
-                'quarterly_peaks': quarterly_peaks,
-                'seasonal_pattern': seasonal_pattern,
-                'wave_length': round(wave_length, 3),
-                'burst_score': round(burst_score, 3),
-                'temporal_anomaly_score': temporal_anomaly_score,
-                'pattern_anomaly_score': pattern_anomaly_score
-            }
-
-        except Exception as e:
-            st.warning(f"⚠️ Temporal pattern mining error: {e}")
-            return {'quarterly_peaks': 0, 'seasonal_pattern': False,
-                    'wave_length': 0, 'burst_score': 0,
-                    'temporal_anomaly_score': 0, 'pattern_anomaly_score': 0}
-
-    def _analyze_geographic_clusters(self, result: Dict, citing_data: Dict[str, Dict]) -> Dict:
-        """Анализирует географические кластеры"""
-        if not citing_data:
-            return {'cluster_strength': 0, 'cross_country_bias': 0,
-                    'homophily_index': 0}
-
-        analyzed_countries = set(result.get('countries', []))
-
-        # Собираем страны цитирований
-        citation_countries = []
-        country_counter = Counter()
-
-        for cite_result in citing_data.values():
-            countries = cite_result.get('countries', [])
-            citation_countries.append(set(countries))
-            for country in countries:
-                if country:
-                    country_counter[country] += 1
-
-        if not country_counter:
-            return {'cluster_strength': 0, 'cross_country_bias': 0,
-                    'homophily_index': 0}
-
-        total_citations = len(citation_countries)
-
-        # Сила географического кластера
-        # (доля цитирований из наиболее частой страны)
-        top_country_share = country_counter.most_common(1)[0][1] / total_citations
-        cluster_strength = top_country_share
-
-        # Межстрановой bias (доля цитирований из тех же стран)
-        same_country_citations = 0
-        for countries in citation_countries:
-            if analyzed_countries.intersection(countries):
-                same_country_citations += 1
-
-        cross_country_bias = same_country_citations / total_citations if total_citations > 0 else 0
-
-        # Индекс гомофилии (предпочтение своей группы)
-        # Рассчитываем как доля внутригрупповых связей
-        homophily_index = cross_country_bias
-
-        return {
-            'cluster_strength': round(cluster_strength, 3),
-            'cross_country_bias': round(cross_country_bias, 3),
-            'homophily_index': round(homophily_index, 3)
-        }
-
-    def _analyze_journal_network(self, result: Dict, citing_data: Dict[str, Dict]) -> Dict:
-        """Анализирует сеть журналов"""
-        if not citing_data:
-            return {'citation_circle': False, 'reciprocity_index': 0,
-                    'predatory_flags': 0, 'modularity': 0}
-
-        analyzed_journal = result.get('publication_info', {}).get('journal', '')
-
-        # Собираем журналы цитирований
-        journal_counter = Counter()
-        journal_pairs = set()
-
-        for cite_result in citing_data.values():
-            journal = cite_result.get('publication_info', {}).get('journal', '')
-            if journal:
-                journal_counter[journal] += 1
-
-                # Запоминаем пару журналов
-                if analyzed_journal and journal != analyzed_journal:
-                    journal_pair = tuple(sorted([analyzed_journal, journal]))
-                    journal_pairs.add(journal_pair)
-
-        # Проверка на цитатные круги (упрощенная)
-        # Если есть взаимное цитирование между небольшим набором журналов
-        citation_circle = False
-        if len(journal_counter) <= 3 and sum(journal_counter.values()) > 5:
-            # Мало журналов, много цитирований
-            citation_circle = True
-
-        # Индекс взаимности (сколько журналов имеют обратные связи)
-        # Упрощенный расчет
-        total_journals = len(journal_counter)
-        if total_journals > 0:
-            # Предполагаем, что если журнал цитирует статью,
-            # то возможна обратная связь в других статьях
-            reciprocity_index = min(1.0, total_journals / 10)
-        else:
-            reciprocity_index = 0
-
-        # Флаги хищнических журналов (упрощенно по названию)
-        predatory_keywords = ['international journal', 'advances in', 'research journal',
-                            'journal of', 'annals of', 'archives of', 'european journal']
-
-        predatory_flags = 0
-        for journal in journal_counter:
-            journal_lower = journal.lower()
-            for keyword in predatory_keywords:
-                if keyword in journal_lower:
-                    predatory_flags += 1
-                    break
-
-        # Модулярность сети журналов (упрощенная)
-        # Рассчитываем как 1 - (доля наиболее частого журнала)
-        if journal_counter:
-            top_journal_share = journal_counter.most_common(1)[0][1] / sum(journal_counter.values())
-            modularity = 1 - top_journal_share
-        else:
-            modularity = 0
-
-        return {
-            'citation_circle': citation_circle,
-            'reciprocity_index': round(reciprocity_index, 3),
-            'predatory_flags': predatory_flags,
-            'modularity': round(modularity, 3)
-        }
-
-    def _detect_statistical_anomalies(self, result: Dict, citing_data: Dict[str, Dict]) -> Dict:
-        """Обнаруживает статистические аномалии"""
-        if not citing_data:
-            return {'gini_coefficient': 0, 'z_score': 0,
-                    'power_law_fit': 0, 'outlier_flag': False}
-
-        # Собираем годы цитирований для анализа распределения
-        citation_years = []
-        for cite_result in citing_data.values():
-            year_str = cite_result.get('publication_info', {}).get('year', '')
-            if year_str:
-                try:
-                    year = int(year_str)
-                    citation_years.append(year)
-                except:
-                    pass
-
-        if not citation_years:
-            return {'gini_coefficient': 0, 'z_score': 0,
-                    'power_law_fit': 0, 'outlier_flag': False}
-
-        # Коэффициент Джини для неравномерности распределения
-        citation_years.sort()
-        n = len(citation_years)
-
-        if n > 1:
-            # Распределение по годам
-            year_counts = Counter(citation_years)
-            values = list(year_counts.values())
-            values.sort()
-
-            # Вычисляем коэффициент Джини
-            cum_values = np.cumsum(values).astype(float)
-            gini = (n + 1 - 2 * np.sum(cum_values) / cum_values[-1]) / n
-        else:
-            gini = 0
-
-        # Z-score для выбросов в количестве цитирований
-        pub_year_str = result.get('publication_info', {}).get('year', '')
-        if pub_year_str and len(citation_years) >= 3:
-            try:
-                pub_year = int(pub_year_str)
-                current_year = datetime.now().year
-
-                # Среднее количество цитирований в год
-                year_range = range(pub_year, current_year + 1)
-                citations_per_year = []
-
-                for year in year_range:
-                    count = citation_years.count(year)
-                    citations_per_year.append(count)
-
-                mean_citations = np.mean(citations_per_year)
-                std_citations = np.std(citations_per_year)
-
-                if std_citations > 0:
-                    # Z-score для года с максимальным количеством цитирований
-                    max_year_count = max(citations_per_year)
-                    z_score = (max_year_count - mean_citations) / std_citations
-                else:
-                    z_score = 0
-            except:
-                z_score = 0
-        else:
-            z_score = 0
-
-        # Проверка на power-law распределение (упрощенная)
-        # Если есть несколько лет с большим количеством цитирований
-        if len(citation_years) >= 5:
-            year_counts = Counter(citation_years)
-            sorted_counts = sorted(year_counts.values(), reverse=True)
-
-            # Проверяем, убывает ли экспоненциально
-            if len(sorted_counts) >= 3:
-                ratios = []
-                for i in range(len(sorted_counts) - 1):
-                    if sorted_counts[i+1] > 0:
-                        ratios.append(sorted_counts[i] / sorted_counts[i+1])
-
-                if ratios:
-                    avg_ratio = np.mean(ratios)
-                    # Чем выше среднее соотношение, тем ближе к power-law
-                    power_law_fit = min(1.0, avg_ratio / 3)
-                else:
-                    power_law_fit = 0
-            else:
-                power_law_fit = 0
-        else:
-            power_law_fit = 0
-
-        # Флаг выброса
-        outlier_flag = (z_score > 3) or (gini > 0.7) or (power_law_fit > 0.8)
-
-        return {
-            'gini_coefficient': round(gini, 3),
-            'z_score': round(z_score, 2),
-            'power_law_fit': round(power_law_fit, 3),
-            'outlier_flag': outlier_flag
-        }
-
-    def _calculate_ml_risk_score(self, network_metrics: Dict, temporal_patterns: Dict,
-                                geographic_clusters: Dict, journal_network: Dict,
-                                statistical_anomalies: Dict) -> float:
-        """Рассчитывает ML-based риск скоринг"""
-        score = 0
-
-        # Сетевые метрики (макс 30)
-        score += min(30, network_metrics.get('centrality_score', 0) * 0.3)
-
-        # Временные паттерны (макс 25)
-        score += min(25, temporal_patterns.get('temporal_anomaly_score', 0) * 0.25)
-
-        # Географические кластеры (макс 20)
-        cluster_strength = geographic_clusters.get('cluster_strength', 0)
-        cross_country_bias = geographic_clusters.get('cross_country_bias', 0)
-        score += min(20, (cluster_strength + cross_country_bias) * 10)
-
-        # Сеть журналов (макс 15)
-        if journal_network.get('citation_circle', False):
-            score += 10
-        score += min(5, journal_network.get('predatory_flags', 0) * 2.5)
-
-        # Статистические аномалии (макс 10)
-        if statistical_anomalies.get('outlier_flag', False):
-            score += 10
-
-        return min(100, score)
-
-    def _determine_expert_review_requirement(self, network_metrics: Dict,
-                                           ml_risk_score: float,
-                                           citation_count: int) -> bool:
-        """Определяет, требуется ли экспертное рассмотрение"""
-        if ml_risk_score > 70:
-            return True
-
-        if citation_count > 50 and network_metrics.get('centrality_score', 0) > 60:
-            return True
-
-        if network_metrics.get('cluster_size', 0) > 20:
-            return True
-
-        return False
-
-    def _suggest_audit_focus(self, network_metrics: Dict, temporal_patterns: Dict,
-                           geographic_clusters: Dict, journal_network: Dict) -> str:
-        """Предлагает фокус для аудита"""
-        factors = []
-
-        if network_metrics.get('centrality_score', 0) > 60:
-            factors.append(('Network', network_metrics.get('centrality_score', 0)))
-
-        if temporal_patterns.get('temporal_anomaly_score', 0) > 60:
-            factors.append(('Temporal', temporal_patterns.get('temporal_anomaly_score', 0)))
-
-        if geographic_clusters.get('cluster_strength', 0) > 0.7:
-            factors.append(('Geographic', geographic_clusters.get('cluster_strength', 0) * 100))
-
-        if journal_network.get('citation_circle', False):
-            factors.append(('Journal', 100))
-
-        if factors:
-            # Сортируем по значению и берем топ
-            factors.sort(key=lambda x: x[1], reverse=True)
-            return factors[0][0]
-        else:
-            return 'Normal'
-
-    def _calculate_confidence_level(self, citation_count: int,
-                                  ml_risk_score: float) -> int:
-        """Рассчитывает уровень уверенности в оценке"""
-        if citation_count == 0:
-            return 50
-
-        base_confidence = min(90, citation_count * 2)
-
-        if ml_risk_score > 80:
-            # Высокий риск = выше уверенность в обнаружении
-            confidence = min(95, base_confidence + 10)
-        elif ml_risk_score > 60:
-            confidence = min(90, base_confidence + 5)
-        elif ml_risk_score > 40:
-            confidence = base_confidence
-        elif ml_risk_score > 20:
-            confidence = max(60, base_confidence - 10)
-        else:
-            confidence = max(50, base_confidence - 20)
-
-        return confidence
-
-    def analyze_citing_relationships(self, analyzed_results: Dict[str, Dict],
-                                   citing_results: Dict[str, Dict]) -> List[Dict]:
-        """Анализирует связи анализируемые ↔ цитирующие (30-60 сек)"""
-        relationships = []
-
-        # Строим граф для сетевого анализа
-        citation_graph = self._build_citation_network(analyzed_results, citing_results)
-
-        for analyzed_doi, analyzed_result in analyzed_results.items():
-            if analyzed_result.get('status') != 'success':
-                continue
-
-            citing_dois = analyzed_result.get('citations', [])
-
-            for citing_doi in citing_dois:
-                if citing_doi in citing_results and citing_results[citing_doi].get('status') == 'success':
-                    citing_result = citing_results[citing_doi]
-
-                    # Анализ связи
-                    analysis = self._perform_relationship_analysis(
-                        analyzed_doi, analyzed_result,
-                        citing_doi, citing_result,
-                        citation_graph
-                    )
-
-                    relationships.append(analysis)
-
-        return sorted(relationships, key=lambda x: x['Gift_Citation_Probability'], reverse=True)
-
-    def _perform_relationship_analysis(self, analyzed_doi: str, analyzed_result: Dict,
-                                     citing_doi: str, citing_result: Dict,
-                                     citation_graph: nx.DiGraph) -> Dict:
-        """Анализирует связь между двумя статьями"""
-
-        # 1. Временная разница
-        time_diff = self._calculate_time_difference(analyzed_result, citing_result)
-
-        # 2. Общие авторы
-        common_authors = self._find_common_authors(analyzed_result, citing_result)
-
-        # 3. Общие аффилиации
-        common_affiliations = self._find_common_affiliations(analyzed_result, citing_result)
-
-        # 4. Сетевые метрики
-        network_metrics = self._calculate_relationship_network_metrics(
-            analyzed_doi, citing_doi, citation_graph
-        )
-
-        # 5. Вероятность "подарочного" цитирования
-        gift_probability = self._calculate_gift_citation_probability(
-            time_diff, common_authors, common_affiliations, network_metrics
-        )
-
-        # 6. Роль в сети
-        network_role = self._determine_network_role(analyzed_doi, citing_doi, citation_graph)
-
-        # 7. Временная синхронизация
-        time_sync = self._calculate_time_synchronization(analyzed_result, citing_result, citation_graph)
-
-        # Определение уровня риска
-        relationship_risk, action_required = self._determine_relationship_risk(gift_probability)
-
-        return {
-            'Analyzed_DOI': analyzed_doi,
-            'Citing_DOI': citing_doi,
-            'Time_Difference_Days': time_diff,
-            'Same_Authors': len(common_authors),
-            'Same_Affiliations': len(common_affiliations),
-            'Common_Authors_List': '; '.join(common_authors),
-            'Common_Affiliations_List': '; '.join(common_affiliations),
-            'Connection_Strength': network_metrics.get('connection_strength', 0),
-            'Reciprocity_Flag': network_metrics.get('reciprocity', False),
-            'Temporal_Anomaly': self._determine_temporal_anomaly(time_diff),
-            'Group_Citation_Cluster': network_metrics.get('cluster_id', 'N/A'),
-            'Cluster_Size': network_metrics.get('cluster_size', 1),
-            'Intra_Cluster_Density': round(network_metrics.get('intra_cluster_density', 0), 3),
-            'Citation_Wave_Position': network_metrics.get('wave_position', 'Normal'),
-            'Time_Sync_Score': round(time_sync, 3),
-            'Batch_Citation_Flag': network_metrics.get('batch_citation', False),
-            'Bridge_Role': network_role,
-            'Betweenness_Centrality': round(network_metrics.get('betweenness', 0), 4),
-            'Clustering_Coefficient': round(network_metrics.get('clustering', 0), 3),
-            'Gift_Citation_Probability': round(gift_probability, 1),
-            'Citation_Circle_Member': network_metrics.get('citation_circle', False),
-            'Artificial_Boost_Flag': gift_probability > 70,
-            'Journal_Pair_Frequency': network_metrics.get('journal_pair_freq', 1),
-            'Country_Pair': self._create_country_pair(analyzed_result, citing_result),
-            'Aff_Pair_Strength': len(common_affiliations),
-            'Relationship_Risk': relationship_risk,
-            'Action_Required': action_required,
-            'Notes': self._generate_relationship_notes(
-                common_authors, common_affiliations, time_diff, gift_probability
-            )
-        }
-
-    def _calculate_time_difference(self, analyzed_result: Dict, citing_result: Dict) -> Optional[int]:
-        """Вычисляет временную разницу в днях"""
-        analyzed_date_str = analyzed_result.get('publication_info', {}).get('publication_date', '')
-        citing_date_str = citing_result.get('publication_info', {}).get('publication_date', '')
-
-        if not analyzed_date_str or not citing_date_str:
-            return None
-
-        try:
-            analyzed_date = datetime.strptime(analyzed_date_str[:10], '%Y-%m-%d')
-            citing_date = datetime.strptime(citing_date_str[:10], '%Y-%m-%d')
-
-            return (citing_date - analyzed_date).days
-        except:
-            return None
-
-    def _find_common_authors(self, analyzed_result: Dict, citing_result: Dict) -> Set[str]:
-        """Находит общих авторов"""
-        analyzed_authors = {author['name'] for author in analyzed_result.get('authors', [])}
-        citing_authors = {author['name'] for author in citing_result.get('authors', [])}
-
-        return analyzed_authors.intersection(citing_authors)
-
-    def _find_common_affiliations(self, analyzed_result: Dict, citing_result: Dict) -> Set[str]:
-        """Находит общие аффилиации"""
-        analyzed_affiliations = set()
-        for author in analyzed_result.get('authors', []):
-            analyzed_affiliations.update(author.get('affiliation', []))
-
-        citing_affiliations = set()
-        for author in citing_result.get('authors', []):
-            citing_affiliations.update(author.get('affiliation', []))
-
-        return analyzed_affiliations.intersection(citing_affiliations)
-
-    def _calculate_relationship_network_metrics(self, analyzed_doi: str, citing_doi: str,
-                                              citation_graph: nx.DiGraph) -> Dict:
-        """Вычисляет сетевые метрики для связи"""
-        metrics = {
-            'connection_strength': 1,
-            'reciprocity': False,
-            'cluster_id': 'N/A',
-            'cluster_size': 1,
-            'intra_cluster_density': 0,
-            'wave_position': 'Normal',
-            'batch_citation': False,
-            'betweenness': 0,
-            'clustering': 0,
-            'citation_circle': False,
-            'journal_pair_freq': 1
-        }
-
-        if analyzed_doi not in citation_graph or citing_doi not in citation_graph:
-            return metrics
-
-        try:
-            # Проверка взаимности
-            if citation_graph.has_edge(analyzed_doi, citing_doi):
-                metrics['reciprocity'] = True
-
-            # Сила связи (на основе центральностей)
-            try:
-                betweenness = nx.betweenness_centrality(citation_graph, normalized=True)
-                metrics['betweenness'] = betweenness.get(analyzed_doi, 0) + betweenness.get(citing_doi, 0)
-
-                # Нормализованная сила связи
-                metrics['connection_strength'] = min(10, int(metrics['betweenness'] * 20 + 1))
-            except:
-                pass
-
-            # Коэффициент кластеризации
-            try:
-                undirected_graph = citation_graph.to_undirected()
-                clustering = nx.clustering(undirected_graph)
-                metrics['clustering'] = (clustering.get(analyzed_doi, 0) + clustering.get(citing_doi, 0)) / 2
-            except:
-                pass
-
-            # Анализ сообществ
-            try:
-                communities = list(nx.algorithms.community.greedy_modularity_communities(
-                    citation_graph.to_undirected()))
-
-                # Находим сообщество
-                for i, community in enumerate(communities):
-                    if analyzed_doi in community and citing_doi in community:
-                        metrics['cluster_id'] = f"CLUSTER_{i:03d}"
-                        metrics['cluster_size'] = len(community)
-
-                        # Плотность внутри сообщества
-                        subgraph = citation_graph.subgraph(community)
-                        possible_edges = len(community) * (len(community) - 1)
-                        if possible_edges > 0:
-                            metrics['intra_cluster_density'] = subgraph.number_of_edges() / possible_edges
-
-                        break
-            except:
-                pass
-
-            # Проверка на batch citation
-            # (много цитирований в короткий период)
-            analyzed_neighbors = list(citation_graph.predecessors(analyzed_doi))
-            if len(analyzed_neighbors) > 10:
-                # Проверяем, есть ли группы цитирований с близкими датами
-                metrics['batch_citation'] = True
-
-            # Проверка на цитатные круги
-            try:
-                # Ищем короткие циклы
-                for path in nx.all_simple_paths(citation_graph, citing_doi, analyzed_doi, cutoff=3):
-                    if len(path) <= 3:
-                        metrics['citation_circle'] = True
-                        break
-            except:
-                pass
-
-        except Exception as e:
-            st.warning(f"⚠️ Network metrics error for {analyzed_doi}-{citing_doi}: {e}")
-
-        return metrics
-
-    def _calculate_gift_citation_probability(self, time_diff: Optional[int],
-                                           common_authors: Set[str],
-                                           common_affiliations: Set[str],
-                                           network_metrics: Dict) -> float:
-        """Рассчитывает вероятность "подарочного" цитирования"""
-        probability = 0
-
-        # Общие авторы (сильный сигнал)
-        if common_authors:
-            probability += min(50, len(common_authors) * 20)
-
-        # Общие аффилиации (средний сигнал)
-        if common_affiliations:
-            probability += min(40, len(common_affiliations) * 15)
-
-        # Временная близость (слабый сигнал)
-        if time_diff is not None:
-            if abs(time_diff) < 30:  # Меньше месяца
-                probability += 20
-            elif abs(time_diff) < 90:  # Меньше 3 месяцев
-                probability += 10
-
-        # Сетевые метрики
-        if network_metrics.get('reciprocity', False):
-            probability += 15
-
-        if network_metrics.get('citation_circle', False):
-            probability += 20
-
-        if network_metrics.get('batch_citation', False):
-            probability += 10
-
-        # Нормализация
-        return min(100, probability)
-
-    def _determine_network_role(self, analyzed_doi: str, citing_doi: str,
-                               citation_graph: nx.DiGraph) -> str:
-        """Определяет роль в сети"""
-        if analyzed_doi not in citation_graph or citing_doi not in citation_graph:
-            return "Normal"
-
-        try:
-            # Степени вершин
-            analyzed_in_degree = citation_graph.in_degree(analyzed_doi)
-            analyzed_out_degree = citation_graph.out_degree(analyzed_doi)
-            citing_in_degree = citation_graph.in_degree(citing_doi)
-            citing_out_degree = citation_graph.out_degree(citing_doi)
-
-            # Определяем роль на основе степеней
-            if analyzed_in_degree > 10 or citing_in_degree > 10:
-                return "Hub"
-            elif analyzed_out_degree > 5 or citing_out_degree > 5:
-                return "Connector"
-            else:
-                return "Normal"
-
-        except:
-            return "Normal"
-
-    def _calculate_time_synchronization(self, analyzed_result: Dict, citing_result: Dict,
-                                      citation_graph: nx.DiGraph) -> float:
-        """Рассчитывает уровень временной синхронизации"""
-        # Упрощенный расчет
-        time_diff = self._calculate_time_difference(analyzed_result, citing_result)
-
-        if time_diff is None:
-            return 0.5
-
-        # Нормализация
-        if abs(time_diff) < 30:
-            return 0.8  # Высокая синхронизация
-        elif abs(time_diff) < 90:
-            return 0.6  # Средняя синхронизация
-        elif abs(time_diff) < 365:
-            return 0.4  # Низкая синхронизация
-        else:
-            return 0.2  # Очень низкая синхронизация
-
-    def _determine_temporal_anomaly(self, time_diff: Optional[int]) -> str:
-        """Определяет временную аномалию"""
-        if time_diff is None:
-            return "Unknown"
-
-        if time_diff < 0:
-            return "Future citation"
-        elif time_diff < 30:
-            return "Rapid citation"
-        elif time_diff < 90:
-            return "Prompt citation"
-        else:
-            return "Normal"
-
-    def _create_country_pair(self, analyzed_result: Dict, citing_result: Dict) -> str:
-        """Создает строку пары стран"""
-        analyzed_countries = analyzed_result.get('countries', [''])[:1]
-        citing_countries = citing_result.get('countries', [''])[:1]
-
-        analyzed_country = analyzed_countries[0] if analyzed_countries else 'Unknown'
-        citing_country = citing_countries[0] if citing_countries else 'Unknown'
-
-        return f"{analyzed_country}→{citing_country}"
-
-    def _determine_relationship_risk(self, gift_probability: float) -> Tuple[str, str]:
-        """Определяет уровень риска связи"""
-        if gift_probability > 80:
-            return "CRITICAL", "IMMEDIATE VALIDATION REQUIRED"
-        elif gift_probability > 60:
-            return "HIGH", "DETAILED REVIEW REQUIRED"
-        elif gift_probability > 40:
-            return "MEDIUM", "MONITOR AND REVIEW"
-        elif gift_probability > 20:
-            return "LOW", "MINOR REVIEW SUGGESTED"
-        else:
-            return "MINIMAL", "ETHICALLY ACCEPTABLE"
-
-    def _generate_relationship_notes(self, common_authors: Set[str],
-                                   common_affiliations: Set[str],
-                                   time_diff: Optional[int],
-                                   gift_probability: float) -> str:
-        """Генерирует заметки о связи"""
-        notes = []
-
-        if common_authors:
-            notes.append(f"Common authors: {len(common_authors)}")
-
-        if common_affiliations:
-            notes.append(f"Common affiliations: {len(common_affiliations)}")
-
-        if time_diff is not None:
-            if time_diff < 0:
-                notes.append(f"Future citation: {abs(time_diff)} days before")
-            else:
-                notes.append(f"Time gap: {time_diff} days")
-
-        notes.append(f"Gift citation probability: {gift_probability:.1f}%")
-
-        return "; ".join(notes)
-
-# ============================================================================
-# 🔬 КЛАСС АНАЛИЗА FRONTIERS & HOT TOPICS (НОВЫЙ)
-# ============================================================================
-
-class FrontiersHotTopicsAnalyzer:
-    def __init__(self, cache_manager: SmartCacheManager, data_processor: DataProcessor):
-        self.cache = cache_manager
-        self.processor = data_processor
-        
-        # Конфигурация
-        self.config = Config.FRONTIERS_ANALYSIS_CONFIG
-        self.current_year = datetime.now().year
-        
-        # Кэш для результатов
-        self.analysis_cache = {
-            'title_terms': {},
-            'topic_growth': {},
-            'term_topic_convergence': {},
-            'citation_bursts': {},
-            'early_adopters': {},
-            'frontier_candidates': {},
-            'temporal_hotspots': {},
-            'predictive_horizons': {}
-        }
-
-    def analyze_title_terms(self, analyzed_results: Dict[str, Dict], 
-                          ref_results: Dict[str, Dict] = None,
-                          citing_results: Dict[str, Dict] = None) -> List[Dict]:
-        """Анализ терминов в заголовках статей"""
-        cache_key = 'title_terms_analysis'
-        
-        # Проверка кэша
-        cached = self.cache.get_frontiers_analysis('title_terms', cache_key)
-        if cached is not None:
-            return cached
-        
-        all_titles = []
-        title_years = {}
-        
-        # Собираем заголовки и годы из всех источников
-        for doi, result in analyzed_results.items():
-            if result.get('status') == 'success':
-                title = result.get('publication_info', {}).get('title', '')
-                year = result.get('publication_info', {}).get('year', '')
-                if title and year:
-                    all_titles.append(title)
-                    title_years[title] = year
-        
-        if ref_results:
-            for doi, result in ref_results.items():
-                if result.get('status') == 'success':
-                    title = result.get('publication_info', {}).get('title', '')
-                    year = result.get('publication_info', {}).get('year', '')
-                    if title and year:
-                        all_titles.append(title)
-                        title_years[title] = year
-        
-        if citing_results:
-            for doi, result in citing_results.items():
-                if result.get('status') == 'success':
-                    title = result.get('publication_info', {}).get('title', '')
-                    year = result.get('publication_info', {}).get('year', '')
-                    if title and year:
-                        all_titles.append(title)
-                        title_years[title] = year
-        
-        # Извлекаем N-gram (1-3 слова)
-        ngrams_counter = Counter()
-        ngram_years = defaultdict(list)
-        
-        for title in all_titles:
-            words = title.lower().split()
-            
-            # 1-gram
-            for i in range(len(words)):
-                term = words[i]
-                if len(term) > 3:  # Исключаем короткие слова
-                    ngrams_counter[term] += 1
-                    ngram_years[term].append(title_years.get(title, ''))
-            
-            # 2-gram
-            for i in range(len(words) - 1):
-                term = f"{words[i]} {words[i+1]}"
-                ngrams_counter[term] += 1
-                ngram_years[term].append(title_years.get(title, ''))
-            
-            # 3-gram
-            for i in range(len(words) - 2):
-                term = f"{words[i]} {words[i+1]} {words[i+2]}"
-                ngrams_counter[term] += 1
-                ngram_years[term].append(title_years.get(title, ''))
-        
-        # Фильтруем по минимальной частоте
-        filtered_ngrams = {k: v for k, v in ngrams_counter.items() 
-                          if v >= self.config['min_term_frequency']}
-        
-        # Анализ временной динамики
-        results = []
-        for term, count in filtered_ngrams.items():
-            years = [int(y) for y in ngram_years[term] if y and y.isdigit()]
-            
-            if len(years) < 3:  # Нужно минимум 3 года для анализа тренда
-                continue
-            
-            years.sort()
-            first_year = min(years)
-            last_year = max(years)
-            term_lifetime = last_year - first_year + 1
-            
-            # Распределение по годам
-            year_counts = Counter(years)
-            
-            # Расчет burst score
-            recent_years = [y for y in years if y >= self.current_year - 3]
-            burst_score = 0
-            if recent_years:
-                recent_count = len(recent_years)
-                avg_per_year = count / term_lifetime
-                recent_avg = recent_count / 3
-                burst_score = min(100, (recent_avg / max(1, avg_per_year)) * 50)
-            
-            # Определение тренда
-            if term_lifetime >= 3:
-                first_half = [y for y in years if y < (first_year + term_lifetime // 2)]
-                second_half = [y for y in years if y >= (first_year + term_lifetime // 2)]
-                
-                first_count = len(first_half)
-                second_count = len(second_half)
-                
-                if second_count > first_count * 1.5:
-                    trend = "Rising"
-                elif second_count < first_count * 0.7:
-                    trend = "Declining"
-                else:
-                    trend = "Stable"
-            else:
-                trend = "New"
-            
-            results.append({
-                'Term': term,
-                'Total_Occurrences': count,
-                'First_Year_Appeared': first_year,
-                'Last_Year_Appeared': last_year,
-                'Term_Lifetime': term_lifetime,
-                'Avg_Per_Year': round(count / term_lifetime, 2),
-                'Recent_3_Years_Count': len(recent_years),
-                'Burst_Score': round(burst_score, 1),
-                'Current_Trend': trend,
-                'Peak_Year': max(year_counts.items(), key=lambda x: x[1])[0] if year_counts else first_year
-            })
-        
-        # Сортировка по Burst Score
-        results.sort(key=lambda x: x['Burst_Score'], reverse=True)
-        
-        # Сохраняем в кэш
-        self.cache.set_frontiers_analysis('title_terms', cache_key, results)
-        
-        return results[:self.config['hot_topics_limit']]
-
-    def analyze_topic_growth(self, analyzed_results: Dict[str, Dict]) -> List[Dict]:
-        """Анализ роста предметных областей (на основе OpenAlex и заголовков)"""
-        cache_key = 'topic_growth_analysis'
-        
-        # Проверка кэша
-        cached = self.cache.get_frontiers_analysis('topic_growth', cache_key)
-        if cached is not None:
-            return cached
-        
-        # Для простоты используем заголовки для категоризации
-        # В реальной реализации нужно интегрировать с OpenAlex API
-        topic_keywords = {
-            'AI_ML': ['artificial intelligence', 'machine learning', 'neural network', 'deep learning'],
-            'Data_Science': ['data science', 'big data', 'data mining', 'analytics'],
-            'Quantum': ['quantum', 'qubit', 'quantum computing', 'quantum mechanics'],
-            'Biotech': ['biotechnology', 'genome', 'crispr', 'gene editing'],
-            'Climate': ['climate change', 'global warming', 'carbon capture', 'renewable energy'],
-            'Healthcare': ['healthcare', 'medical', 'clinical', 'patient'],
-            'Cybersecurity': ['cybersecurity', 'encryption', 'blockchain', 'privacy'],
-            'Materials': ['material science', 'nanomaterial', 'graphene', 'composite']
-        }
-        
-        topic_counts = defaultdict(lambda: defaultdict(int))
-        
-        # Анализируем заголовки
-        for doi, result in analyzed_results.items():
-            if result.get('status') == 'success':
-                title = result.get('publication_info', {}).get('title', '').lower()
-                year = result.get('publication_info', {}).get('year', '')
-                
-                if title and year and year.isdigit():
-                    year_int = int(year)
                     
-                    # Определяем тему по ключевым словам
-                    for topic, keywords in topic_keywords.items():
-                        for keyword in keywords:
-                            if keyword in title:
-                                topic_counts[topic][year_int] += 1
-                                break
-        
-        results = []
-        for topic, year_data in topic_counts.items():
-            if sum(year_data.values()) < self.config['min_topic_publications']:
-                continue
-            
-            years = list(year_data.keys())
-            years.sort()
-            
-            # Расчет роста за последние 3 года
-            recent_years = [y for y in years if y >= self.current_year - 3]
-            if len(recent_years) < 2:
-                continue
-            
-            recent_counts = [year_data[y] for y in recent_years]
-            total_recent = sum(recent_counts)
-            
-            # Расчет общего роста
-            all_counts = [year_data[y] for y in years]
-            total_all = sum(all_counts)
-            
-            # Процентный рост
-            if len(years) >= 2:
-                first_year = min(years)
-                last_year = max(years)
+                if lemma not in lemma_dict:
+                    lemma_dict[lemma] = {
+                        'lemma': lemma,
+                        'type': word_info['type'],
+                        'variants': Counter(),
+                        'count': 0
+                    }
                 
-                first_count = year_data.get(first_year, 0)
-                last_count = year_data.get(last_year, 0)
-                
-                if first_count > 0:
-                    growth_rate = ((last_count - first_count) / first_count) * 100
-                else:
-                    growth_rate = 100 if last_count > 0 else 0
-            else:
-                growth_rate = 0
+                lemma_dict[lemma]['variants'][original] += 1
+                lemma_dict[lemma]['count'] += 1
             
-            # Momentum score
-            momentum = min(100, (total_recent / max(1, total_all)) * 100 + growth_rate * 0.5)
+            return lemma_dict
+        
+        analyzed_aggregated = aggregate_by_lemma(analyzed_words)
+        reference_aggregated = aggregate_by_lemma(reference_words)
+        citing_aggregated = aggregate_by_lemma(citing_words)
+        
+        # Merge similar lemmas (e.g., "composite" and "composites")
+        def merge_similar_lemmas(lemma_dict):
+            # Create list for removal after merging
+            to_remove = set()
             
-            results.append({
-                'Topic_Name': topic.replace('_', ' '),
-                'Total_Publications': total_all,
-                'Publications_Last_3_Years': total_recent,
-                'Growth_3_Years_Percent': round(growth_rate, 1),
-                'First_Year': min(years) if years else 0,
-                'Last_Year': max(years) if years else 0,
-                'Momentum_Score': round(momentum, 1),
-                'Recent_Trend': 'Rising' if growth_rate > 20 else 'Stable' if growth_rate > -10 else 'Declining'
-            })
-        
-        results.sort(key=lambda x: x['Momentum_Score'], reverse=True)
-        
-        # Сохраняем в кэш
-        self.cache.set_frontiers_analysis('topic_growth', cache_key, results)
-        
-        return results
-
-    def analyze_term_topic_convergence(self, term_results: List[Dict], 
-                                     topic_results: List[Dict]) -> List[Dict]:
-        """Анализ сходимости терминов и тем"""
-        cache_key = 'term_topic_convergence'
-        
-        # Проверка кэша
-        cached = self.cache.get_frontiers_analysis('term_topic_convergence', cache_key)
-        if cached is not None:
-            return cached
-        
-        # Берем топ термины и темы
-        top_terms = [t for t in term_results if t['Burst_Score'] > self.config['burst_score_threshold']]
-        top_topics = topic_results[:20]  # Берем топ 20 тем
-        
-        results = []
-        
-        # Упрощенный анализ сходимости
-        for term_info in top_terms:
-            term = term_info['Term'].lower()
-            
-            for topic_info in top_topics:
-                topic_name = topic_info['Topic_Name'].lower()
-                
-                # Проверяем, содержит ли тема термин или наоборот
-                if term in topic_name or any(word in topic_name for word in term.split()):
-                    convergence_strength = min(100, term_info['Burst_Score'] * 0.5 + topic_info['Momentum_Score'] * 0.5)
+            lemmas = list(lemma_dict.keys())
+            for i in range(len(lemmas)):
+                lemma1 = lemmas[i]
+                if lemma1 in to_remove:
+                    continue
                     
-                    results.append({
-                        'Term': term_info['Term'],
-                        'Topic': topic_info['Topic_Name'],
-                        'Term_Burst_Score': term_info['Burst_Score'],
-                        'Topic_Momentum_Score': topic_info['Momentum_Score'],
-                        'Convergence_Strength': round(convergence_strength, 1),
-                        'Term_First_Year': term_info['First_Year_Appeared'],
-                        'Topic_First_Year': topic_info['First_Year'],
-                        'Convergence_Age': self.current_year - max(term_info['First_Year_Appeared'], topic_info['First_Year']),
-                        'Synergy_Level': 'High' if convergence_strength > 70 else 'Medium' if convergence_strength > 40 else 'Low'
-                    })
-        
-        results.sort(key=lambda x: x['Convergence_Strength'], reverse=True)
-        
-        # Сохраняем в кэш
-        self.cache.set_frontiers_analysis('term_topic_convergence', cache_key, results)
-        
-        return results[:50]
-
-    def analyze_citation_bursts(self, analyzed_results: Dict[str, Dict]) -> List[Dict]:
-        """Анализ всплесков цитирования"""
-        cache_key = 'citation_bursts_analysis'
-        
-        # Проверка кэша
-        cached = self.cache.get_frontiers_analysis('citation_bursts', cache_key)
-        if cached is not None:
-            return cached
-        
-        results = []
-        
-        for doi, result in analyzed_results.items():
-            if result.get('status') == 'success':
-                pub_info = result.get('publication_info', {})
-                title = pub_info.get('title', '')
-                year = pub_info.get('year', '')
-                citation_count = pub_info.get('citation_count_crossref', 0)
-                
-                if title and year and year.isdigit():
-                    year_int = int(year)
-                    age = max(1, self.current_year - year_int)
-                    
-                    # Citation velocity
-                    citation_velocity = citation_count / age
-                    
-                    # Определяем burst
-                    if citation_velocity > 10:  # Высокая скорость цитирования
-                        # Извлекаем ключевые термины из заголовка
-                        title_words = [w.lower() for w in title.split() if len(w) > 3]
-                        key_terms = '; '.join(title_words[:5])
-                        
-                        results.append({
-                            'DOI': doi,
-                            'Title_Short': title[:80] + ('...' if len(title) > 80 else ''),
-                            'Publication_Year': year_int,
-                            'Citation_Count': citation_count,
-                            'Citation_Velocity': round(citation_velocity, 2),
-                            'Burst_Intensity': min(100, citation_velocity * 5),
-                            'Key_Terms': key_terms,
-                            'Age_Years': age,
-                            'Annual_Citations': round(citation_count / age, 1),
-                            'Burst_Status': 'High' if citation_velocity > 20 else 'Medium' if citation_velocity > 10 else 'Low'
-                        })
-        
-        results.sort(key=lambda x: x['Citation_Velocity'], reverse=True)
-        
-        # Сохраняем в кэш
-        self.cache.set_frontiers_analysis('citation_bursts', cache_key, results)
-        
-        return results[:50]
-
-    def analyze_early_adopters(self, analyzed_results: Dict[str, Dict],
-                             ref_results: Dict[str, Dict] = None,
-                             citing_results: Dict[str, Dict] = None) -> List[Dict]:
-        """Анализ ранних последователей (авторов, публикующихся в новых темах)"""
-        cache_key = 'early_adopters_analysis'
-        
-        # Проверка кэша
-        cached = self.cache.get_frontiers_analysis('early_adopters', cache_key)
-        if cached is not None:
-            return cached
-        
-        author_topics = defaultdict(set)
-        author_years = defaultdict(list)
-        
-        # Собираем данные по авторам
-        all_results = [analyzed_results]
-        if ref_results:
-            all_results.append(ref_results)
-        if citing_results:
-            all_results.append(citing_results)
-        
-        for results_dict in all_results:
-            for doi, result in results_dict.items():
-                if result.get('status') == 'success':
-                    title = result.get('publication_info', {}).get('title', '').lower()
-                    year = result.get('publication_info', {}).get('year', '')
-                    authors = result.get('authors', [])
-                    
-                    if title and year and year.isdigit() and authors:
-                        year_int = int(year)
-                        
-                        # Определяем тему по ключевым словам в заголовке
-                        detected_topics = []
-                        ai_keywords = ['ai', 'artificial intelligence', 'machine learning', 'deep learning']
-                        quantum_keywords = ['quantum', 'qubit', 'superposition']
-                        biotech_keywords = ['crispr', 'gene editing', 'genome']
-                        
-                        for keyword in ai_keywords:
-                            if keyword in title:
-                                detected_topics.append('AI/ML')
-                                break
-                        
-                        for keyword in quantum_keywords:
-                            if keyword in title:
-                                detected_topics.append('Quantum')
-                                break
-                        
-                        for keyword in biotech_keywords:
-                            if keyword in title:
-                                detected_topics.append('Biotech')
-                                break
-                        
-                        if not detected_topics:
-                            detected_topics.append('Other')
-                        
-                        # Добавляем информацию об авторах
-                        for author in authors:
-                            author_name = author.get('name', '')
-                            if author_name:
-                                for topic in detected_topics:
-                                    author_topics[author_name].add(topic)
-                                author_years[author_name].append(year_int)
-        
-        results = []
-        for author, topics in author_topics.items():
-            if len(topics) >= 2:  # Авторы, работающие в нескольких темах
-                years = author_years[author]
-                if years:
-                    avg_year = sum(years) / len(years)
-                    time_to_adopt = self.current_year - int(avg_year)
-                    
-                    # Новизна тем
-                    topic_novelty = len([t for t in topics if t in ['AI/ML', 'Quantum', 'Biotech']])
-                    
-                    results.append({
-                        'Author_Name': author,
-                        'Topics_Count': len(topics),
-                        'Topics_List': '; '.join(sorted(topics)),
-                        'Avg_Publication_Year': round(avg_year, 1),
-                        'Time_to_Adopt_Avg': round(time_to_adopt, 1),
-                        'Topic_Novelty_Score': min(100, topic_novelty * 25),
-                        'Interdisciplinarity': 'High' if len(topics) >= 3 else 'Medium' if len(topics) == 2 else 'Low',
-                        'Early_Adopter_Score': max(0, 100 - time_to_adopt * 5 + topic_novelty * 10)
-                    })
-        
-        results.sort(key=lambda x: x['Early_Adopter_Score'], reverse=True)
-        
-        # Сохраняем в кэш
-        self.cache.set_frontiers_analysis('early_adopters', cache_key, results)
-        
-        return results[:50]
-
-    def analyze_frontier_candidates(self, term_results: List[Dict],
-                                  topic_results: List[Dict],
-                                  convergence_results: List[Dict]) -> List[Dict]:
-        """Сводный анализ кандидатов в research frontiers"""
-        cache_key = 'frontier_candidates'
-        
-        # Проверка кэша
-        cached = self.cache.get_frontiers_analysis('frontier_candidates', cache_key)
-        if cached is not None:
-            return cached
-        
-        candidates = []
-        
-        # 1. Кандидаты из терминов с высоким burst score
-        for term in term_results[:30]:
-            novelty = min(100, (self.current_year - term['First_Year_Appeared']) * 10)
-            growth = term['Burst_Score']
-            composite_score = (novelty * 0.3 + growth * 0.7)
-            
-            candidates.append({
-                'Candidate_Name': term['Term'],
-                'Type': 'Term',
-                'Novelty_Score': round(novelty, 1),
-                'Growth_Score': round(growth, 1),
-                'Network_Score': 50,  # По умолчанию
-                'Attention_Score': term['Total_Occurrences'] / 10,
-                'Composite_Frontier_Score': round(composite_score, 1),
-                'First_Year': term['First_Year_Appeared'],
-                'Current_Trend': term['Current_Trend'],
-                'Confidence_Level': 'High' if composite_score > 70 else 'Medium' if composite_score > 40 else 'Low',
-                'Suggested_Actions': 'Investigate' if composite_score > 70 else 'Monitor' if composite_score > 40 else 'Watch'
-            })
-        
-        # 2. Кандидаты из тем с высоким momentum
-        for topic in topic_results[:20]:
-            candidates.append({
-                'Candidate_Name': topic['Topic_Name'],
-                'Type': 'Topic',
-                'Novelty_Score': min(100, (self.current_year - topic['First_Year']) * 8),
-                'Growth_Score': topic['Momentum_Score'],
-                'Network_Score': 60,
-                'Attention_Score': topic['Total_Publications'] / 5,
-                'Composite_Frontier_Score': round(topic['Momentum_Score'] * 0.8 + min(100, (self.current_year - topic['First_Year']) * 8) * 0.2, 1),
-                'First_Year': topic['First_Year'],
-                'Current_Trend': topic['Recent_Trend'],
-                'Confidence_Level': 'High' if topic['Momentum_Score'] > 70 else 'Medium' if topic['Momentum_Score'] > 40 else 'Low',
-                'Suggested_Actions': 'Investigate' if topic['Momentum_Score'] > 70 else 'Monitor'
-            })
-        
-        # 3. Кандидаты из сходимости
-        for convergence in convergence_results[:20]:
-            candidates.append({
-                'Candidate_Name': f"{convergence['Term']} + {convergence['Topic']}",
-                'Type': 'Convergence',
-                'Novelty_Score': min(100, 100 - convergence['Convergence_Age'] * 5),
-                'Growth_Score': (convergence['Term_Burst_Score'] + convergence['Topic_Momentum_Score']) / 2,
-                'Network_Score': 80,  # Высокий score для сходимости
-                'Attention_Score': convergence['Convergence_Strength'],
-                'Composite_Frontier_Score': round(convergence['Convergence_Strength'], 1),
-                'First_Year': max(convergence['Term_First_Year'], convergence['Topic_First_Year']),
-                'Current_Trend': 'Rising',
-                'Confidence_Level': convergence['Synergy_Level'],
-                'Suggested_Actions': 'Validate' if convergence['Convergence_Strength'] > 70 else 'Investigate' if convergence['Convergence_Strength'] > 40 else 'Monitor'
-            })
-        
-        # Сортировка по Composite Frontier Score
-        candidates.sort(key=lambda x: x['Composite_Frontier_Score'], reverse=True)
-        
-        # Сохраняем в кэш
-        self.cache.set_frontiers_analysis('frontier_candidates', cache_key, candidates)
-        
-        return candidates[:50]
-
-    def analyze_temporal_hotspots(self, analyzed_results: Dict[str, Dict]) -> List[Dict]:
-        """Анализ временных горячих точек"""
-        cache_key = 'temporal_hotspots'
-        
-        # Проверка кэша
-        cached = self.cache.get_frontiers_analysis('temporal_hotspots', cache_key)
-        if cached is not None:
-            return cached
-        
-        # Группируем по годам и кварталам
-        year_quarter_data = defaultdict(lambda: defaultdict(list))
-        
-        for doi, result in analyzed_results.items():
-            if result.get('status') == 'success':
-                title = result.get('publication_info', {}).get('title', '').lower()
-                pub_date = result.get('publication_info', {}).get('publication_date', '')
-                
-                if title and pub_date:
-                    try:
-                        # Парсим дату
-                        if '-' in pub_date:
-                            parts = pub_date.split('-')
-                            year = int(parts[0])
-                            if len(parts) >= 2:
-                                month = int(parts[1])
-                                quarter = (month - 1) // 3 + 1
-                                
-                                year_quarter_data[year][quarter].append(title)
-                    except:
+                for j in range(i+1, len(lemmas)):
+                    lemma2 = lemmas[j]
+                    if lemma2 in to_remove:
                         continue
-        
-        results = []
-        for year in sorted(year_quarter_data.keys(), reverse=True)[:5]:  # Последние 5 лет
-            for quarter in range(1, 5):
-                titles = year_quarter_data[year].get(quarter, [])
-                
-                if titles:
-                    # Анализируем частые термины в этом периоде
-                    term_counter = Counter()
-                    for title in titles:
-                        words = title.split()
-                        # 2-gram анализ
-                        for i in range(len(words) - 1):
-                            term = f"{words[i]} {words[i+1]}"
-                            if len(term) > 6:
-                                term_counter[term] += 1
                     
-                    # Берем топ 3 термина
-                    top_terms = [term for term, _ in term_counter.most_common(3)]
-                    
-                    # Определяем интенсивность
-                    intensity = len(titles)
-                    intensity_level = 'High' if intensity > 10 else 'Medium' if intensity > 5 else 'Low'
-                    
-                    results.append({
-                        'Year': year,
-                        'Quarter': f'Q{quarter}',
-                        'Hot_Topic_Cluster': f"{year}-Q{quarter} Cluster",
-                        'Trigger_Terms': '; '.join(top_terms),
-                        'Publication_Count': intensity,
-                        'Intensity_Level': intensity_level,
-                        'Key_Finding': f"Cluster of {intensity} publications with focus on {top_terms[0] if top_terms else 'various topics'}",
-                        'Time_Period': f"{year} Q{quarter}"
-                    })
-        
-        # Сохраняем в кэш
-        self.cache.set_frontiers_analysis('temporal_hotspots', cache_key, results)
-        
-        return results
-
-    def analyze_predictive_horizons(self, frontier_candidates: List[Dict]) -> List[Dict]:
-        """Прогноз временных горизонтов для emerging topics"""
-        cache_key = 'predictive_horizons'
-        
-        # Проверка кэша
-        cached = self.cache.get_frontiers_analysis('predictive_horizons', cache_key)
-        if cached is not None:
-            return cached
-        
-        results = []
-        
-        for candidate in frontier_candidates[:20]:
-            composite_score = candidate['Composite_Frontier_Score']
-            first_year = candidate.get('First_Year', self.current_year - 3)
-            topic_age = self.current_year - first_year
+                    # Check if lemmas are similar
+                    if self._are_similar_lemmas(lemma1, lemma2):
+                        # Merge into lemma1
+                        lemma_dict[lemma1]['count'] += lemma_dict[lemma2]['count']
+                        for variant, count in lemma_dict[lemma2]['variants'].items():
+                            lemma_dict[lemma1]['variants'][variant] += count
+                        
+                        to_remove.add(lemma2)
             
-            # Прогноз времени до mainstream
-            if composite_score > 80:
-                time_to_mainstream = 6  # месяцев
-                stage = 'Emerging'
-                impact = 'High'
-            elif composite_score > 60:
-                time_to_mainstream = 12  # месяцев
-                stage = 'Growing'
-                impact = 'Medium'
-            elif composite_score > 40:
-                time_to_mainstream = 24  # месяцев
-                stage = 'Early Growth'
-                impact = 'Medium'
+            # Remove merged lemmas
+            for lemma in to_remove:
+                if lemma in lemma_dict:
+                    del lemma_dict[lemma]
+            
+            return lemma_dict
+        
+        analyzed_aggregated = merge_similar_lemmas(analyzed_aggregated)
+        reference_aggregated = merge_similar_lemmas(reference_aggregated)
+        citing_aggregated = merge_similar_lemmas(citing_aggregated)
+        
+        # Get top 100 for each type
+        def get_top_100(aggregated_dict):
+            items = list(aggregated_dict.values())
+            items.sort(key=lambda x: x['count'], reverse=True)
+            return items[:100]
+        
+        top_100_analyzed = get_top_100(analyzed_aggregated)
+        top_100_reference = get_top_100(reference_aggregated)
+        top_100_citing = get_top_100(citing_aggregated)
+        
+        return {
+            'analyzed': {
+                'words': top_100_analyzed,
+                'total_titles': len(valid_analyzed_titles)
+            },
+            'reference': {
+                'words': top_100_reference,
+                'total_titles': len(valid_reference_titles)
+            },
+            'citing': {
+                'words': top_100_citing,
+                'total_titles': len(valid_citing_titles)
+            }
+        }
+    
+    def _are_similar_lemmas(self, lemma1: str, lemma2: str) -> bool:
+        """Check if lemmas are similar (e.g., singular/plural)"""
+        if lemma1 == lemma2:
+            return True
+        
+        # Check if they are forms of the same word
+        # Example: "composite" and "composites"
+        if lemma1.endswith('s') and lemma1[:-1] == lemma2:
+            return True
+        if lemma2.endswith('s') and lemma2[:-1] == lemma1:
+            return True
+        
+        # Check if they are forms with different suffixes
+        # Example: "characterization" and "characterize"
+        common_prefix = self._get_common_prefix(lemma1, lemma2)
+        if len(common_prefix) >= 5:  # If common prefix long enough
+            # Check length difference
+            if abs(len(lemma1) - len(lemma2)) <= 3:
+                return True
+        
+        return False
+    
+    def _get_common_prefix(self, str1: str, str2: str) -> str:
+        """Return common prefix of two strings"""
+        min_length = min(len(str1), len(str2))
+        common_prefix = []
+        
+        for i in range(min_length):
+            if str1[i] == str2[i]:
+                common_prefix.append(str1[i])
             else:
-                time_to_mainstream = 36  # месяцев
-                stage = 'Nascent'
-                impact = 'Low'
-            
-            # Определяем барьеры
-            barriers = []
-            if topic_age < 2:
-                barriers.append('Conceptual maturity')
-            if candidate['Type'] == 'Convergence':
-                barriers.append('Interdisciplinary integration')
-            if composite_score < 50:
-                barriers.append('Adoption rate')
-            
-            barriers_str = '; '.join(barriers) if barriers else 'Minimal'
-            
-            results.append({
-                'Emerging_Topic': candidate['Candidate_Name'],
-                'Topic_Type': candidate['Type'],
-                'Current_Stage': stage,
-                'Topic_Age_Years': topic_age,
-                'Time_to_Mainstream_Months': time_to_mainstream,
-                'Adoption_Barriers': barriers_str,
-                'Potential_Impact': impact,
-                'Current_Frontier_Score': composite_score,
-                'Growth_Trajectory': 'Accelerating' if candidate.get('Current_Trend') == 'Rising' else 'Stable' if candidate.get('Current_Trend') == 'Stable' else 'Decelerating',
-                'Monitoring_Metrics': f"Track citations for {candidate['Candidate_Name'].split()[0] if ' ' in candidate['Candidate_Name'] else candidate['Candidate_Name']}",
-                'Forecast_Horizon': f"Q{((datetime.now().month + time_to_mainstream - 1) // 3 + 1)}/{datetime.now().year + time_to_mainstream // 12}"
-            })
+                break
         
-        results.sort(key=lambda x: x['Current_Frontier_Score'], reverse=True)
-        
-        # Сохраняем в кэш
-        self.cache.set_frontiers_analysis('predictive_horizons', cache_key, results)
-        
-        return results
+        return ''.join(common_prefix)
 
 # ============================================================================
-# 📊 КЛАСС ЭКСПОРТА В EXCEL (УЛУЧШЕННЫЙ С НОВЫМИ ФУНКЦИЯМИ)
+# 📊 EXCEL EXPORTER (UPDATED WITH ROR INTEGRATION AND FIXED NORMALIZATION)
 # ============================================================================
 
 class ExcelExporter:
@@ -4608,23 +3376,27 @@ class ExcelExporter:
         self.ref_to_analyzed = defaultdict(list)
         self.analyzed_to_citing = defaultdict(list)
 
+        # CHANGE: Simplify author structure - use only normalized_name as key
         self.author_stats = defaultdict(lambda: {
             'normalized_name': '',
-            'orcid': '',
+            'orcid': set(),  # ORCID set for one author
             'affiliation': '',
             'country': '',
-            'total_count': 0,
-            'normalized_analyzed': 0,
+            'total_count': 0,  # Sum of normalized values
+            'normalized_analyzed': 0,  # Only normalized value for analyzed
+            'article_count_analyzed': 0,  # Absolute article count in analyzed
             'normalized_reference': 0,
             'normalized_citing': 0
         })
 
+        # CHANGE: Simplify affiliation structure
         self.affiliation_stats = defaultdict(lambda: {
             'colab_id': '',
             'website': '',
             'countries': [],
-            'total_count': 0,
-            'normalized_analyzed': 0,
+            'total_count': 0,  # Sum of normalized values
+            'normalized_analyzed': 0,  # Only normalized value for analyzed
+            'article_count_analyzed': 0,  # Absolute article count in analyzed
             'normalized_reference': 0,
             'normalized_citing': 0
         })
@@ -4632,31 +3404,44 @@ class ExcelExporter:
         self.affiliation_country_stats = defaultdict(lambda: defaultdict(int))
         self.current_year = datetime.now().year
 
-        # Инициализация анализаторов
-        self.hierarchical_analyzer = None
-        self.frontiers_analyzer = None
+        # Initialize keywords analyzer
+        self.title_keywords_analyzer = TitleKeywordsAnalyzer()
 
-    def set_hierarchical_analyzer(self, hierarchical_analyzer: HierarchicalDataAnalyzer):
-        """Устанавливает анализатор для иерархического анализа"""
-        self.hierarchical_analyzer = hierarchical_analyzer
+        # Statistics for Terms and Topics
+        self.terms_topics_stats = defaultdict(lambda: {
+            'type': '',
+            'analyzed_count': 0,
+            'reference_count': 0,
+            'citing_count': 0,
+            'years': [],
+            'first_year': None,
+            'peak_year': None,
+            'peak_count': 0
+        })
 
-    def set_frontiers_analyzer(self, frontiers_analyzer: FrontiersHotTopicsAnalyzer):
-        """Устанавливает анализатор для Frontiers & Hot Topics анализа"""
-        self.frontiers_analyzer = frontiers_analyzer
+        # Flag for enabling ROR analysis
+        self.enable_ror_analysis = False
 
     def _correct_country_for_author(self, author_key: str, affiliation_stats: Dict[str, Any]) -> str:
         """Correct country for author based on affiliation statistics"""
         author_info = self.author_stats[author_key]
         if not author_info['affiliation']:
             return author_info['country']
-
+    
         affiliation = author_info['affiliation']
+        
+        # First try to determine country from affiliation itself
+        country_from_affiliation = self._get_country_from_affiliation(affiliation)
+        if country_from_affiliation:
+            return country_from_affiliation
+        
+        # If not successful, use affiliation statistics
         if affiliation in affiliation_stats and affiliation_stats[affiliation]['countries']:
             countries = affiliation_stats[affiliation]['countries']
             if countries:
                 country_counter = Counter(countries)
                 most_common_country = country_counter.most_common(1)[0][0]
-
+    
                 if author_info['country'] != most_common_country:
                     website = affiliation_stats[affiliation].get('website', '')
                     if website:
@@ -4671,19 +3456,53 @@ class ExcelExporter:
                                 'CN': 'CN', 'JP': 'JP', 'KR': 'KR', 'IN': 'IN',
                                 'AU': 'AU', 'CA': 'CA', 'BR': 'BR', 'MX': 'MX'
                             }
-
+    
                             if domain_zone in domain_to_country:
                                 website_country = domain_to_country[domain_zone]
                                 if website_country == most_common_country:
                                     return most_common_country
-
-                    if len(countries) >= 3:
-                        country_freq = country_counter[most_common_country] / len(countries)
-                        if country_freq >= 0.7:
-                            return most_common_country
-
+    
+                        if len(countries) >= 3:
+                            country_freq = country_counter[most_common_country] / len(countries)
+                            if country_freq >= 0.7:
+                                return most_common_country
+    
         return author_info['country']
-
+        
+    def _get_country_from_affiliation(self, affiliation: str) -> str:
+        """Determine country from affiliation text"""
+        if not affiliation:
+            return ""
+        
+        affiliation_lower = affiliation.lower()
+        
+        # Use same country_codes dictionary from DataProcessor
+        # Find it through self.processor.country_codes
+        for country_name, country_code in self.processor.country_codes.items():
+            country_lower = country_name.lower()
+            # Look for whole word
+            pattern = r'\b' + re.escape(country_lower) + r'\b'
+            if re.search(pattern, affiliation_lower):
+                return country_code
+        
+        # Look for country codes
+        for country_name, country_code in self.processor.country_codes.items():
+            if len(country_code) == 2:
+                if re.search(r'\b' + country_code + r'\b', affiliation, re.IGNORECASE):
+                    return country_code
+        
+        # Look for Russian
+        russian_countries = {
+            'россия': 'RU', 'рф': 'RU', 'российская': 'RU',
+            'украина': 'UA', 'беларусь': 'BY', 'казахстан': 'KZ',
+        }
+        
+        for ru_name, code in russian_countries.items():
+            if ru_name in affiliation_lower:
+                return code
+        
+        return ""
+    
     def _calculate_annual_citation_rate(self, citation_count: int, publication_year_str: str) -> float:
         """Calculate average annual citations"""
         if not citation_count or not publication_year_str:
@@ -4698,262 +3517,143 @@ class ExcelExporter:
             return citation_count / age
         except:
             return 0.0
-
-    def _analyze_ethical_insights(self, analysis_types: Dict[str, bool], progress_container=None) -> Dict[str, Any]:
-        """Analyze ethical insights from collected data"""
-        insights = {
-            'quick_checks': [],
-            'medium_insights': [],
-            'deep_analysis': [],
-            'analyzed_citing_relationships': []
-        }
-
-        if not self.hierarchical_analyzer:
-            st.warning("⚠️ Hierarchical analyzer not set. Skipping ethical insights.")
-            return insights
-
-        # Выполняем только выбранные типы анализа
-        if analysis_types.get('quick_checks', False):
-            if progress_container:
-                progress_container.text("🔍 Performing Quick Checks analysis...")
-            insights['quick_checks'] = self.hierarchical_analyzer.analyze_quick_checks(
-                self.analyzed_results, self.citing_results
-            )
-
-        if analysis_types.get('medium_insights', False):
-            if progress_container:
-                progress_container.text("🔍 Performing Medium Insights analysis...")
-            insights['medium_insights'] = self.hierarchical_analyzer.analyze_medium_insights(
-                self.analyzed_results, self.citing_results
-            )
-
-        if analysis_types.get('deep_analysis', False):
-            if progress_container:
-                progress_container.text("🔍 Performing Deep Analysis...")
-            insights['deep_analysis'] = self.hierarchical_analyzer.analyze_deep_analysis(
-                self.analyzed_results, self.citing_results, self.ref_results
-            )
-
-        if analysis_types.get('analyzed_citing_relationships', False):
-            if progress_container:
-                progress_container.text("🔍 Performing Analyzed-Citing Relationships analysis...")
-            insights['analyzed_citing_relationships'] = self.hierarchical_analyzer.analyze_citing_relationships(
-                self.analyzed_results, self.citing_results
-            )
-
-        return insights
-
-    def _analyze_frontiers_hot_topics(self, analysis_types: Dict[str, bool], progress_container=None) -> Dict[str, Any]:
-        """Analyze frontiers and hot topics from collected data"""
-        insights = {
-            'Title_Term_Growth': [],
-            'Topic_Momentum_Map': [],
-            'Term_Topic_Convergence': [],
-            'Citation_Burst_Analysis': [],
-            'Early_Adopters_Network': [],
-            'Frontier_Candidates_Scoreboard': [],
-            'Temporal_Hotspots_Map': [],
-            'Predictive_Horizons': []
-        }
-
-        if not self.frontiers_analyzer:
-            st.warning("⚠️ Frontiers analyzer not set. Skipping frontiers analysis.")
-            return insights
-
-        # Выполняем только выбранные типы анализа
-        if progress_container:
-            progress_container.text("🚀 Starting Frontiers & Hot Topics analysis...")
-
-        # 1. Title Term Growth
-        if analysis_types.get('title_term_growth', False):
-            if progress_container:
-                progress_container.text("📊 Analyzing title term growth...")
-            insights['Title_Term_Growth'] = self.frontiers_analyzer.analyze_title_terms(
-                self.analyzed_results, self.ref_results, self.citing_results
-            )
-
-        # 2. Topic Momentum Map
-        if analysis_types.get('topic_momentum', False):
-            if progress_container:
-                progress_container.text("📈 Analyzing topic momentum...")
-            insights['Topic_Momentum_Map'] = self.frontiers_analyzer.analyze_topic_growth(
-                self.analyzed_results
-            )
-
-        # 3. Term Topic Convergence (требует предыдущих двух)
-        if (analysis_types.get('term_topic_convergence', False) and 
-            insights['Title_Term_Growth'] and insights['Topic_Momentum_Map']):
-            if progress_container:
-                progress_container.text("🔗 Analyzing term-topic convergence...")
-            insights['Term_Topic_Convergence'] = self.frontiers_analyzer.analyze_term_topic_convergence(
-                insights['Title_Term_Growth'], insights['Topic_Momentum_Map']
-            )
-
-        # 4. Citation Burst Analysis
-        if analysis_types.get('citation_bursts', False):
-            if progress_container:
-                progress_container.text("💥 Analyzing citation bursts...")
-            insights['Citation_Burst_Analysis'] = self.frontiers_analyzer.analyze_citation_bursts(
-                self.analyzed_results
-            )
-
-        # 5. Early Adopters Network
-        if analysis_types.get('early_adopters', False):
-            if progress_container:
-                progress_container.text("👥 Analyzing early adopters network...")
-            insights['Early_Adopters_Network'] = self.frontiers_analyzer.analyze_early_adopters(
-                self.analyzed_results, self.ref_results, self.citing_results
-            )
-
-        # 6. Frontier Candidates Scoreboard (требует предыдущих)
-        if (analysis_types.get('frontier_candidates', False) and 
-            (insights['Title_Term_Growth'] or insights['Topic_Momentum_Map'] or insights['Term_Topic_Convergence'])):
-            if progress_container:
-                progress_container.text("🎯 Compiling frontier candidates...")
-            insights['Frontier_Candidates_Scoreboard'] = self.frontiers_analyzer.analyze_frontier_candidates(
-                insights.get('Title_Term_Growth', []),
-                insights.get('Topic_Momentum_Map', []),
-                insights.get('Term_Topic_Convergence', [])
-            )
-
-        # 7. Temporal Hotspots Map
-        if analysis_types.get('temporal_hotspots', False):
-            if progress_container:
-                progress_container.text("🗺️ Mapping temporal hotspots...")
-            insights['Temporal_Hotspots_Map'] = self.frontiers_analyzer.analyze_temporal_hotspots(
-                self.analyzed_results
-            )
-
-        # 8. Predictive Horizons (требует frontier candidates)
-        if (analysis_types.get('predictive_horizons', False) and 
-            insights['Frontier_Candidates_Scoreboard']):
-            if progress_container:
-                progress_container.text("🔮 Analyzing predictive horizons...")
-            insights['Predictive_Horizons'] = self.frontiers_analyzer.analyze_predictive_horizons(
-                insights['Frontier_Candidates_Scoreboard']
-            )
-
-        return insights
-
+          
     def _prepare_ror_data_with_progress(self, affiliations_list: List[str], progress_container=None) -> Dict[str, Dict]:
         """Prepare ROR data with progress bar"""
-        ror_data = {}
+        if not self.enable_ror_analysis:
+            st.info("ℹ️ ROR analysis disabled")
+            return {}
+            
+        if not affiliations_list:
+            st.warning("⚠️ Affiliation list is empty")
+            return {}
+            
         total_affiliations = len(affiliations_list)
         
         if progress_container:
-            progress_text = progress_container.text(f"🔍 Поиск ROR данных для {total_affiliations} аффилиаций...")
+            progress_text = progress_container.text(f"🔍 Searching ROR data for {total_affiliations} affiliations...")
             ror_progress_bar = progress_container.progress(0)
+            status_text = progress_container.empty()
         else:
             progress_text = None
             ror_progress_bar = None
+            status_text = None
         
-        for idx, aff in enumerate(affiliations_list):
-            if progress_text and ror_progress_bar and total_affiliations > 0:
-                progress_percent = (idx + 1) / total_affiliations
-                ror_progress_bar.progress(progress_percent)
-                progress_text.text(f"🔍 Поиск ROR данных: {idx+1}/{total_affiliations} ({progress_percent*100:.1f}%)")
-            
-            ror_info = self.ror_client.search_organization(aff, category="summary")
-            if ror_info.get('ror_id'):
-                ror_data[aff] = ror_info
+        # Use parallel search via RORClient
+        ror_data = self.ror_client.search_multiple_organizations(affiliations_list, progress_container)
         
-        if progress_text and ror_progress_bar:
+        # IMPORTANT: Update affiliation statistics with obtained ROR data
+        for affiliation, ror_info in ror_data.items():
+            if affiliation in self.affiliation_stats:
+                self.affiliation_stats[affiliation]['colab_id'] = ror_info.get('ror_id', '')
+                self.affiliation_stats[affiliation]['website'] = ror_info.get('website', '')
+        
+        if progress_container and ror_progress_bar:
             ror_progress_bar.progress(1.0)
-            progress_text.text(f"✅ ROR данные собраны для {len(ror_data)} аффилиаций")
+            if status_text:
+                status_text.text(f"✅ ROR data collected for {len(ror_data)} affiliations")
         
         return ror_data
 
     def create_comprehensive_report(self, analyzed_results: Dict[str, Dict],
                                    ref_results: Dict[str, Dict] = None,
                                    citing_results: Dict[str, Dict] = None,
-                                   ethical_analysis_types: Dict[str, bool] = None,
-                                   frontiers_analysis_types: Dict[str, bool] = None,
                                    filename: str = None,
-                                   progress_container=None) -> BytesIO:
-
+                                   progress_container=None,
+                                   enable_ror: bool = False) -> BytesIO:
+    
         if filename is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"articles_analysis_comprehensive_{timestamp}.xlsx"
-
+    
         if progress_container:
             progress_container.text(f"📊 Creating comprehensive report: {filename}")
-
-        # Устанавливаем типы анализа по умолчанию, если не указаны
-        if ethical_analysis_types is None:
-            ethical_analysis_types = {
-                'quick_checks': True,
-                'medium_insights': True,
-                'deep_analysis': False,
-                'analyzed_citing_relationships': False
-            }
-
-        if frontiers_analysis_types is None:
-            frontiers_analysis_types = {
-                'title_term_growth': True,
-                'topic_momentum': True,
-                'term_topic_convergence': True,
-                'citation_bursts': True,
-                'early_adopters': False,
-                'frontier_candidates': True,
-                'temporal_hotspots': False,
-                'predictive_horizons': False
-            }
-
+    
         self.analyzed_results = analyzed_results
         self.ref_results = ref_results or {}
         self.citing_results = citing_results or {}
-
-        # Подготовка summary data с ROR прогрессом
+        
+        # Set ROR analysis flag
+        self.enable_ror_analysis = enable_ror
+        
+        if self.enable_ror_analysis and progress_container:
+            progress_container.info("🔍 ROR analysis enabled. Organization data will be collected.")
+    
+        # Prepare summary data with ROR progress
         if progress_container:
-            progress_container.text("📋 Подготовка summary данных...")
+            progress_container.text("📋 Preparing summary data...")
         self._prepare_summary_data()
-
-        # Подготовка ROR данных с прогресс-баром
+    
+        # Prepare ROR data with progress bar (if enabled)
         affiliations_list = list(self.affiliation_stats.keys())
-        if affiliations_list and progress_container:
-            progress_container.text(f"🔍 Сбор ROR данных для {len(affiliations_list)} аффилиаций...")
+        ror_data = {}
+        if self.enable_ror_analysis and affiliations_list:
+            if progress_container:
+                progress_container.text(f"🔍 Collecting ROR data for {len(affiliations_list)} affiliations...")
+            # Use same container for progress
             ror_data = self._prepare_ror_data_with_progress(affiliations_list, progress_container)
             
-            # Обновляем affiliation stats с ROR данными
-            for aff, ror_info in ror_data.items():
-                if aff in self.affiliation_stats:
-                    self.affiliation_stats[aff]['colab_id'] = ror_info.get('ror_id', '')
-                    self.affiliation_stats[aff]['website'] = ror_info.get('website', '')
+            if ror_data and progress_container:
+                progress_container.success(f"✅ ROR data obtained for {len(ror_data)} out of {len(affiliations_list)} affiliations")
+            elif progress_container:
+                progress_container.warning(f"⚠️ Failed to obtain ROR data for affiliations")
 
-        # Generate ethical insights
-        ethical_insights = {}
-        if any(ethical_analysis_types.values()):
-            if progress_container:
-                progress_container.text("🔍 Generating ethical insights...")
-            ethical_insights = self._analyze_ethical_insights(ethical_analysis_types, progress_container)
+        # Analyze keywords in titles
+        if progress_container:
+            progress_container.text("🔤 Analyzing keywords in titles...")
+        
+        # Extract titles from all sources
+        analyzed_titles = []
+        for result in analyzed_results.values():
+            if result.get('status') == 'success':
+                title = result.get('publication_info', {}).get('title', '')
+                if title:
+                    analyzed_titles.append(title)
+        
+        reference_titles = []
+        for result in self.ref_results.values():
+            if result.get('status') == 'success':
+                title = result.get('publication_info', {}).get('title', '')
+                if title:
+                    reference_titles.append(title)
+        
+        citing_titles = []
+        for result in self.citing_results.values():
+            if result.get('status') == 'success':
+                title = result.get('publication_info', {}).get('title', '')
+                if title:
+                    citing_titles.append(title)
+        
+        # Analyze keywords
+        title_keywords_analysis = self.title_keywords_analyzer.analyze_titles(
+            analyzed_titles, reference_titles, citing_titles
+        )
+        
+        # Prepare data for Title keywords sheet
+        title_keywords_data = self._prepare_title_keywords_data(title_keywords_analysis)
+        
+        # Prepare data for Terms and Topics sheet
+        if progress_container:
+            progress_container.text("🏷️ Preparing Terms and Topics data...")
+        terms_topics_data = self._prepare_terms_topics_data()
 
-        # Generate frontiers insights
-        frontiers_insights = {}
-        if any(frontiers_analysis_types.values()):
-            if progress_container:
-                progress_container.text("🚀 Generating frontiers & hot topics insights...")
-            frontiers_insights = self._analyze_frontiers_hot_topics(frontiers_analysis_types, progress_container)
-
-        # Создаем Excel файл в памяти
+        # Create Excel file in memory
         output = BytesIO()
         
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             if progress_container:
                 progress_container.text("📑 Generating sheets...")
 
-            # Создаем вкладки Excel
+            # Create Excel tabs
             self._generate_excel_sheets(writer, analyzed_results, ref_results, citing_results, 
-                                      ethical_insights, frontiers_insights,
-                                      ethical_analysis_types, frontiers_analysis_types, 
-                                      progress_container)
+                                      title_keywords_data, terms_topics_data, progress_container)
 
         output.seek(0)
         return output
 
     def _generate_excel_sheets(self, writer, analyzed_results, ref_results, citing_results,
-                             ethical_insights, frontiers_insights,
-                             ethical_analysis_types, frontiers_analysis_types, progress_container):
-        """Генерирует все вкладки Excel"""
+                             title_keywords_data, terms_topics_data, progress_container):
+        """Generate all Excel sheets"""
         sheets = [
             ('Article_Analyzed', lambda: self._prepare_analyzed_articles(analyzed_results)),
             ('Author freq_analyzed', lambda: self._prepare_author_frequency(analyzed_results, "analyzed")),
@@ -4976,45 +3676,9 @@ class ExcelExporter:
             ('Time (analyzed,citing)_connections', lambda: self._prepare_time_analyzed_citing_connections()),
             ('Failed_DOI', lambda: self.failed_tracker.get_failed_for_excel()),
             ('Analysis_Stats', lambda: self._prepare_analysis_stats(analyzed_results, ref_results, citing_results)),
+            ('Title keywords', lambda: title_keywords_data),
+            ('Terms and Topics', lambda: terms_topics_data),
         ]
-
-        # Добавляем листы анализа неэтичных практик если они включены
-        if ethical_analysis_types.get('quick_checks', False) and ethical_insights.get('quick_checks'):
-            sheets.append(('Quick_Checks', lambda: ethical_insights['quick_checks']))
-        
-        if ethical_analysis_types.get('medium_insights', False) and ethical_insights.get('medium_insights'):
-            sheets.append(('Medium_Insights', lambda: ethical_insights['medium_insights']))
-        
-        if ethical_analysis_types.get('deep_analysis', False) and ethical_insights.get('deep_analysis'):
-            sheets.append(('Deep_Analysis', lambda: ethical_insights['deep_analysis']))
-        
-        if ethical_analysis_types.get('analyzed_citing_relationships', False) and ethical_insights.get('analyzed_citing_relationships'):
-            sheets.append(('Analyzed_Citing_Relationships', lambda: ethical_insights['analyzed_citing_relationships']))
-
-        # Добавляем листы анализа Frontiers & Hot Topics если они включены
-        if frontiers_analysis_types.get('title_term_growth', False) and frontiers_insights.get('Title_Term_Growth'):
-            sheets.append(('Title_Term_Growth', lambda: frontiers_insights['Title_Term_Growth']))
-        
-        if frontiers_analysis_types.get('topic_momentum', False) and frontiers_insights.get('Topic_Momentum_Map'):
-            sheets.append(('Topic_Momentum_Map', lambda: frontiers_insights['Topic_Momentum_Map']))
-        
-        if frontiers_analysis_types.get('term_topic_convergence', False) and frontiers_insights.get('Term_Topic_Convergence'):
-            sheets.append(('Term_Topic_Convergence', lambda: frontiers_insights['Term_Topic_Convergence']))
-        
-        if frontiers_analysis_types.get('citation_bursts', False) and frontiers_insights.get('Citation_Burst_Analysis'):
-            sheets.append(('Citation_Burst_Analysis', lambda: frontiers_insights['Citation_Burst_Analysis']))
-        
-        if frontiers_analysis_types.get('early_adopters', False) and frontiers_insights.get('Early_Adopters_Network'):
-            sheets.append(('Early_Adopters_Network', lambda: frontiers_insights['Early_Adopters_Network']))
-        
-        if frontiers_analysis_types.get('frontier_candidates', False) and frontiers_insights.get('Frontier_Candidates_Scoreboard'):
-            sheets.append(('Frontier_Candidates_Scoreboard', lambda: frontiers_insights['Frontier_Candidates_Scoreboard']))
-        
-        if frontiers_analysis_types.get('temporal_hotspots', False) and frontiers_insights.get('Temporal_Hotspots_Map'):
-            sheets.append(('Temporal_Hotspots_Map', lambda: frontiers_insights['Temporal_Hotspots_Map']))
-        
-        if frontiers_analysis_types.get('predictive_horizons', False) and frontiers_insights.get('Predictive_Horizons'):
-            sheets.append(('Predictive_Horizons', lambda: frontiers_insights['Predictive_Horizons']))
 
         for idx, (sheet_name, data_func) in enumerate(sheets):
             if progress_container:
@@ -5030,11 +3694,18 @@ class ExcelExporter:
         total_ref_articles = len([r for r in self.ref_results.values() if r.get('status') == 'success'])
         total_citing_articles = len([r for r in self.citing_results.values() if r.get('status') == 'success'])
 
+        # CHANGE: Temporary counters for correct normalization
+        author_analyzed_counts = Counter()  # Author article count in analyzed
+        affiliation_analyzed_counts = Counter()  # Affiliation article count in analyzed
+
         for doi, result in self.analyzed_results.items():
             if result.get('status') != 'success':
                 continue
 
             self.source_dois['analyzed'].add(doi)
+
+            # Update Terms and Topics statistics for analyzed articles
+            self._update_terms_topics_stats(doi, result, 'analyzed')
 
             for ref_doi in result.get('references', []):
                 self.ref_to_analyzed[ref_doi].append(doi)
@@ -5046,80 +3717,131 @@ class ExcelExporter:
                 self.doi_to_source_counts[cite_doi]['citing'] += 1
                 self.source_dois['citing'].add(cite_doi)
 
-            # Update author stats with normalized values
+            # CHANGE: Count authors in analyzed articles
             for author in result.get('authors', []):
                 full_name = author.get('name', '')
                 if not full_name:
                     continue
-
+            
                 normalized_name = self.processor.normalize_author_name(full_name)
+                # USE ONLY normalized_name as key
                 key = normalized_name
-
+                
+                # Increase article counter for this author in analyzed
+                author_analyzed_counts[key] += 1
+            
+                # Initialize author record if not exists
+                if key not in self.author_stats:
+                    self.author_stats[key] = {
+                        'normalized_name': normalized_name,
+                        'orcid': set(),
+                        'affiliation': '',
+                        'country': '',
+                        'total_count': 0,
+                        'normalized_analyzed': 0,
+                        'article_count_analyzed': 0,
+                        'normalized_reference': 0,
+                        'normalized_citing': 0
+                    }
+            
+                # Update ORCID as set
                 if author.get('orcid'):
-                    key = f"{normalized_name}_{author['orcid']}"
-
-                # Calculate normalized value for analyzed articles
-                normalized_value = 1 / total_analyzed_articles if total_analyzed_articles > 0 else 0
-                self.author_stats[key]['normalized_analyzed'] += normalized_value
-                self.author_stats[key]['total_count'] += normalized_value
-
-                if not self.author_stats[key]['orcid'] and author.get('orcid'):
-                    self.author_stats[key]['orcid'] = self.processor._format_orcid_id(author.get('orcid', ''))
-
+                    self.author_stats[key]['orcid'].add(self.processor._format_orcid_id(author.get('orcid', '')))
+            
+                # Determine affiliation
                 if not self.author_stats[key]['affiliation'] and author.get('affiliation'):
                     self.author_stats[key]['affiliation'] = author.get('affiliation')[0] if author.get('affiliation') else ''
-
-                if result.get('countries'):
-                    country = result.get('countries')[0] if result.get('countries') else ''
-                    if country and not self.author_stats[key]['country']:
-                        self.author_stats[key]['country'] = country
-
-                    if self.author_stats[key]['affiliation']:
-                        self.affiliation_country_stats[self.author_stats[key]['affiliation']][country] += 1
-
+                
+                # IMPORTANT FIX: Determine author country from his data
+                if not self.author_stats[key]['country']:
+                    # 1. Try to take from author_country (new field)
+                    if 'author_country' in author and author['author_country']:
+                        self.author_stats[key]['country'] = author['author_country']
+                    # 2. If not, determine from affiliation
+                    elif self.author_stats[key]['affiliation']:
+                        country_from_aff = self._get_country_from_affiliation(self.author_stats[key]['affiliation'])
+                        if country_from_aff:
+                            self.author_stats[key]['country'] = country_from_aff
+                    # 3. Fallback: from article
+                    elif result.get('countries'):
+                        self.author_stats[key]['country'] = result.get('countries')[0] if result.get('countries') else ''
+            
                 self.author_stats[key]['normalized_name'] = normalized_name
 
-            # Update affiliation stats with normalized values
+            # CHANGE: Update affiliation statistics FOR ANALYZED
             unique_affiliations_in_article = set()
             for author in result.get('authors', []):
                 for affiliation in author.get('affiliation', []):
                     if affiliation:
                         unique_affiliations_in_article.add(affiliation)
 
-            normalized_aff_value = 1 / total_analyzed_articles if total_analyzed_articles > 0 else 0
+            # Count absolute article number for each affiliation in analyzed
             for affiliation in unique_affiliations_in_article:
-                self.affiliation_stats[affiliation]['normalized_analyzed'] += normalized_aff_value
-                self.affiliation_stats[affiliation]['total_count'] += normalized_aff_value
-
+                affiliation_analyzed_counts[affiliation] += 1
+                
+                # Initialize affiliation record if not exists
+                if affiliation not in self.affiliation_stats:
+                    self.affiliation_stats[affiliation] = {
+                        'colab_id': '',
+                        'website': '',
+                        'countries': [],
+                        'total_count': 0,
+                        'normalized_analyzed': 0,
+                        'article_count_analyzed': 0,
+                        'normalized_reference': 0,
+                        'normalized_citing': 0
+                    }
+                
                 if result.get('countries'):
                     for country in result.get('countries'):
                         if country:
                             self.affiliation_stats[affiliation]['countries'].append(country)
+
+        # CHANGE: After counting all analyzed articles, calculate normalized values FOR AUTHORS
+        for author_key, count in author_analyzed_counts.items():
+            if total_analyzed_articles > 0:
+                normalized_value = count / total_analyzed_articles
+                self.author_stats[author_key]['normalized_analyzed'] = normalized_value
+                self.author_stats[author_key]['article_count_analyzed'] = count
+                # Update total_count for author
+                self.author_stats[author_key]['total_count'] += normalized_value
+
+        # CHANGE: After counting all analyzed articles, calculate normalized values FOR AFFILIATIONS
+        for affiliation, count in affiliation_analyzed_counts.items():
+            if total_analyzed_articles > 0:
+                normalized_value = count / total_analyzed_articles
+                self.affiliation_stats[affiliation]['normalized_analyzed'] = normalized_value
+                self.affiliation_stats[affiliation]['article_count_analyzed'] = count
+                # Update total_count for affiliation
+                self.affiliation_stats[affiliation]['total_count'] += normalized_value
 
         # Process ref results
         for doi, result in self.ref_results.items():
             if result.get('status') != 'success':
                 continue
 
-            # Update author stats for ref articles
+            # Update Terms and Topics statistics for reference articles
+            self._update_terms_topics_stats(doi, result, 'reference')
+
+            # CHANGE: Update author stats for ref articles - ONLY normalized values
             for author in result.get('authors', []):
                 full_name = author.get('name', '')
                 if not full_name:
                     continue
 
                 normalized_name = self.processor.normalize_author_name(full_name)
+                # USE ONLY normalized_name as key
                 key = normalized_name
 
-                if author.get('orcid'):
-                    key = f"{normalized_name}_{author['orcid']}"
-
                 # Calculate normalized value for ref articles
-                normalized_value = 1 / total_ref_articles if total_ref_articles > 0 else 0
-                self.author_stats[key]['normalized_reference'] += normalized_value
-                self.author_stats[key]['total_count'] += normalized_value
+                if total_ref_articles > 0:
+                    normalized_value = 1 / total_ref_articles
+                    self.author_stats[key]['normalized_reference'] += normalized_value
+                    self.author_stats[key]['total_count'] += normalized_value
 
-                if not self.author_stats[key]['orcid'] and author.get('orcid'):
-                    self.author_stats[key]['orcid'] = self.processor._format_orcid_id(author.get('orcid', ''))
+                # Update ORCID as set
+                if author.get('orcid'):
+                    self.author_stats[key]['orcid'].add(self.processor._format_orcid_id(author.get('orcid', '')))
 
                 if not self.author_stats[key]['affiliation'] and author.get('affiliation'):
                     self.author_stats[key]['affiliation'] = author.get('affiliation')[0] if author.get('affiliation') else ''
@@ -5129,42 +3851,46 @@ class ExcelExporter:
 
                 self.author_stats[key]['normalized_name'] = normalized_name
 
-            # Update affiliation stats for ref articles
+            # CHANGE: Update affiliation stats for ref articles - ONLY normalized values
             unique_affiliations_in_article = set()
             for author in result.get('authors', []):
                 for affiliation in author.get('affiliation', []):
                     if affiliation:
                         unique_affiliations_in_article.add(affiliation)
 
-            normalized_aff_value = 1 / total_ref_articles if total_ref_articles > 0 else 0
-            for affiliation in unique_affiliations_in_article:
-                self.affiliation_stats[affiliation]['normalized_reference'] += normalized_aff_value
-                self.affiliation_stats[affiliation]['total_count'] += normalized_aff_value
+            if total_ref_articles > 0:
+                normalized_aff_value = 1 / total_ref_articles
+                for affiliation in unique_affiliations_in_article:
+                    self.affiliation_stats[affiliation]['normalized_reference'] += normalized_aff_value
+                    self.affiliation_stats[affiliation]['total_count'] += normalized_aff_value
 
         # Process citing results
         for doi, result in self.citing_results.items():
             if result.get('status') != 'success':
                 continue
 
-            # Update author stats for citing articles
+            # Update Terms and Topics statistics for citing articles
+            self._update_terms_topics_stats(doi, result, 'citing')
+
+            # CHANGE: Update author stats for citing articles - ONLY normalized values
             for author in result.get('authors', []):
                 full_name = author.get('name', '')
                 if not full_name:
                     continue
 
                 normalized_name = self.processor.normalize_author_name(full_name)
+                # USE ONLY normalized_name as key
                 key = normalized_name
 
-                if author.get('orcid'):
-                    key = f"{normalized_name}_{author['orcid']}"
-
                 # Calculate normalized value for citing articles
-                normalized_value = 1 / total_citing_articles if total_citing_articles > 0 else 0
-                self.author_stats[key]['normalized_citing'] += normalized_value
-                self.author_stats[key]['total_count'] += normalized_value
+                if total_citing_articles > 0:
+                    normalized_value = 1 / total_citing_articles
+                    self.author_stats[key]['normalized_citing'] += normalized_value
+                    self.author_stats[key]['total_count'] += normalized_value
 
-                if not self.author_stats[key]['orcid'] and author.get('orcid'):
-                    self.author_stats[key]['orcid'] = self.processor._format_orcid_id(author.get('orcid', ''))
+                # Update ORCID as set
+                if author.get('orcid'):
+                    self.author_stats[key]['orcid'].add(self.processor._format_orcid_id(author.get('orcid', '')))
 
                 if not self.author_stats[key]['affiliation'] and author.get('affiliation'):
                     self.author_stats[key]['affiliation'] = author.get('affiliation')[0] if author.get('affiliation') else ''
@@ -5174,17 +3900,327 @@ class ExcelExporter:
 
                 self.author_stats[key]['normalized_name'] = normalized_name
 
-            # Update affiliation stats for citing articles
+            # CHANGE: Update affiliation stats for citing articles - ONLY normalized values
             unique_affiliations_in_article = set()
             for author in result.get('authors', []):
                 for affiliation in author.get('affiliation', []):
                     if affiliation:
                         unique_affiliations_in_article.add(affiliation)
 
-            normalized_aff_value = 1 / total_citing_articles if total_citing_articles > 0 else 0
-            for affiliation in unique_affiliations_in_article:
-                self.affiliation_stats[affiliation]['normalized_citing'] += normalized_aff_value
-                self.affiliation_stats[affiliation]['total_count'] += normalized_aff_value
+            if total_citing_articles > 0:
+                normalized_aff_value = 1 / total_citing_articles
+                for affiliation in unique_affiliations_in_article:
+                    self.affiliation_stats[affiliation]['normalized_citing'] += normalized_aff_value
+                    self.affiliation_stats[affiliation]['total_count'] += normalized_aff_value
+
+    def _update_terms_topics_stats(self, doi: str, result: Dict, source_type: str):
+        """Update terms and topics statistics"""
+        if result.get('status') != 'success':
+            return
+
+        topics_info = result.get('topics_info', {})
+        pub_info = result.get('publication_info', {})
+        year_str = pub_info.get('year', '')
+
+        try:
+            year = int(year_str) if year_str and year_str.isdigit() else None
+        except:
+            year = None
+
+        # Update statistics for each term type
+        term_types = ['topic', 'subfield', 'field', 'domain']
+        for term_type in term_types:
+            term = topics_info.get(term_type, '')
+            if term:
+                key = f"{term_type}:{term}"
+                
+                if source_type == 'analyzed':
+                    self.terms_topics_stats[key]['analyzed_count'] += 1
+                elif source_type == 'reference':
+                    self.terms_topics_stats[key]['reference_count'] += 1
+                elif source_type == 'citing':
+                    self.terms_topics_stats[key]['citing_count'] += 1
+                
+                self.terms_topics_stats[key]['type'] = term_type.capitalize()
+                
+                if year:
+                    self.terms_topics_stats[key]['years'].append(year)
+                    
+                    # Update first year
+                    if self.terms_topics_stats[key]['first_year'] is None or year < self.terms_topics_stats[key]['first_year']:
+                        self.terms_topics_stats[key]['first_year'] = year
+                    
+                    # Update peak year
+                    year_count = self.terms_topics_stats[key]['years'].count(year)
+                    if year_count > self.terms_topics_stats[key]['peak_count']:
+                        self.terms_topics_stats[key]['peak_year'] = year
+                        self.terms_topics_stats[key]['peak_count'] = year_count
+
+        # Update statistics for concepts
+        concepts = topics_info.get('concepts', [])
+        for concept in concepts:
+            key = f"concept:{concept}"
+            
+            if source_type == 'analyzed':
+                self.terms_topics_stats[key]['analyzed_count'] += 1
+            elif source_type == 'reference':
+                self.terms_topics_stats[key]['reference_count'] += 1
+            elif source_type == 'citing':
+                self.terms_topics_stats[key]['citing_count'] += 1
+            
+            self.terms_topics_stats[key]['type'] = 'Concept'
+            
+            if year:
+                self.terms_topics_stats[key]['years'].append(year)
+                
+                # Update first year
+                if self.terms_topics_stats[key]['first_year'] is None or year < self.terms_topics_stats[key]['first_year']:
+                    self.terms_topics_stats[key]['first_year'] = year
+                
+                # Update peak year
+                year_count = self.terms_topics_stats[key]['years'].count(year)
+                if year_count > self.terms_topics_stats[key]['peak_count']:
+                    self.terms_topics_stats[key]['peak_year'] = year
+                    self.terms_topics_stats[key]['peak_count'] = year_count
+        
+    def _prepare_title_keywords_data(self, keywords_analysis: dict) -> List[Dict]:
+            """Prepare data for Title keywords sheet with grouping by lemmas"""
+            data = []
+            
+            # Total articles for normalization
+            total_analyzed = keywords_analysis['analyzed']['total_titles']
+            total_reference = keywords_analysis['reference']['total_titles']
+            total_citing = keywords_analysis['citing']['total_titles']
+            
+            # Collect all unique lemmas
+            all_lemmas = {}
+            
+            # Process analyzed articles
+            for word_info in keywords_analysis['analyzed']['words']:
+                lemma = word_info['lemma']
+                if lemma not in all_lemmas:
+                    all_lemmas[lemma] = {
+                        'type': word_info['type'],
+                        'analyzed': 0,
+                        'reference': 0,
+                        'citing': 0,
+                        'analyzed_variants': Counter(),
+                        'reference_variants': Counter(),
+                        'citing_variants': Counter()
+                    }
+                all_lemmas[lemma]['analyzed'] = word_info['count']
+                all_lemmas[lemma]['analyzed_variants'] = word_info['variants']
+            
+            # Process reference articles
+            for word_info in keywords_analysis['reference']['words']:
+                lemma = word_info['lemma']
+                if lemma not in all_lemmas:
+                    all_lemmas[lemma] = {
+                        'type': word_info['type'],
+                        'analyzed': 0,
+                        'reference': 0,
+                        'citing': 0,
+                        'analyzed_variants': Counter(),
+                        'reference_variants': Counter(),
+                        'citing_variants': Counter()
+                    }
+                all_lemmas[lemma]['reference'] = word_info['count']
+                all_lemmas[lemma]['reference_variants'] = word_info['variants']
+            
+            # Process citing articles
+            for word_info in keywords_analysis['citing']['words']:
+                lemma = word_info['lemma']
+                if lemma not in all_lemmas:
+                    all_lemmas[lemma] = {
+                        'type': word_info['type'],
+                        'analyzed': 0,
+                        'reference': 0,
+                        'citing': 0,
+                        'analyzed_variants': Counter(),
+                        'reference_variants': Counter(),
+                        'citing_variants': Counter()
+                    }
+                all_lemmas[lemma]['citing'] = word_info['count']
+                all_lemmas[lemma]['citing_variants'] = word_info['variants']
+            
+            # Merge similar lemmas between types (analyzed, reference, citing)
+            merged_lemmas = {}
+            lemmas_to_merge = {}
+            
+            # Find similar lemmas
+            all_lemma_list = list(all_lemmas.keys())
+            for i in range(len(all_lemma_list)):
+                lemma1 = all_lemma_list[i]
+                if lemma1 in lemmas_to_merge:
+                    continue
+                    
+                for j in range(i+1, len(all_lemma_list)):
+                    lemma2 = all_lemma_list[j]
+                    if lemma2 in lemmas_to_merge:
+                        continue
+                    
+                    # Check if lemmas are similar using improved analyzer
+                    if self.title_keywords_analyzer._are_similar_lemmas(lemma1, lemma2):
+                        # Choose shorter lemma as main
+                        if len(lemma1) <= len(lemma2):
+                            main_lemma = lemma1
+                            secondary_lemma = lemma2
+                        else:
+                            main_lemma = lemma2
+                            secondary_lemma = lemma1
+                        
+                        if main_lemma not in lemmas_to_merge:
+                            lemmas_to_merge[main_lemma] = []
+                        
+                        lemmas_to_merge[main_lemma].append(secondary_lemma)
+                        lemmas_to_merge[secondary_lemma] = [main_lemma]
+            
+            # Merge data
+            for lemma, stats in all_lemmas.items():
+                if lemma in lemmas_to_merge and lemma not in lemmas_to_merge.get(lemma, []):
+                    # This lemma will be merged with another
+                    continue
+                
+                # Check if need to merge this lemma with others
+                if lemma in lemmas_to_merge:
+                    main_lemma = lemma
+                    # Create new record for main lemma
+                    merged_stats = {
+                        'type': stats['type'],
+                        'analyzed': stats['analyzed'],
+                        'reference': stats['reference'],
+                        'citing': stats['citing'],
+                        'analyzed_variants': stats['analyzed_variants'].copy(),
+                        'reference_variants': stats['reference_variants'].copy(),
+                        'citing_variants': stats['citing_variants'].copy()
+                    }
+                    
+                    # Merge with secondary lemmas
+                    for secondary_lemma in lemmas_to_merge[lemma]:
+                        if secondary_lemma in all_lemmas:
+                            sec_stats = all_lemmas[secondary_lemma]
+                            merged_stats['analyzed'] += sec_stats['analyzed']
+                            merged_stats['reference'] += sec_stats['reference']
+                            merged_stats['citing'] += sec_stats['citing']
+                            
+                            # Merge variants
+                            for variant, count in sec_stats['analyzed_variants'].items():
+                                merged_stats['analyzed_variants'][variant] += count
+                            for variant, count in sec_stats['reference_variants'].items():
+                                merged_stats['reference_variants'][variant] += count
+                            for variant, count in sec_stats['citing_variants'].items():
+                                merged_stats['citing_variants'][variant] += count
+                    
+                    merged_lemmas[main_lemma] = merged_stats
+                else:
+                    # Lemma doesn't require merging
+                    merged_lemmas[lemma] = stats
+            
+            # Create data rows
+            for lemma, stats in merged_lemmas.items():
+                # Calculate normalized values
+                analyzed_norm = stats['analyzed'] / total_analyzed if total_analyzed > 0 else 0
+                reference_norm = stats['reference'] / total_reference if total_reference > 0 else 0
+                citing_norm = stats['citing'] / total_citing if total_citing > 0 else 0
+                total_norm = analyzed_norm + reference_norm + citing_norm
+                
+                # Collect all word variants
+                all_variants = set()
+                variants_info = []
+                
+                # Variants from analyzed articles
+                if stats['analyzed_variants']:
+                    for variant, count in stats['analyzed_variants'].most_common(3):
+                        all_variants.add(variant)
+                        variants_info.append(f"{variant}({count})")
+                
+                # Variants from reference articles
+                if stats['reference_variants']:
+                    for variant, count in stats['reference_variants'].most_common(3):
+                        all_variants.add(variant)
+                        if variant not in [v.split('(')[0] for v in variants_info]:
+                            variants_info.append(f"{variant}({count})")
+                
+                # Variants from citing articles
+                if stats['citing_variants']:
+                    for variant, count in stats['citing_variants'].most_common(3):
+                        all_variants.add(variant)
+                        if variant not in [v.split('(')[0] for v in variants_info]:
+                            variants_info.append(f"{variant}({count})")
+                
+                # Format variants string
+                variants_str = ', '.join(sorted(all_variants))
+                
+                data.append({
+                    'Title term': lemma,
+                    'Variants': variants_str,
+                    'Type': stats['type'],
+                    'Analyzed count': stats['analyzed'],
+                    'Reference count': stats['reference'],
+                    'Citing Count': stats['citing'],
+                    'Analyzed norm count': round(analyzed_norm, 4),
+                    'Reference norm count': round(reference_norm, 4),
+                    'Citing norm Count': round(citing_norm, 4),
+                    'Total norm count': round(total_norm, 4)
+                })
+            
+            # Sort by Total norm count (descending)
+            data.sort(key=lambda x: x['Total norm count'], reverse=True)
+            
+            return data
+
+    def _prepare_terms_topics_data(self) -> List[Dict]:
+        """Prepare data for Terms and Topics sheet"""
+        data = []
+        
+        # Total articles for normalization
+        total_analyzed = len([r for r in self.analyzed_results.values() if r.get('status') == 'success'])
+        total_reference = len([r for r in self.ref_results.values() if r.get('status') == 'success'])
+        total_citing = len([r for r in self.citing_results.values() if r.get('status') == 'success'])
+        
+        for key, stats in self.terms_topics_stats.items():
+            if stats['analyzed_count'] == 0 and stats['reference_count'] == 0 and stats['citing_count'] == 0:
+                continue
+            
+            # Extract term from key
+            if ':' in key:
+                term = key.split(':', 1)[1]
+            else:
+                term = key
+            
+            # Calculate normalized values
+            analyzed_norm = stats['analyzed_count'] / total_analyzed if total_analyzed > 0 else 0
+            reference_norm = stats['reference_count'] / total_reference if total_reference > 0 else 0
+            citing_norm = stats['citing_count'] / total_citing if total_citing > 0 else 0
+            total_norm = analyzed_norm + reference_norm + citing_norm
+            
+            # Calculate count for last 5 years
+            recent_5_years_count = 0
+            if stats['years']:
+                current_year = datetime.now().year
+                for year in stats['years']:
+                    if year and year >= current_year - 5:
+                        recent_5_years_count += 1
+            
+            data.append({
+                'Term': term,
+                'Type': stats['type'],
+                'Analyzed count': stats['analyzed_count'],
+                'Reference count': stats['reference_count'],
+                'Citing Count': stats['citing_count'],
+                'Analyzed norm count': round(analyzed_norm, 4),
+                'Reference norm count': round(reference_norm, 4),
+                'Citing norm Count': round(citing_norm, 4),
+                'Total norm count': round(total_norm, 4),
+                'First_Year': stats['first_year'] if stats['first_year'] else '',
+                'Peak_Year': stats['peak_year'] if stats['peak_year'] else '',
+                'Recent_5_Years_Count': recent_5_years_count
+            })
+        
+        # Sort by Total norm count (descending)
+        data.sort(key=lambda x: x['Total norm count'], reverse=True)
+        
+        return data
 
     def _prepare_analyzed_articles(self, results: Dict[str, Dict]) -> List[Dict]:
         return self._prepare_article_sheet(results, "analyzed")
@@ -5202,6 +4238,7 @@ class ExcelExporter:
 
             pub_info = ref_result.get('publication_info', {})
             authors = ref_result.get('authors', [])
+            topics_info = ref_result.get('topics_info', {})
 
             orcid_urls = ref_result.get('orcid_urls', [])
             affiliations = list(set([aff for author in authors for aff in author.get('affiliation', []) if aff]))
@@ -5219,7 +4256,7 @@ class ExcelExporter:
             row = {
                 'doi': ref_doi,
                 'publication_date': pub_info.get('publication_date', ''),
-                'Title': pub_info.get('title', '')[:200] + ('...' if len(pub_info.get('title', '')) > 200 else ''),  # НОВАЯ КОЛОНКА
+                'Title': pub_info.get('title', '')[:200] + ('...' if len(pub_info.get('title', '')) > 200 else ''),
                 'authors': '; '.join([a['name'] for a in authors]),
                 'ORCID ID 1; ORCID ID 2... ORCID ID last': '; '.join(orcid_urls),
                 'author count': len(authors),
@@ -5233,8 +4270,13 @@ class ExcelExporter:
                 'Citation counts (OA)': pub_info.get('citation_count_openalex', 0),
                 'Annual cit counts (CR)': round(annual_cr, 2),
                 'Annual cit counts (OA)': round(annual_oa, 2),
-                'references_count': len(ref_result.get('references', [])),
-                'count': count
+                'references_count': ref_result.get('references_count', 0),
+                'count': count,
+                'Topic': topics_info.get('topic', ''),
+                'Subfield': topics_info.get('subfield', ''),
+                'Field': topics_info.get('field', ''),
+                'Domain': topics_info.get('domain', ''),
+                'Concepts': '; '.join(topics_info.get('concepts', []))
             }
 
             data.append(row)
@@ -5245,7 +4287,7 @@ class ExcelExporter:
                 row = {
                     'doi': ref_doi,
                     'publication_date': '',
-                    'Title': '',  # НОВАЯ КОЛОНКА
+                    'Title': '',
                     'authors': '',
                     'ORCID ID 1; ORCID ID 2... ORCID ID last': '',
                     'author count': 0,
@@ -5260,7 +4302,12 @@ class ExcelExporter:
                     'Annual cit counts (CR)': 0.0,
                     'Annual cit counts (OA)': 0.0,
                     'references_count': 0,
-                    'count': count
+                    'count': count,
+                    'Topic': '',
+                    'Subfield': '',
+                    'Field': '',
+                    'Domain': '',
+                    'Concepts': ''
                 }
                 data.append(row)
 
@@ -5281,6 +4328,7 @@ class ExcelExporter:
 
             pub_info = cite_result.get('publication_info', {})
             authors = cite_result.get('authors', [])
+            topics_info = cite_result.get('topics_info', {})
 
             orcid_urls = cite_result.get('orcid_urls', [])
             affiliations = list(set([aff for author in authors for aff in author.get('affiliation', []) if aff]))
@@ -5298,7 +4346,7 @@ class ExcelExporter:
             row = {
                 'doi': cite_doi,
                 'publication_date': pub_info.get('publication_date', ''),
-                'Title': pub_info.get('title', '')[:200] + ('...' if len(pub_info.get('title', '')) > 200 else ''),  # НОВАЯ КОЛОНКА
+                'Title': pub_info.get('title', '')[:200] + ('...' if len(pub_info.get('title', '')) > 200 else ''),
                 'authors': '; '.join([a['name'] for a in authors]),
                 'ORCID ID 1; ORCID ID 2... ORCID ID last': '; '.join(orcid_urls),
                 'author count': len(authors),
@@ -5312,8 +4360,13 @@ class ExcelExporter:
                 'Citation counts (OA)': pub_info.get('citation_count_openalex', 0),
                 'Annual cit counts (CR)': round(annual_cr, 2),
                 'Annual cit counts (OA)': round(annual_oa, 2),
-                'references_count': len(cite_result.get('references', [])),
-                'count': count
+                'references_count': cite_result.get('references_count', 0),
+                'count': count,
+                'Topic': topics_info.get('topic', ''),
+                'Subfield': topics_info.get('subfield', ''),
+                'Field': topics_info.get('field', ''),
+                'Domain': topics_info.get('domain', ''),
+                'Concepts': '; '.join(topics_info.get('concepts', []))
             }
 
             data.append(row)
@@ -5328,7 +4381,7 @@ class ExcelExporter:
                 row = {
                     'doi': cite_doi,
                     'publication_date': '',
-                    'Title': '',  # НОВАЯ КОЛОНКА
+                    'Title': '',
                     'authors': '',
                     'ORCID ID 1; ORCID ID 2... ORCID ID last': '',
                     'author count': 0,
@@ -5343,7 +4396,12 @@ class ExcelExporter:
                     'Annual cit counts (CR)': 0.0,
                     'Annual cit counts (OA)': 0.0,
                     'references_count': 0,
-                    'count': count
+                    'count': count,
+                    'Topic': '',
+                    'Subfield': '',
+                    'Field': '',
+                    'Domain': '',
+                    'Concepts': ''
                 }
                 data.append(row)
 
@@ -5388,6 +4446,7 @@ class ExcelExporter:
 
             pub_info = result['publication_info']
             authors = result['authors']
+            topics_info = result['topics_info']
 
             orcid_urls = result.get('orcid_urls', [])
             affiliations = list(set([aff for author in authors for aff in author.get('affiliation', []) if aff]))
@@ -5405,7 +4464,7 @@ class ExcelExporter:
             row = {
                 'doi': doi,
                 'publication_date': pub_info.get('publication_date', ''),
-                'Title': pub_info.get('title', '')[:200] + ('...' if len(pub_info.get('title', '')) > 200 else ''),  # НОВАЯ КОЛОНКА
+                'Title': pub_info.get('title', '')[:200] + ('...' if len(pub_info.get('title', '')) > 200 else ''),
                 'authors': '; '.join([a['name'] for a in authors]),
                 'ORCID ID 1; ORCID ID 2... ORCID ID last': '; '.join(orcid_urls),
                 'author count': len(authors),
@@ -5419,48 +4478,68 @@ class ExcelExporter:
                 'Citation counts (OA)': pub_info.get('citation_count_openalex', 0),
                 'Annual cit counts (CR)': round(annual_cr, 2),
                 'Annual cit counts (OA)': round(annual_oa, 2),
-                'references_count': len(result.get('references', []))
+                'references_count': result.get('references_count', 0),
+                'Topic': topics_info.get('topic', ''),
+                'Subfield': topics_info.get('subfield', ''),
+                'Field': topics_info.get('field', ''),
+                'Domain': topics_info.get('domain', ''),
+                'Concepts': '; '.join(topics_info.get('concepts', []))
             }
 
             data.append(row)
 
         return data
-
+    
     def _prepare_author_frequency(self, results: Dict[str, Dict], source_type: str) -> List[Dict]:
         author_counter = Counter()
         author_details = {}
-
+    
         for doi, result in results.items():
             if result.get('status') != 'success':
                 continue
-
+    
             for author in result['authors']:
                 full_name = author['name']
                 normalized_name = self.processor.normalize_author_name(full_name)
-
+    
+                # USE ONLY normalized_name as key
                 key = normalized_name
-                if author.get('orcid'):
-                    key = f"{normalized_name}_{author['orcid']}"
-
+    
                 author_counter[key] += 1
-
+    
                 if key not in author_details:
                     affiliation = author['affiliation'][0] if author.get('affiliation') else ""
                     orcid = author.get('orcid', '')
-
+                    
+                    # IMPORTANT FIX: Use author country, not article country
+                    country = ""
+                    
+                    # 1. Try to take author country from data (new author_country field)
+                    if 'author_country' in author and author['author_country']:
+                        country = author['author_country']
+                    
+                    # 2. If not, determine from author affiliation (FIX)
+                    elif affiliation:
+                        # Use method from DataProcessor via self.processor
+                        country = self._get_country_from_affiliation(affiliation)
+                    
+                    # 3. Fallback: if cannot determine, take from article
+                    if not country and result.get('countries'):
+                        country = result.get('countries', [''])[0]
+    
                     author_details[key] = {
                         'orcid': self.processor._format_orcid_id(orcid) if orcid else '',
                         'affiliation': affiliation,
-                        'country': result.get('countries', [''])[0] if result.get('countries') else '',
+                        'country': country,
                         'normalized_name': normalized_name
                     }
-
+    
         sorted_authors = sorted(author_counter.items(), key=lambda x: x[1], reverse=True)
-
+    
         data = []
         for key, count in sorted_authors:
             details = author_details.get(key, {})
-
+    
             if source_type == "analyzed":
                 frequency_column = 'Frequency count {in the analyzed articles}'
             elif source_type == "ref":
@@ -5469,7 +4548,7 @@ class ExcelExporter:
                 frequency_column = 'Frequency count {in the citing articles}'
             else:
                 frequency_column = f'Frequency count {{{source_type}}}'
-
+    
             row = {
                 'Surname + Initial_normalized': details.get('normalized_name', ''),
                 frequency_column: count,
@@ -5478,87 +4557,110 @@ class ExcelExporter:
                 'Country': details.get('country', '')
             }
             data.append(row)
-
+    
         return data
-
+    
     def _prepare_author_summary(self) -> List[Dict]:
         data = []
-
+        
+        # CHANGE: Calculate total analyzed articles for normalization
+        total_analyzed_articles = len([r for r in self.analyzed_results.values() if r.get('status') == 'success'])
+    
         for key, stats in self.author_stats.items():
             if stats['total_count'] == 0:
                 continue
-
-            # Calculate total count as sum of normalized values (as requested)
-            total_count = stats['total_count']
-
-            # Correct country
-            corrected_country = self._correct_country_for_author(key, self.affiliation_stats)
-
-            # Determine risk level based on normalized values
-            risk_level = "NORMAL"
-            risk_description = "Minimal author overlap between article types. Ethically acceptable."
-
-            if stats['normalized_reference'] > 0.21:
-                risk_level = "HIGH"
-                risk_description = "Potential high self-citing for reference works"
-            elif stats['normalized_citing'] > 0.5:
-                risk_level = "HIGH"
-                risk_description = "Potential high self-citing for citing works"
-            elif total_count > 0.3:
-                risk_level = "HIGH"
-                risk_description = "HIGH RISK OF SELF-CITATION/CROWDING: author is present in analyzed articles and actively cites them or is cited in them. Thorough review recommended."
-            elif total_count > 0.15:
-                risk_level = "MEDIUM"
-                risk_description = "MEDIUM LEVEL: moderate author presence in different article types. Possible normal academic interaction."
-            elif total_count > 0.05:
-                risk_level = "LOW"
-                risk_description = "LOW LEVEL: small author presence in various article types. Likely normal academic practice."
-
+    
+            # CHANGE: Calculate normalized_analyzed based on article_count_analyzed
+            normalized_analyzed = stats.get('normalized_analyzed', 0)
+            
+            # CHANGE: Total Count should be sum of normalized values, but normalized_analyzed already correct
+            total_count = normalized_analyzed + stats['normalized_reference'] + stats['normalized_citing']
+    
+            # Convert ORCID set to string
+            orcid_str = '; '.join(sorted(stats['orcid'])) if stats['orcid'] else ''
+    
+            # FIX: Use method from DataProcessor instead of non-existent one
+            country = ""
+            if stats['affiliation']:
+                # Use method from DataProcessor for country determination
+                country = self._get_country_from_affiliation(stats['affiliation'])
+            
+            # Fallback: use saved country or additional correction
+            if not country:
+                country = stats.get('country', '')
+                if not country:
+                    country = self._correct_country_for_author(key, self.affiliation_stats)
+    
             row = {
                 'Surname + Initial_normalized': stats['normalized_name'],
-                'ORCID ID': stats['orcid'],
+                'ORCID ID': orcid_str,
                 'Affiliation': stats['affiliation'],
-                'Country': corrected_country,
+                'Country': country,
                 'Total Count': round(total_count, 4),
-                'Normalized Analyzed': round(stats['normalized_analyzed'], 4),
+                'Normalized Analyzed': round(normalized_analyzed, 4),
                 'Normalized Reference': round(stats['normalized_reference'], 4),
-                'Normalized Citing': round(stats['normalized_citing'], 4),
-                'Risk_Level': risk_level,
-                'Risk_Description': risk_description
+                'Normalized Citing': round(stats['normalized_citing'], 4)
             }
             data.append(row)
-
-        data.sort(key=lambda x: {'HIGH': 3, 'MEDIUM': 2, 'LOW': 1, 'NORMAL': 0}.get(x['Risk_Level'], 0), reverse=True)
-
+    
+        data.sort(key=lambda x: x['Total Count'], reverse=True)
+    
         return data
 
     def _prepare_affiliation_summary(self) -> List[Dict]:
         data = []
-
+        
+        # CHANGE: Calculate total analyzed articles for normalization
+        total_analyzed_articles = len([r for r in self.analyzed_results.values() if r.get('status') == 'success'])
+    
         for affiliation, stats in self.affiliation_stats.items():
             if stats['total_count'] == 0:
                 continue
-
+    
             # Determine main country for affiliation
             main_country = ""
             if stats['countries']:
                 country_counter = Counter(stats['countries'])
-                main_country = country_counter.most_common(1)[0][0]
+                most_common = country_counter.most_common(1)
+                if most_common:
+                    main_country = most_common[0][0]
+    
+            # CHANGE: Calculate normalized_analyzed based on article_count_analyzed
+            normalized_analyzed = 0
+            if total_analyzed_articles > 0:
+                normalized_analyzed = stats['article_count_analyzed'] / total_analyzed_articles
+            
+            # CHANGE: Total Count should be sum of normalized values
+            total_count = normalized_analyzed + stats['normalized_reference'] + stats['normalized_citing']
 
+            # Check and format ROR data
+            colab_id = stats.get('colab_id', '')
+            website = stats.get('website', '')
+            
+            # If ROR analysis was enabled but data not found, add note
+            if self.enable_ror_analysis and not colab_id:
+                # Can add note that ROR not found
+                colab_id = "ROR not found"
+    
             row = {
                 'Affiliation': affiliation,
-                'Colab ID': stats['colab_id'],
-                'Web Site': stats['website'],
+                'Colab ID': colab_id,
+                'Web Site': website,
                 'Main Country': main_country,
-                'total count': round(stats['total_count'], 4),
-                'Normalized analyzed': round(stats['normalized_analyzed'], 4),
+                'total count': round(total_count, 4),
+                'Normalized analyzed': round(normalized_analyzed, 4),
                 'Normalized reference': round(stats['normalized_reference'], 4),
                 'Normalized citing': round(stats['normalized_citing'], 4)
             }
             data.append(row)
-
+    
         data.sort(key=lambda x: x['total count'], reverse=True)
-
+        
+        # Log result
+        ror_found = sum(1 for row in data if row['Colab ID'] and row['Colab ID'] != "ROR not found")
+        if self.enable_ror_analysis:
+            st.info(f"📊 In Affiliation_summary: {ror_found} records with ROR ID out of {len(data)} affiliations")
+    
         return data
 
     def _prepare_time_ref_analyzed_connections(self) -> List[Dict]:
@@ -5730,7 +4832,21 @@ class ExcelExporter:
             return None
 
     def _prepare_journal_frequency(self, results: Dict[str, Dict], source_type: str) -> List[Dict]:
+        """Prepare data for Journal freq sheet with citation metrics"""
         journal_counter = Counter()
+        journal_citation_cr = defaultdict(list)  # Crossref citations list for each journal
+        journal_citation_oa = defaultdict(list)  # OpenAlex citations list for each journal
+        journal_articles = defaultdict(list)  # Article list for each journal (for additional info)
+
+        # Determine which source to take citation data from
+        if source_type == "analyzed":
+            source_data = self.analyzed_results
+        elif source_type == "ref":
+            source_data = self.ref_results
+        elif source_type == "citing":
+            source_data = self.citing_results
+        else:
+            source_data = results
 
         for doi, result in results.items():
             if result.get('status') != 'success':
@@ -5739,11 +4855,80 @@ class ExcelExporter:
             journal = result['publication_info'].get('journal', '')
             if journal:
                 journal_counter[journal] += 1
+                
+                # Get citation data from corresponding source
+                if doi in source_data and source_data[doi].get('status') == 'success':
+                    source_result = source_data[doi]
+                    pub_info = source_result.get('publication_info', {})
+                    
+                    # Add Crossref citations
+                    cr_citations = pub_info.get('citation_count_crossref', 0)
+                    if cr_citations > 0:
+                        journal_citation_cr[journal].append(cr_citations)
+                    
+                    # Add OpenAlex citations
+                    oa_citations = pub_info.get('citation_count_openalex', 0)
+                    if oa_citations > 0:
+                        journal_citation_oa[journal].append(oa_citations)
+                    
+                    # Save article for additional info
+                    journal_articles[journal].append({
+                        'doi': doi,
+                        'title': pub_info.get('title', ''),
+                        'year': pub_info.get('year', ''),
+                        'cr_citations': cr_citations,
+                        'oa_citations': oa_citations
+                    })
 
         sorted_journals = sorted(journal_counter.items(), key=lambda x: x[1], reverse=True)
 
-        return [{'Full Journal Name': journal, 'Count': count}
-                for journal, count in sorted_journals]
+        data = []
+        for journal, count in sorted_journals:
+            # Calculate Crossref citation metrics
+            cr_citations_list = journal_citation_cr.get(journal, [])
+            total_cr = sum(cr_citations_list)
+            avg_cr = total_cr / len(cr_citations_list) if cr_citations_list else 0
+            
+            # Calculate median for Crossref
+            median_cr = 0
+            if cr_citations_list:
+                sorted_cr = sorted(cr_citations_list)
+                n = len(sorted_cr)
+                if n % 2 == 1:
+                    median_cr = sorted_cr[n // 2]
+                else:
+                    median_cr = (sorted_cr[n // 2 - 1] + sorted_cr[n // 2]) / 2
+            
+            # Calculate OpenAlex citation metrics
+            oa_citations_list = journal_citation_oa.get(journal, [])
+            total_oa = sum(oa_citations_list)
+            avg_oa = total_oa / len(oa_citations_list) if oa_citations_list else 0
+            
+            # Calculate median for OpenAlex
+            median_oa = 0
+            if oa_citations_list:
+                sorted_oa = sorted(oa_citations_list)
+                n = len(sorted_oa)
+                if n % 2 == 1:
+                    median_oa = sorted_oa[n // 2]
+                else:
+                    median_oa = (sorted_oa[n // 2 - 1] + sorted_oa[n // 2]) / 2
+            
+            row = {
+                'Full Journal Name': journal,
+                'Count': count,
+                'Total citations (CR)': total_cr,
+                'Total citations (OA)': total_oa,
+                'Average citations (CR)': round(avg_cr, 2),
+                'Average citations (OA)': round(avg_oa, 2),
+                'Median citation (CR)': median_cr,
+                'Median citation (OA)': median_oa,
+                'Articles with CR data': len(cr_citations_list),
+                'Articles with OA data': len(oa_citations_list)
+            }
+            data.append(row)
+
+        return data
 
     def _prepare_affiliation_frequency(self, results: Dict[str, Dict], source_type: str) -> List[Dict]:
         affiliation_counter = Counter()
@@ -5891,12 +5076,12 @@ class ExcelExporter:
                 counter_cite[cite] += 1
 
 # ============================================================================
-# 🚀 ГЛАВНЫЙ КЛАСС СИСТЕМЫ (АДАПТИРОВАННЫЙ ДЛЯ STREAMLIT)
+# 🚀 MAIN SYSTEM CLASS (UPDATED FOR STREAMLIT WITH RESUME)
 # ============================================================================
 
 class ArticleAnalyzerSystem:
     def __init__(self):
-        # Инициализация системы в состоянии сессии
+        # Initialize system in session state
         if 'cache_manager' not in st.session_state:
             st.session_state.cache_manager = SmartCacheManager()
         if 'delay_manager' not in st.session_state:
@@ -5917,15 +5102,9 @@ class ArticleAnalyzerSystem:
             self.cache_manager, self.delay_manager,
             self.data_processor, self.failed_tracker
         )
-        self.hierarchical_analyzer = HierarchicalDataAnalyzer(
-            self.cache_manager, self.data_processor, self.doi_processor
-        )
-        self.frontiers_analyzer = FrontiersHotTopicsAnalyzer(self.cache_manager, self.data_processor)
         self.excel_exporter = ExcelExporter(self.data_processor, self.ror_client, self.failed_tracker)
-        self.excel_exporter.set_hierarchical_analyzer(self.hierarchical_analyzer)
-        self.excel_exporter.set_frontiers_analyzer(self.frontiers_analyzer)
 
-        # Инициализация данных в состоянии сессии
+        # Initialize data in session state
         if 'analyzed_results' not in st.session_state:
             st.session_state.analyzed_results = {}
         if 'ref_results' not in st.session_state:
@@ -5934,6 +5113,10 @@ class ArticleAnalyzerSystem:
             st.session_state.citing_results = {}
         if 'processing_complete' not in st.session_state:
             st.session_state.processing_complete = False
+        if 'resume_available' not in st.session_state:
+            st.session_state.resume_available = False
+        if 'enable_ror_analysis' not in st.session_state:
+            st.session_state.enable_ror_analysis = False
 
         self.system_stats = {
             'total_dois_processed': 0,
@@ -5945,10 +5128,24 @@ class ArticleAnalyzerSystem:
             'total_cite_dois': 0
         }
 
+        # Check for resume availability
+        self._check_resume_availability()
+
+    def _check_resume_availability(self):
+        """Check if there is saved progress for resuming"""
+        stage, processed, remaining = self.cache_manager.load_progress()
+        if stage and remaining:
+            st.session_state.resume_available = True
+            st.session_state.resume_stage = stage
+            st.session_state.resume_remaining = remaining
+        else:
+            st.session_state.resume_available = False
+
     def _parse_dois(self, input_text: str) -> List[str]:
         if not input_text:
             return []
 
+        # Remove DOI duplicates during parsing
         separators = [',', ';', '\n', '\t', '|']
 
         for sep in separators:
@@ -5964,7 +5161,24 @@ class ArticleAnalyzerSystem:
             if doi and len(doi) > 5:
                 dois.append(doi)
 
-        return list(set(dois))
+        # Remove duplicates and check for repeats
+        unique_dois = []
+        seen_dois = set()
+        duplicate_dois = []
+        
+        for doi in dois:
+            if doi not in seen_dois:
+                seen_dois.add(doi)
+                unique_dois.append(doi)
+            else:
+                duplicate_dois.append(doi)
+        
+        # Show duplicate warning
+        if duplicate_dois:
+            st.warning(f"⚠️ Duplicate DOI found ({len(duplicate_dois)}): {', '.join(duplicate_dois[:5])}{'...' if len(duplicate_dois) > 5 else ''}")
+            st.info(f"Only unique DOI will be processed: {len(unique_dois)}")
+        
+        return unique_dois
 
     def _clean_doi(self, doi: str) -> str:
         if not doi or not isinstance(doi, str):
@@ -5981,103 +5195,149 @@ class ArticleAnalyzerSystem:
         return doi.strip()
 
     def process_dois(self, dois: List[str], num_workers: int = Config.DEFAULT_WORKERS,
-                    ethical_analysis_types: Dict[str, bool] = None,
-                    frontiers_analysis_types: Dict[str, bool] = None,
-                    progress_container=None):
-        """Основная функция обработки DOI"""
+                    progress_container=None, resume: bool = False, enable_ror: bool = False):
+        """Main DOI processing function with resume support"""
         
         start_time = time.time()
+        
+        # Set ROR analysis flag
+        self.excel_exporter.enable_ror_analysis = enable_ror
+        st.session_state.enable_ror_analysis = enable_ror
 
-        # Обработка оригинальных DOI
-        if progress_container:
-            progress_container.text("📚 Обработка оригинальных DOI...")
-            analyzed_progress = progress_container.progress(0)
+        # Check resume possibility
+        if resume and st.session_state.resume_available:
+            stage = st.session_state.resume_stage
+            remaining_dois = st.session_state.resume_remaining
+            
+            if progress_container:
+                progress_container.text(f"🔄 Resuming processing from stage: {stage}")
+            
+            # Process remaining DOI depending on stage
+            if stage == "analyzed":
+                # Continue processing analyzed articles
+                st.session_state.analyzed_results = self.doi_processor.process_doi_batch_with_resume(
+                    remaining_dois, "analyzed", None, True, True, Config.BATCH_SIZE, 
+                    progress_container, resume=True
+                )
+                
+                # After completing analyzed, continue with reference
+                all_ref_dois = self.doi_processor.collect_all_references(st.session_state.analyzed_results)
+                if all_ref_dois:
+                    ref_dois_to_analyze = all_ref_dois[:10000]
+                    st.session_state.ref_results = self.doi_processor.process_doi_batch_with_resume(
+                        ref_dois_to_analyze, "ref", None, True, True, Config.BATCH_SIZE,
+                        progress_container, resume=False
+                    )
+                
+                # Continue with citing
+                all_cite_dois = self.doi_processor.collect_all_citations(st.session_state.analyzed_results)
+                if all_cite_dois:
+                    cite_dois_to_analyze = all_cite_dois[:10000]
+                    st.session_state.citing_results = self.doi_processor.process_doi_batch_with_resume(
+                        cite_dois_to_analyze, "citing", None, True, True, Config.BATCH_SIZE,
+                        progress_container, resume=False
+                    )
+                    
+            elif stage == "ref":
+                # Continue processing reference articles
+                st.session_state.ref_results = self.doi_processor.process_doi_batch_with_resume(
+                    remaining_dois, "ref", None, True, True, Config.BATCH_SIZE,
+                    progress_container, resume=True
+                )
+                
+                # After completing reference, process citing
+                all_cite_dois = self.doi_processor.collect_all_citations(st.session_state.analyzed_results)
+                if all_cite_dois:
+                    cite_dois_to_analyze = all_cite_dois[:10000]
+                    st.session_state.citing_results = self.doi_processor.process_doi_batch_with_resume(
+                        cite_dois_to_analyze, "citing", None, True, True, Config.BATCH_SIZE,
+                        progress_container, resume=False
+                    )
+                    
+            elif stage == "citing":
+                # Continue processing citing articles
+                st.session_state.citing_results = self.doi_processor.process_doi_batch_with_resume(
+                    remaining_dois, "citing", None, True, True, Config.BATCH_SIZE,
+                    progress_container, resume=True
+                )
+                
+            # Reset resume flag
+            st.session_state.resume_available = False
+            
         else:
-            analyzed_progress = None
+            # Normal processing from beginning
+            if progress_container:
+                progress_container.text("📚 Processing original DOI...")
 
-        st.session_state.analyzed_results = self.doi_processor.process_doi_batch(
-            dois, "analyzed", None, True, True, Config.BATCH_SIZE, progress_container
-        )
+            # Process original DOI
+            st.session_state.analyzed_results = self.doi_processor.process_doi_batch_with_resume(
+                dois, "analyzed", None, True, True, Config.BATCH_SIZE, progress_container, resume=False
+            )
 
-        if analyzed_progress:
-            analyzed_progress.progress(1.0)
+            # Update counters
+            for doi, result in st.session_state.analyzed_results.items():
+                if result.get('status') == 'success':
+                    self.excel_exporter.update_counters(
+                        result.get('references', []),
+                        result.get('citations', []),
+                        "analyzed"
+                    )
 
-        # Обновление счетчиков
-        for doi, result in st.session_state.analyzed_results.items():
-            if result.get('status') == 'success':
-                self.excel_exporter.update_counters(
-                    result.get('references', []),
-                    result.get('citations', []),
-                    "analyzed"
+            # Collect and process reference DOI
+            if progress_container:
+                progress_container.text("📎 Collecting reference DOI...")
+
+            all_ref_dois = self.doi_processor.collect_all_references(st.session_state.analyzed_results)
+            self.system_stats['total_ref_dois'] = len(all_ref_dois)
+
+            if all_ref_dois:
+                if progress_container:
+                    progress_container.text(f"📎 Found {len(all_ref_dois)} reference DOI for analysis")
+
+                ref_dois_to_analyze = all_ref_dois[:10000]  # Limit for performance
+
+                st.session_state.ref_results = self.doi_processor.process_doi_batch_with_resume(
+                    ref_dois_to_analyze, "ref", None, True, True, Config.BATCH_SIZE, progress_container, resume=False
                 )
 
-        # Сбор и обработка reference DOI
-        if progress_container:
-            progress_container.text("📎 Сбор reference DOI...")
+                for doi, result in st.session_state.ref_results.items():
+                    if result.get('status') == 'success':
+                        self.excel_exporter.update_counters(
+                            result.get('references', []),
+                            result.get('citations', []),
+                            "ref"
+                        )
 
-        all_ref_dois = self.doi_processor.collect_all_references(st.session_state.analyzed_results)
-        self.system_stats['total_ref_dois'] = len(all_ref_dois)
-
-        if all_ref_dois:
+            # Collect and process citation DOI
             if progress_container:
-                progress_container.text(f"📎 Найдено {len(all_ref_dois)} reference DOI для анализа")
-                ref_progress = progress_container.progress(0)
-            else:
-                ref_progress = None
+                progress_container.text("🔗 Collecting citation DOI...")
 
-            ref_dois_to_analyze = all_ref_dois[:10000]  # Ограничиваем для производительности
+            all_cite_dois = self.doi_processor.collect_all_citations(st.session_state.analyzed_results)
+            self.system_stats['total_cite_dois'] = len(all_cite_dois)
 
-            st.session_state.ref_results = self.doi_processor.process_doi_batch(
-                ref_dois_to_analyze, "ref", None, True, True, Config.BATCH_SIZE, progress_container
-            )
+            if all_cite_dois:
+                if progress_container:
+                    progress_container.text(f"🔗 Found {len(all_cite_dois)} citation DOI for analysis")
 
-            if ref_progress:
-                ref_progress.progress(1.0)
+                cite_dois_to_analyze = all_cite_dois[:10000]  # Limit for performance
 
-            for doi, result in st.session_state.ref_results.items():
-                if result.get('status') == 'success':
-                    self.excel_exporter.update_counters(
-                        result.get('references', []),
-                        result.get('citations', []),
-                        "ref"
-                    )
+                st.session_state.citing_results = self.doi_processor.process_doi_batch_with_resume(
+                    cite_dois_to_analyze, "citing", None, True, True, Config.BATCH_SIZE, progress_container, resume=False
+                )
 
-        # Сбор и обработка citation DOI
-        if progress_container:
-            progress_container.text("🔗 Сбор citation DOI...")
+                for doi, result in st.session_state.citing_results.items():
+                    if result.get('status') == 'success':
+                        self.excel_exporter.update_counters(
+                            result.get('references', []),
+                            result.get('citations', []),
+                            "citing"
+                        )
 
-        all_cite_dois = self.doi_processor.collect_all_citations(st.session_state.analyzed_results)
-        self.system_stats['total_cite_dois'] = len(all_cite_dois)
-
-        if all_cite_dois:
-            if progress_container:
-                progress_container.text(f"🔗 Найдено {len(all_cite_dois)} citation DOI для анализа")
-                cite_progress = progress_container.progress(0)
-            else:
-                cite_progress = None
-
-            cite_dois_to_analyze = all_cite_dois[:10000]  # Ограничиваем для производительности
-
-            st.session_state.citing_results = self.doi_processor.process_doi_batch(
-                cite_dois_to_analyze, "citing", None, True, True, Config.BATCH_SIZE, progress_container
-            )
-
-            if cite_progress:
-                cite_progress.progress(1.0)
-
-            for doi, result in st.session_state.citing_results.items():
-                if result.get('status') == 'success':
-                    self.excel_exporter.update_counters(
-                        result.get('references', []),
-                        result.get('citations', []),
-                        "citing"
-                    )
-
-        # Повторная обработка неудачных DOI
+        # Retry failed DOI
         failed_stats = self.failed_tracker.get_stats()
         if failed_stats['total_failed'] > 0:
             if progress_container:
-                progress_container.text("🔄 Повторная обработка неудачных DOI...")
+                progress_container.text("🔄 Retrying failed DOI...")
             retry_results = self.doi_processor.retry_failed_dois(self.failed_tracker)
 
             for doi, result in retry_results.items():
@@ -6092,7 +5352,7 @@ class ArticleAnalyzerSystem:
 
         processing_time = time.time() - start_time
 
-        # Обновляем статистику
+        # Update statistics
         self.system_stats['total_dois_processed'] += len(dois)
         successful = sum(1 for r in st.session_state.analyzed_results.values() if r.get('status') == 'success')
         failed = len(dois) - successful
@@ -6108,221 +5368,131 @@ class ArticleAnalyzerSystem:
             'total_cites': self.system_stats['total_cite_dois']
         }
 
-    def create_excel_report(self, ethical_analysis_types: Dict[str, bool] = None,
-                          frontiers_analysis_types: Dict[str, bool] = None, 
-                          progress_container=None):
-        """Создает Excel отчет"""
-        if ethical_analysis_types is None:
-            ethical_analysis_types = {
-                'quick_checks': True,
-                'medium_insights': True,
-                'deep_analysis': False,
-                'analyzed_citing_relationships': False
-            }
-
-        if frontiers_analysis_types is None:
-            frontiers_analysis_types = {
-                'title_term_growth': True,
-                'topic_momentum': True,
-                'term_topic_convergence': True,
-                'citation_bursts': True,
-                'early_adopters': False,
-                'frontier_candidates': True,
-                'temporal_hotspots': False,
-                'predictive_horizons': False
-            }
-
-        # Обновляем экспортер данными
+    def create_excel_report(self, progress_container=None):
+        """Create Excel report"""
+        # Update exporter with data
         self.excel_exporter.analyzed_results = st.session_state.analyzed_results
         self.excel_exporter.ref_results = st.session_state.ref_results
         self.excel_exporter.citing_results = st.session_state.citing_results
-
-        # Создаем отчет в памяти
+        
+        # Set ROR analysis flag
+        self.excel_exporter.enable_ror_analysis = st.session_state.enable_ror_analysis
+        
+        if progress_container:
+            if st.session_state.enable_ror_analysis:
+                progress_container.info("🔍 ROR analysis enabled. Organization data will be collected.")
+            else:
+                progress_container.info("ℹ️ ROR analysis disabled. Enable option to get ROR ID.")
+    
+        # Create report in memory
         excel_file = self.excel_exporter.create_comprehensive_report(
             st.session_state.analyzed_results,
             st.session_state.ref_results,
             st.session_state.citing_results,
-            ethical_analysis_types,
-            frontiers_analysis_types,
-            progress_container=progress_container
+            progress_container=progress_container,
+            enable_ror=st.session_state.enable_ror_analysis
         )
-
+    
         return excel_file
 
     def clear_data(self):
-        """Очищает все данные"""
+        """Clear all data"""
         st.session_state.analyzed_results = {}
         st.session_state.ref_results = {}
         st.session_state.citing_results = {}
         st.session_state.processing_complete = False
+        st.session_state.resume_available = False
+        st.session_state.enable_ror_analysis = False
         self.failed_tracker.clear()
+        self.cache_manager.clear_progress()
 
 # ============================================================================
-# 🎛️ ИНТЕРФЕЙС STREAMLIT
+# 🎛️ STREAMLIT INTERFACE (UPDATED)
 # ============================================================================
 
 def main():
-    # Заголовок приложения
-    st.title("📚 Анализатор научных статей по DOI")
+    # Application header
+    st.title("📚 Scientific Article Analyzer by DOI")
     st.markdown("""
-    Анализируйте научные статьи по DOI с умным кэшированием, анализом ссылок и цитирований,
-    а также выявлением неэтичных практик цитирования и research frontiers.
+    Analyze scientific articles by DOI with smart caching, link and citation analysis.
     """)
 
-    # Инициализация системы
+    # System initialization
     if 'system' not in st.session_state:
         st.session_state.system = ArticleAnalyzerSystem()
 
     system = st.session_state.system
 
-    # Боковая панель для настроек
+    # Sidebar for settings
     with st.sidebar:
-        st.header("⚙️ Настройки")
+        st.header("⚙️ Settings")
         
-        # Настройка параллельности
+        # Parallelism settings
         num_workers = st.slider(
-            "Количество потоков",
+            "Number of threads",
             min_value=Config.MIN_WORKERS,
             max_value=Config.MAX_WORKERS,
             value=Config.DEFAULT_WORKERS,
-            help="Количество параллельных потоков для обработки DOI"
+            help="Number of parallel threads for DOI processing"
         )
         
-        st.markdown("---")
-        
-        # Настройки анализа неэтичных практик
-        st.subheader("🔍 Анализ неэтичных практик")
-        
-        quick_checks = st.checkbox(
-            "Quick Checks (5-10 сек на статью)",
-            value=True,
-            help="Быстрые проверки на наличие красных флагов"
-        )
-        
-        medium_insights = st.checkbox(
-            "Medium Insights (15-30 сек на статью)",
-            value=True,
-            help="Средний анализ с временными паттернами и сетевой статистикой"
-        )
-        
-        deep_analysis = st.checkbox(
-            "Deep Analysis (60-120 сек на статью)",
+        # ROR analysis settings
+        enable_ror = st.checkbox(
+            "Enable ROR analysis",
             value=False,
-            help="Глубокий анализ с ML-оценкой рисков"
-        )
-        
-        citing_relationships = st.checkbox(
-            "Analyzed-Citing Relationships (30-60 сек на пару)",
-            value=False,
-            help="Анализ связей между анализируемыми и цитирующими статьями"
+            help="Enable ROR ID search for affiliations (takes additional time)"
         )
         
         st.markdown("---")
         
-        # Настройки анализа Frontiers & Hot Topics
-        st.subheader("🚀 Анализ Frontiers & Hot Topics")
+        # Cache management
+        st.subheader("🗂️ Cache Management")
         
-        frontiers_analysis = st.checkbox(
-            "Включить анализ Frontiers & Hot Topics",
-            value=True,
-            help="Анализ emerging research fronts и горячих тем"
-        )
-        
-        if frontiers_analysis:
-            with st.expander("Настройки анализа Frontiers"):
-                title_term_growth = st.checkbox(
-                    "Title Term Growth", 
-                    value=True,
-                    help="Анализ роста терминов в заголовках"
-                )
-                
-                topic_momentum = st.checkbox(
-                    "Topic Momentum Map", 
-                    value=True,
-                    help="Динамика предметных областей"
-                )
-                
-                term_topic_convergence = st.checkbox(
-                    "Term-Topic Convergence", 
-                    value=True,
-                    help="Сходимость терминов и тем"
-                )
-                
-                citation_bursts = st.checkbox(
-                    "Citation Burst Analysis", 
-                    value=True,
-                    help="Анализ всплесков цитирования"
-                )
-                
-                early_adopters = st.checkbox(
-                    "Early Adopters Network", 
-                    value=False,
-                    help="Сеть ранних последователей"
-                )
-                
-                frontier_candidates = st.checkbox(
-                    "Frontier Candidates Scoreboard", 
-                    value=True,
-                    help="Сводный рейтинг кандидатов в frontiers"
-                )
-                
-                temporal_hotspots = st.checkbox(
-                    "Temporal Hotspots Map", 
-                    value=False,
-                    help="Карта временных горячих точек"
-                )
-                
-                predictive_horizons = st.checkbox(
-                    "Predictive Horizons", 
-                    value=False,
-                    help="Прогнозные горизонты для emerging topics"
-                )
-        else:
-            title_term_growth = False
-            topic_momentum = False
-            term_topic_convergence = False
-            citation_bursts = False
-            early_adopters = False
-            frontier_candidates = False
-            temporal_hotspots = False
-            predictive_horizons = False
-        
-        st.markdown("---")
-        
-        # Управление кэшем
-        st.subheader("🗂️ Управление кэшем")
-        
-        if st.button("Очистить кэш", type="secondary"):
+        if st.button("Clear cache", type="secondary"):
             system.cache_manager.clear_all()
-            st.success("Кэш очищен!")
+            st.success("Cache cleared!")
         
-        # Показать статистику кэша
+        # Show cache statistics
         cache_stats = system.cache_manager.get_stats()
-        with st.expander("Статистика кэша"):
-            st.write(f"Эффективность: {cache_stats['hit_ratio']}%")
-            st.write(f"API вызовов сохранено: {cache_stats['api_calls_saved']}")
-            st.write(f"Размер кэша: {cache_stats['cache_size_mb']} MB")
+        with st.expander("Cache statistics"):
+            st.write(f"Efficiency: {cache_stats['hit_ratio']}%")
+            st.write(f"API calls saved: {cache_stats['api_calls_saved']}")
+            st.write(f"Cache size: {cache_stats['cache_size_mb']} MB")
+        
+        # Check resume availability
+        if st.session_state.resume_available:
+            st.markdown("---")
+            st.subheader("🔄 Resume")
+            st.info(f"Resume available from stage: {st.session_state.resume_stage}")
+            st.write(f"Remaining DOI: {len(st.session_state.resume_remaining)}")
 
-    # Основная область ввода
-    st.header("📝 Ввод DOI")
+    # Main input area
+    st.header("📝 DOI Input")
     
     doi_input = st.text_area(
-        "Введите один или несколько DOI",
+        "Enter one or multiple DOI",
         height=150,
-        placeholder="Введите DOI через запятую, точку с запятой или с новой строки.\n\nПримеры:\n10.1038/nature12373\n10.1126/science.1252914, 10.1016/j.cell.2019.11.017",
-        help="Можно вводить несколько DOI, разделяя их запятыми, точками с запятой или переносами строк"
+        placeholder="Enter DOI separated by comma, semicolon or new line.\n\nExamples:\n10.1038/nature12373\n10.1126/science.1252914, 10.1016/j.cell.2019.11.017",
+        help="Can enter multiple DOI separated by commas, semicolons or line breaks"
     )
     
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        process_btn = st.button("📊 Обработать DOI", type="primary", use_container_width=True)
+        process_btn = st.button("📊 Process DOI", type="primary", use_container_width=True)
     
     with col2:
-        clear_btn = st.button("🧹 Очистить данные", type="secondary", use_container_width=True)
+        if st.session_state.resume_available:
+            resume_btn = st.button("🔄 Resume", type="primary", use_container_width=True)
+        else:
+            resume_btn = None
+            st.button("🔄 Resume", type="secondary", use_container_width=True, disabled=True)
     
     with col3:
-        # Проверяем несколько условий для активации кнопки
+        clear_btn = st.button("🧹 Clear data", type="secondary", use_container_width=True)
+    
+    with col4:
+        # Check multiple conditions for button activation
         export_disabled = not (
             hasattr(st.session_state, 'processing_complete') and 
             st.session_state.processing_complete and
@@ -6330,160 +5500,138 @@ def main():
             st.session_state.analyzed_results
         )
         
-        export_btn = st.button("💾 Экспорт Excel", 
+        export_btn = st.button("💾 Export Excel", 
                              type="secondary", 
                              use_container_width=True,
                              disabled=export_disabled)
     
-    # Обработка нажатий кнопок
+    # Handle button clicks
     if process_btn and doi_input:
         dois = system._parse_dois(doi_input)
         
         if not dois:
-            st.error("❌ Не найдено валидных DOI. Проверьте формат ввода.")
+            st.error("❌ No valid DOI found. Check input format.")
         else:
-            st.info(f"🔍 Найдено {len(dois)} валидных DOI для обработки")
+            st.info(f"🔍 Found {len(dois)} valid DOI for processing")
             
-            # Контейнер для прогресса
+            # Progress container
             progress_container = st.container()
             
             with progress_container:
-                st.write("🚀 Начинаю обработку...")
+                st.write("🚀 Starting processing...")
                 
-                # Создаем прогресс-бары
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                
-                # Собираем настройки анализа
-                ethical_analysis_types = {
-                    'quick_checks': quick_checks,
-                    'medium_insights': medium_insights,
-                    'deep_analysis': deep_analysis,
-                    'analyzed_citing_relationships': citing_relationships
-                }
-                
-                frontiers_analysis_types = {}
-                if frontiers_analysis:
-                    frontiers_analysis_types = {
-                        'title_term_growth': title_term_growth,
-                        'topic_momentum': topic_momentum,
-                        'term_topic_convergence': term_topic_convergence,
-                        'citation_bursts': citation_bursts,
-                        'early_adopters': early_adopters,
-                        'frontier_candidates': frontier_candidates,
-                        'temporal_hotspots': temporal_hotspots,
-                        'predictive_horizons': predictive_horizons
-                    }
-                
-                # Запускаем обработку
+                # Start processing
                 try:
                     results = system.process_dois(
                         dois, 
                         num_workers, 
-                        ethical_analysis_types,
-                        frontiers_analysis_types,
-                        progress_container
+                        progress_container,
+                        resume=False,
+                        enable_ror=enable_ror
                     )
                     
-                    # Обновляем прогресс
-                    progress_bar.progress(100)
-                    status_text.success("✅ Обработка завершена!")
-                    
-                    # Показываем результаты
-                    st.success(f"✅ Обработка завершена за {results['processing_time']:.1f} секунд")
+                    st.success(f"✅ Processing completed in {results['processing_time']:.1f} seconds")
                     
                     col1, col2, col3, col4 = st.columns(4)
                     with col1:
-                        st.metric("Успешно", results['successful'])
+                        st.metric("Successful", results['successful'])
                     with col2:
-                        st.metric("Ошибок", results['failed'])
+                        st.metric("Errors", results['failed'])
                     with col3:
                         st.metric("Reference DOI", results['total_refs'])
                     with col4:
                         st.metric("Citation DOI", results['total_cites'])
                     
-                    # Показываем статистику по неудачным DOI
+                    # Show failed DOI statistics
                     failed_stats = system.failed_tracker.get_stats()
                     if failed_stats['total_failed'] > 0:
-                        with st.expander(f"❌ Неудачные DOI ({failed_stats['total_failed']})"):
-                            st.write(f"• Из анализируемых: {failed_stats['analyzed_failed']}")
-                            st.write(f"• Из ссылок: {failed_stats['ref_failed']}")
-                            st.write(f"• Из цитирований: {failed_stats['citing_failed']}")
+                        with st.expander(f"❌ Failed DOI ({failed_stats['total_failed']})"):
+                            st.write(f"• From analyzed: {failed_stats['analyzed_failed']}")
+                            st.write(f"• From references: {failed_stats['ref_failed']}")
+                            st.write(f"• From citations: {failed_stats['citing_failed']}")
                     
-                    # Показываем примеры обработанных статей
-                    with st.expander("📊 Примеры обработанных статей"):
+                    # Show examples of processed articles
+                    with st.expander("📊 Examples of processed articles"):
                         successful_count = 0
                         for doi, result in st.session_state.analyzed_results.items():
                             if result.get('status') == 'success' and successful_count < 5:
                                 pub_info = result['publication_info']
                                 st.write(f"**{pub_info.get('title', '')[:80]}...**")
                                 st.write(f"DOI: {doi}")
-                                st.write(f"Журнал: {pub_info.get('journal', '')}")
-                                st.write(f"Год: {pub_info.get('year', '')}")
+                                st.write(f"Journal: {pub_info.get('journal', '')}")
+                                st.write(f"Year: {pub_info.get('year', '')}")
                                 st.write("---")
                                 successful_count += 1
                 
                 except Exception as e:
-                    st.error(f"❌ Ошибка при обработке: {str(e)}")
+                    st.error(f"❌ Processing error: {str(e)}")
+                    st.info("⚠️ Processing progress saved. Can resume from interruption point.")
+    
+    elif resume_btn and st.session_state.resume_available:
+        # Resume processing
+        progress_container = st.container()
+        
+        with progress_container:
+            st.write(f"🔄 Resuming processing from stage: {st.session_state.resume_stage}")
+            
+            try:
+                results = system.process_dois(
+                    [],  # Empty list as using saved DOI
+                    num_workers,
+                    progress_container,
+                    resume=True,
+                    enable_ror=enable_ror
+                )
+                
+                st.success(f"✅ Processing resumed and completed")
+                
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Successful", results['successful'])
+                with col2:
+                    st.metric("Errors", results['failed'])
+                with col3:
+                    st.metric("Reference DOI", results['total_refs'])
+                with col4:
+                    st.metric("Citation DOI", results['total_cites'])
+                    
+            except Exception as e:
+                st.error(f"❌ Resume processing error: {str(e)}")
     
     elif process_btn and not doi_input:
-        st.warning("⚠️ Введите DOI для обработки")
+        st.warning("⚠️ Enter DOI for processing")
     
     if clear_btn:
         system.clear_data()
-        st.success("✅ Данные очищены")
+        st.success("✅ Data cleared")
         st.rerun()
     
     if export_btn and st.session_state.processing_complete:
-        with st.spinner("📊 Создание Excel отчета..."):
+        with st.spinner("📊 Creating Excel report..."):
             try:
-                # Собираем настройки анализа
-                ethical_analysis_types = {
-                    'quick_checks': quick_checks,
-                    'medium_insights': medium_insights,
-                    'deep_analysis': deep_analysis,
-                    'analyzed_citing_relationships': citing_relationships
-                }
+                # Create report
+                excel_file = system.create_excel_report()
                 
-                frontiers_analysis_types = {}
-                if frontiers_analysis:
-                    frontiers_analysis_types = {
-                        'title_term_growth': title_term_growth,
-                        'topic_momentum': topic_momentum,
-                        'term_topic_convergence': term_topic_convergence,
-                        'citation_bursts': citation_bursts,
-                        'early_adopters': early_adopters,
-                        'frontier_candidates': frontier_candidates,
-                        'temporal_hotspots': temporal_hotspots,
-                        'predictive_horizons': predictive_horizons
-                    }
-                
-                # Создаем отчет
-                excel_file = system.create_excel_report(
-                    ethical_analysis_types, 
-                    frontiers_analysis_types
-                )
-                
-                # Создаем имя файла
+                # Create filename
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 filename = f"articles_analysis_{timestamp}.xlsx"
                 
-                # Предоставляем файл для скачивания
+                # Provide file for download
                 st.download_button(
-                    label="⬇️ Скачать Excel файл",
+                    label="⬇️ Download Excel file",
                     data=excel_file,
                     file_name=filename,
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
                 
-                st.success("✅ Excel отчет создан и готов к скачивания")
+                st.success("✅ Excel report created and ready for download")
                 
             except Exception as e:
-                st.error(f"❌ Ошибка при создании отчета: {str(e)}")
+                st.error(f"❌ Report creation error: {str(e)}")
     
-    # Показываем статистику, если есть обработанные данные
+    # Show statistics if there is processed data
     if st.session_state.processing_complete:
-        st.header("📈 Статистика обработки")
+        st.header("📈 Processing Statistics")
         
         successful = sum(1 for r in st.session_state.analyzed_results.values() if r.get('status') == 'success')
         total = len(st.session_state.analyzed_results)
@@ -6492,7 +5640,7 @@ def main():
         
         with col1:
             st.metric(
-                "Анализируемые статьи",
+                "Analyzed articles",
                 f"{successful}/{total}",
                 f"{successful/total*100:.1f}%" if total > 0 else "0%"
             )
@@ -6501,7 +5649,7 @@ def main():
             ref_success = sum(1 for r in st.session_state.ref_results.values() if r.get('status') == 'success')
             ref_total = len(st.session_state.ref_results)
             st.metric(
-                "Reference статьи",
+                "Reference articles",
                 f"{ref_success}/{ref_total}" if ref_total > 0 else "0",
                 f"{ref_success/ref_total*100:.1f}%" if ref_total > 0 else "0%"
             )
@@ -6510,20 +5658,20 @@ def main():
             cite_success = sum(1 for r in st.session_state.citing_results.values() if r.get('status') == 'success')
             cite_total = len(st.session_state.citing_results)
             st.metric(
-                "Citing статьи",
+                "Citing articles",
                 f"{cite_success}/{cite_total}" if cite_total > 0 else "0",
                 f"{cite_success/cite_total*100:.1f}%" if cite_total > 0 else "0%"
             )
         
-        # Детальная статистика
-        with st.expander("📊 Детальная статистика"):
-            # Статистика по авторам
+        # Detailed statistics
+        with st.expander("📊 Detailed statistics"):
+            # Author statistics
             total_authors = 0
             for result in st.session_state.analyzed_results.values():
                 if result.get('status') == 'success':
                     total_authors += len(result.get('authors', []))
             
-            # Статистика по ссылкам и цитированиям
+            # Reference and citation statistics
             total_refs = 0
             total_cites = 0
             for result in st.session_state.analyzed_results.values():
@@ -6531,19 +5679,19 @@ def main():
                     total_refs += len(result.get('references', []))
                     total_cites += len(result.get('citations', []))
             
-            st.write(f"**Всего авторов:** {total_authors}")
-            st.write(f"**Всего ссылок (references):** {total_refs}")
-            st.write(f"**Всего цитирований (citations):** {total_cites}")
-            st.write(f"**Уникальных reference DOI:** {len(system.excel_exporter.references_counter)}")
-            st.write(f"**Уникальных citation DOI:** {len(system.excel_exporter.citations_counter)}")
+            st.write(f"**Total authors:** {total_authors}")
+            st.write(f"**Total references:** {total_refs}")
+            st.write(f"**Total citations:** {total_cites}")
+            st.write(f"**Unique reference DOI:** {len(system.excel_exporter.references_counter)}")
+            st.write(f"**Unique citation DOI:** {len(system.excel_exporter.citations_counter)}")
             
-            # Статистика кэша
+            # Cache statistics
             cache_stats = system.cache_manager.get_stats()
-            st.write(f"**Эффективность кэша:** {cache_stats['hit_ratio']}%")
-            st.write(f"**API вызовов сохранено:** {cache_stats['api_calls_saved']}")
+            st.write(f"**Cache efficiency:** {cache_stats['hit_ratio']}%")
+            st.write(f"**API calls saved:** {cache_stats['api_calls_saved']}")
 
 # ============================================================================
-# 🏃‍♂️ ЗАПУСК ПРИЛОЖЕНИЯ
+# 🏃‍♂️ RUN APPLICATION
 # ============================================================================
 
 if __name__ == "__main__":
