@@ -3678,6 +3678,79 @@ class ExcelExporter:
         # Flag for enabling ROR analysis
         self.enable_ror_analysis = False
 
+    def _validate_data_before_processing(self, results: Dict[str, Dict], source_type: str) -> Dict[str, Dict]:
+        """Валидация данных перед обработкой в Excel"""
+        validated_results = {}
+        error_count = 0
+        
+        for doi, result in results.items():
+            try:
+                if result is None:
+                    st.warning(f"⚠️ {source_type}: Result for {doi} is None")
+                    validated_results[doi] = self._create_empty_article_data(doi, source_type)
+                    error_count += 1
+                    continue
+                    
+                if not isinstance(result, dict):
+                    st.warning(f"⚠️ {source_type}: Result for {doi} is not dict, type: {type(result)}")
+                    validated_results[doi] = self._create_empty_article_data(doi, source_type)
+                    error_count += 1
+                    continue
+                    
+                # Проверяем наличие обязательных ключей
+                required_keys = ['publication_info', 'authors', 'countries', 'topics_info']
+                for key in required_keys:
+                    if key not in result:
+                        result[key] = {} if key == 'publication_info' or key == 'topics_info' else []
+                    elif result[key] is None:
+                        result[key] = {} if key == 'publication_info' or key == 'topics_info' else []
+                
+                # Проверяем вложенные структуры
+                if 'publication_info' in result and isinstance(result['publication_info'], dict):
+                    pub_info_keys = ['title', 'journal', 'year', 'publication_date']
+                    for key in pub_info_keys:
+                        if key not in result['publication_info']:
+                            result['publication_info'][key] = ''
+                        elif result['publication_info'][key] is None:
+                            result['publication_info'][key] = ''
+                
+                validated_results[doi] = result
+                
+            except Exception as e:
+                st.warning(f"⚠️ {source_type}: Error validating {doi}: {str(e)}")
+                validated_results[doi] = self._create_empty_article_data(doi, source_type)
+                error_count += 1
+        
+        if error_count > 0:
+            st.warning(f"⚠️ Found {error_count} invalid records in {source_type} data")
+        
+        return validated_results
+    
+    def _create_empty_article_data(self, doi: str, source_type: str) -> Dict:
+        """Создание пустых данных для статьи"""
+        return {
+            'doi': doi,
+            'status': 'failed',
+            'error': 'Data validation failed',
+            'publication_info': {
+                'title': f'Invalid data ({source_type})',
+                'journal': '',
+                'year': '',
+                'publication_date': '',
+                'citation_count_crossref': 0,
+                'citation_count_openalex': 0
+            },
+            'authors': [],
+            'countries': [],
+            'topics_info': {},
+            'orcid_urls': [],
+            'references': [],
+            'citations': [],
+            'references_count': 0,
+            'pages_formatted': '',
+            'quick_insights': {}
+        }
+    
     def _correct_country_for_author(self, author_key: str, affiliation_stats: Dict[str, Any]) -> str:
         """Correct country for author based on affiliation statistics"""
         author_info = self.author_stats[author_key]
@@ -5946,6 +6019,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
