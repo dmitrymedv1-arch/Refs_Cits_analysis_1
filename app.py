@@ -3883,7 +3883,7 @@ class ExcelExporter:
                 status_text.text(f"✅ ROR data collected for {len(ror_data)} affiliations")
         
         return ror_data
-
+    
     def create_comprehensive_report(self, analyzed_results: Dict[str, Dict],
                                    ref_results: Dict[str, Dict] = None,
                                    citing_results: Dict[str, Dict] = None,
@@ -3898,10 +3898,47 @@ class ExcelExporter:
         if progress_container:
             progress_container.text(f"📊 Creating comprehensive report: {filename}")
     
-        self.analyzed_results = analyzed_results
-        self.ref_results = ref_results or {}
-        self.citing_results = citing_results or {}
+        # Валидируем данные перед использованием
+        if progress_container:
+            progress_container.text("🔍 Validating data...")
         
+        self.analyzed_results = self._validate_data_before_processing(analyzed_results, "analyzed")
+        self.ref_results = self._validate_data_before_processing(ref_results or {}, "ref")
+        self.citing_results = self._validate_data_before_processing(citing_results or {}, "citing")
+    
+        if progress_container:
+            # Общая статистика
+            progress_container.text(f"📊 Data validation complete.")
+            
+            # Статистика по analyzed_results
+            analyzed_success_count = sum(1 for r in self.analyzed_results.values() if r.get('status') == 'success')
+            analyzed_fail_count = len(self.analyzed_results) - analyzed_success_count
+            
+            progress_container.text(f"✅ Analyzed articles: {analyzed_success_count} successful, {analyzed_fail_count} failed")
+            
+            # Статистика по ref_results
+            ref_success_count = sum(1 for r in self.ref_results.values() if r.get('status') == 'success')
+            ref_fail_count = len(self.ref_results) - ref_success_count
+            
+            progress_container.text(f"📎 Reference articles: {ref_success_count} successful, {ref_fail_count} failed")
+            
+            # Статистика по citing_results
+            citing_success_count = sum(1 for r in self.citing_results.values() if r.get('status') == 'success')
+            citing_fail_count = len(self.citing_results) - citing_success_count
+            
+            progress_container.text(f"🔗 Citing articles: {citing_success_count} successful, {citing_fail_count} failed")
+            
+            # Проверка первых статей для диагностики
+            if len(self.analyzed_results) > 0:
+                progress_container.text("📋 Sample check - first 3 analyzed articles:")
+                sample_items = list(self.analyzed_results.items())[:3]
+                for i, (doi, result) in enumerate(sample_items):
+                    status = result.get('status', 'unknown')
+                    pub_info = result.get('publication_info', {})
+                    title = pub_info.get('title', 'No title')
+                    authors = len(result.get('authors', []))
+                    progress_container.text(f"  {i+1}. {doi[:30]}... - Status: {status}, Title: '{title[:50]}...', Authors: {authors}")
+    
         # Set ROR analysis flag
         self.enable_ror_analysis = enable_ror
         
@@ -3911,7 +3948,14 @@ class ExcelExporter:
         # Prepare summary data with ROR progress
         if progress_container:
             progress_container.text("📋 Preparing summary data...")
-        self._prepare_summary_data()
+        
+        try:
+            self._prepare_summary_data()
+        except Exception as e:
+            if progress_container:
+                progress_container.error(f"❌ Error in _prepare_summary_data: {str(e)}")
+            # Продолжаем с пустыми данными
+            st.error(f"Error preparing summary data: {str(e)}")
     
         # Prepare ROR data with progress bar (if enabled)
         affiliations_list = list(self.affiliation_stats.keys())
@@ -3926,59 +3970,92 @@ class ExcelExporter:
                 progress_container.success(f"✅ ROR data obtained for {len(ror_data)} out of {len(affiliations_list)} affiliations")
             elif progress_container:
                 progress_container.warning(f"⚠️ Failed to obtain ROR data for affiliations")
-
+    
         # Analyze keywords in titles
         if progress_container:
             progress_container.text("🔤 Analyzing keywords in titles...")
         
-        # Extract titles from all sources
+        # Извлекаем названия из ВАЛИДИРОВАННЫХ данных
         analyzed_titles = []
-        for result in analyzed_results.values():
+        for result in self.analyzed_results.values():  # Используем self.analyzed_results, а не analyzed_results
             if result.get('status') == 'success':
                 title = result.get('publication_info', {}).get('title', '')
                 if title:
                     analyzed_titles.append(title)
         
         reference_titles = []
-        for result in self.ref_results.values():
+        for result in self.ref_results.values():  # Используем self.ref_results
             if result.get('status') == 'success':
                 title = result.get('publication_info', {}).get('title', '')
                 if title:
                     reference_titles.append(title)
         
         citing_titles = []
-        for result in self.citing_results.values():
+        for result in self.citing_results.values():  # Используем self.citing_results
             if result.get('status') == 'success':
                 title = result.get('publication_info', {}).get('title', '')
                 if title:
                     citing_titles.append(title)
         
-        # Analyze keywords
-        title_keywords_analysis = self.title_keywords_analyzer.analyze_titles(
-            analyzed_titles, reference_titles, citing_titles
-        )
-        
-        # Prepare data for Title keywords sheet
-        title_keywords_data = self._prepare_title_keywords_data(title_keywords_analysis)
+        # Анализ ключевых слов
+        try:
+            title_keywords_analysis = self.title_keywords_analyzer.analyze_titles(
+                analyzed_titles, reference_titles, citing_titles
+            )
+            title_keywords_data = self._prepare_title_keywords_data(title_keywords_analysis)
+        except Exception as e:
+            if progress_container:
+                progress_container.error(f"❌ Error analyzing keywords: {str(e)}")
+            title_keywords_data = []
         
         # Prepare data for Terms and Topics sheet
         if progress_container:
             progress_container.text("🏷️ Preparing Terms and Topics data...")
-        terms_topics_data = self._prepare_terms_topics_data()
-
+        
+        try:
+            terms_topics_data = self._prepare_terms_topics_data()
+        except Exception as e:
+            if progress_container:
+                progress_container.error(f"❌ Error preparing terms/topics: {str(e)}")
+            terms_topics_data = []
+    
         # Create Excel file in memory
         output = BytesIO()
         
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        try:
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                if progress_container:
+                    progress_container.text("📑 Generating sheets...")
+    
+                # Create Excel tabs - передаем ВАЛИДИРОВАННЫЕ данные
+                self._generate_excel_sheets(writer, self.analyzed_results, self.ref_results, self.citing_results, 
+                                          title_keywords_data, terms_topics_data, progress_container)
+            
+            output.seek(0)
+            
             if progress_container:
-                progress_container.text("📑 Generating sheets...")
-
-            # Create Excel tabs
-            self._generate_excel_sheets(writer, analyzed_results, ref_results, citing_results, 
-                                      title_keywords_data, terms_topics_data, progress_container)
-
-        output.seek(0)
-        return output
+                progress_container.success("✅ Excel report created successfully!")
+            
+            return output
+            
+        except Exception as e:
+            if progress_container:
+                progress_container.error(f"❌ Error creating Excel file: {str(e)}")
+            
+            # Создаем минимальный отчет с ошибкой
+            error_output = BytesIO()
+            with pd.ExcelWriter(error_output, engine='openpyxl') as writer:
+                error_df = pd.DataFrame([{
+                    'Error': str(e),
+                    'Timestamp': datetime.now().isoformat(),
+                    'Analyzed articles': len(self.analyzed_results),
+                    'Reference articles': len(self.ref_results),
+                    'Citing articles': len(self.citing_results)
+                }])
+                error_df.to_excel(writer, sheet_name='Error_Report', index=False)
+            
+            error_output.seek(0)
+            return error_output
 
     def _generate_excel_sheets(self, writer, analyzed_results, ref_results, citing_results,
                              title_keywords_data, terms_topics_data, progress_container):
@@ -4028,6 +4105,14 @@ class ExcelExporter:
         affiliation_analyzed_counts = Counter()  # Affiliation article count in analyzed
 
         for doi, result in self.analyzed_results.items():
+            if result is None:
+                st.warning(f"⚠️ Skipping None result for {doi} in _prepare_summary_data")
+                continue
+                
+            if not isinstance(result, dict):
+                st.warning(f"⚠️ Skipping non-dict result for {doi}, type: {type(result)} in _prepare_summary_data")
+                continue
+    
             if result.get('status') != 'success':
                 continue
 
@@ -4773,9 +4858,9 @@ class ExcelExporter:
             if result.get('status') != 'success':
                 continue
 
-            pub_info = result['publication_info']
-            authors = result['authors']
-            topics_info = result['topics_info']
+            pub_info = result.get('publication_info', {})
+            authors = result.get('authors', [])
+            topics_info = result.get('topics_info', {})
 
             orcid_urls = result.get('orcid_urls', [])
             affiliations = list(set([aff for author in authors for aff in author.get('affiliation', []) if aff]))
@@ -4827,7 +4912,7 @@ class ExcelExporter:
             if result.get('status') != 'success':
                 continue
     
-            for author in result['authors']:
+            for author in result.get('authors', []):
                 full_name = author['name']
                 normalized_name = self.processor.normalize_author_name(full_name)
     
@@ -5951,6 +6036,21 @@ def main():
                 
             except Exception as e:
                 st.error(f"❌ Report creation error: {str(e)}")
+                
+                # Дополнительная диагностика
+                import traceback
+                with st.expander("🔍 Detailed error traceback"):
+                    st.code(traceback.format_exc())
+                
+                # Попробуем показать проблемные данные
+                if hasattr(system, 'excel_exporter'):
+                    if hasattr(system.excel_exporter, 'analyzed_results'):
+                        problematic = [(doi, res) for doi, res in system.excel_exporter.analyzed_results.items() 
+                                     if res is None or not isinstance(res, dict)]
+                        if problematic:
+                            st.warning(f"Found {len(problematic)} problematic records")
+                            for doi, res in problematic[:5]:
+                                st.write(f"- {doi}: type={type(res)}")
     
     # Show statistics if there is processed data
     if st.session_state.processing_complete:
@@ -6019,6 +6119,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
