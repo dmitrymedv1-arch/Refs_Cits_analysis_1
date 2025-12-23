@@ -160,7 +160,7 @@ class SmartCacheManager:
     def __init__(self, cache_dir: str = Config.CACHE_DIR, ttl_hours: int = Config.TTL_HOURS):
         self.cache_dir = cache_dir
         self.ttl_seconds = ttl_hours * 3600
-    
+
         self.stats = {
             'hits': 0,
             'misses': 0,
@@ -171,22 +171,22 @@ class SmartCacheManager:
             'file_hits': 0,
             'api_calls_saved': 0
         }
-    
+
         self.memory_cache = OrderedDict()
         self.max_memory_items = 5000
-    
+
         self.failed_cache = {}
         self.failed_cache_ttl = 3600
-    
+
         self.popular_cache = {}
-    
+
         self.ror_cache = {
             'analyzed': {},
             'ref': {},
             'citing': {},
             'summary': {}
         }
-    
+
         self.insights_cache = {
             'geo_bubbles': {},
             'temporal_patterns': {},
@@ -194,18 +194,13 @@ class SmartCacheManager:
             'citation_cascades': {},
             'mutual_citations': {}
         }
-    
+
         # New cache for processing progress
         self.progress_cache = {
             'last_processed': {},
             'remaining_dois': {},
             'current_stage': {}
         }
-        
-        # Добавляем отсутствующие атрибуты:
-        self.incremental_progress = {}  # Для инкрементального прогресса
-        self.batch_progress = {}  # Для прогресса батчей
-        self.function_cache = {}  # Для кэширования результатов функций
 
         if not os.path.exists(cache_dir):
             os.makedirs(cache_dir, exist_ok=True)
@@ -616,43 +611,6 @@ class SmartCacheManager:
         except:
             pass
 
-    def _save_batch_progress_to_disk(self, batch_key: str, batch_data: Dict):
-        """Save batch progress to disk"""
-        try:
-            # Create directory for batch progress if not exists
-            batch_dir = os.path.join(self.cache_dir, "batch_progress")
-            os.makedirs(batch_dir, exist_ok=True)
-            
-            # Save batch data to file
-            batch_file = os.path.join(batch_dir, f"{batch_key}.json")
-            with open(batch_file, 'w') as f:
-                json.dump(batch_data, f, indent=2, default=str)
-        except Exception as e:
-            st.warning(f"⚠️ Failed to save batch progress to disk: {e}")
-    
-    def _flush_progress_to_disk(self):
-        """Flush incremental progress to disk"""
-        try:
-            progress_file = os.path.join(self.cache_dir, "incremental_progress.json")
-            with open(progress_file, 'w') as f:
-                json.dump(self.incremental_progress, f, indent=2, default=str)
-        except Exception as e:
-            st.warning(f"⚠️ Failed to flush progress to disk: {e}")
-            
-    def _save_incremental_progress(self, identifier: str, stage: str, data: Dict):
-        """Save incremental progress"""
-        progress_key = f"progress:{stage}:{identifier}"
-        progress_data = {
-            'doi': identifier,
-            'stage': stage,
-            'data': data,
-            'timestamp': time.time(),
-            'status': 'processing'
-        }
-        
-        # Сохраняем во временный кэш прогресса
-        self.incremental_progress[progress_key] = progress_data
-    
     def load_progress(self) -> Tuple[Optional[str], List[str], List[str]]:
         """Load saved processing progress"""
         progress_file = os.path.join(self.cache_dir, "progress_cache.json")
@@ -2202,34 +2160,14 @@ class OptimizedDOIProcessor:
                 dois = remaining_dois if remaining_dois else dois
         
         results = {}
-
-        # Обрабатываем батчами с сохранением прогресса
+        
+        # Обрабатываем батчами с контрольными точками
         for batch_idx in range(0, len(dois), batch_size):
             batch = dois[batch_idx:batch_idx + batch_size]
             batch_id = batch_idx // batch_size
             
-            # Сохраняем текущий прогресс в кэш менеджере
-            processed_so_far = self.stage_progress[source_type]['processed']
-            remaining_dois = dois[batch_idx:]
-            
-            # Используем существующий метод save_batch_progress
-            processed_dois_info = []
-            for doi in processed_so_far:
-                if doi in results:
-                    processed_dois_info.append({'doi': doi, 'status': results[doi].get('status', 'unknown')})
-            
-            self.cache.save_batch_progress(
-                stage=source_type,
-                batch_id=batch_id,
-                processed_dois=processed_dois_info,
-                failed_dois=[],  # Можно добавить логику для неудачных DOI
-                total_count=len(dois)
-            )
-            
-            # Обрабатываем батч
-            batch_results = self._process_single_batch_with_retry(
-                batch, source_type, original_doi, fetch_refs, fetch_cites
-            )
+            # Создаем контрольную точку перед обработкой батча
+            self._create_checkpoint(source_type, batch_id, batch_idx, len(dois))
             
             # Обрабатываем батч
             batch_results = self._process_batch_with_checkpoints(
@@ -2392,9 +2330,6 @@ class OptimizedDOIProcessor:
                 doi, source_type, original_doi, True, True
             )
             
-            validated_result = self._validate_result_before_caching(result, doi, source_type)
-            return validated_result
-            
             # Restore original delay
             self.delay.current_delay = original_delay
             
@@ -2451,8 +2386,6 @@ class OptimizedDOIProcessor:
             return self._process_single_doi_optimized(
                 doi, source_type, original_doi, True, True
             )
-            validated_result = self._validate_result_before_caching(result, doi, source_type)
-            return validated_result
         except Exception as e:
             self._handle_processing_error(doi, str(e), source_type, original_doi)
             return {
@@ -2591,9 +2524,6 @@ class OptimizedDOIProcessor:
                             self.author_affiliation_map[author_name].add(affiliation)
                             self.doi_affiliation_map[doi].add(affiliation)
 
-        validated_result = self._validate_result_before_caching(result, doi, source_type)
-        result = validated_result
-                                         
         if result.get('status') == 'success':
             self.stats['successful'] += 1
 
@@ -2622,84 +2552,6 @@ class OptimizedDOIProcessor:
         )
 
         self.cache.mark_as_failed("full_analysis", doi, error)
-
-    def _validate_result_before_caching(self, result: Dict, doi: str, source_type: str) -> Dict:
-        """Валидация результата перед кэшированием"""
-        try:
-            if result is None:
-                raise ValueError("Result is None")
-                
-            if not isinstance(result, dict):
-                raise ValueError(f"Result is not dict, type: {type(result)}")
-            
-            # Проверяем обязательные поля
-            if 'doi' not in result:
-                result['doi'] = doi
-                
-            if 'status' not in result:
-                result['status'] = 'success' if result.get('publication_info') else 'failed'
-                
-            # Проверяем публикационную информацию
-            if 'publication_info' not in result:
-                result['publication_info'] = {}
-            elif result['publication_info'] is None:
-                result['publication_info'] = {}
-                
-            # Проверяем авторов
-            if 'authors' not in result:
-                result['authors'] = []
-            elif result['authors'] is None:
-                result['authors'] = []
-                
-            # Проверяем страны
-            if 'countries' not in result:
-                result['countries'] = []
-            elif result['countries'] is None:
-                result['countries'] = []
-                
-            # Проверяем темы
-            if 'topics_info' not in result:
-                result['topics_info'] = {}
-            elif result['topics_info'] is None:
-                result['topics_info'] = {}
-                
-            # Проверяем ORCID
-            if 'orcid_urls' not in result:
-                result['orcid_urls'] = []
-            elif result['orcid_urls'] is None:
-                result['orcid_urls'] = []
-                
-            # Проверяем ссылки и цитирования
-            if 'references' not in result:
-                result['references'] = []
-            elif result['references'] is None:
-                result['references'] = []
-                
-            if 'citations' not in result:
-                result['citations'] = []
-            elif result['citations'] is None:
-                result['citations'] = []
-                
-            return result
-        
-        except Exception as e:
-            st.warning(f"⚠️ Validation error for {doi} ({source_type}): {str(e)}")
-            # Возвращаем безопасный результат
-            return {
-                'doi': doi,
-                'status': 'failed',
-                'error': f"Validation error: {str(e)}",
-                'publication_info': {},
-                'authors': [],
-                'countries': [],
-                'topics_info': {},
-                'orcid_urls': [],
-                'references': [],
-                'citations': [],
-                'references_count': 0,
-                'pages_formatted': '',
-                'quick_insights': {}
-            }
 
     def collect_all_references(self, results: Dict[str, Dict]) -> List[str]:
         all_refs = []
@@ -3740,79 +3592,6 @@ class ExcelExporter:
         # Flag for enabling ROR analysis
         self.enable_ror_analysis = False
 
-    def _validate_data_before_processing(self, results: Dict[str, Dict], source_type: str) -> Dict[str, Dict]:
-        """Валидация данных перед обработкой в Excel"""
-        validated_results = {}
-        error_count = 0
-        
-        for doi, result in results.items():
-            try:
-                if result is None:
-                    st.warning(f"⚠️ {source_type}: Result for {doi} is None")
-                    validated_results[doi] = self._create_empty_article_data(doi, source_type)
-                    error_count += 1
-                    continue
-                    
-                if not isinstance(result, dict):
-                    st.warning(f"⚠️ {source_type}: Result for {doi} is not dict, type: {type(result)}")
-                    validated_results[doi] = self._create_empty_article_data(doi, source_type)
-                    error_count += 1
-                    continue
-                    
-                # Проверяем наличие обязательных ключей
-                required_keys = ['publication_info', 'authors', 'countries', 'topics_info']
-                for key in required_keys:
-                    if key not in result:
-                        result[key] = {} if key == 'publication_info' or key == 'topics_info' else []
-                    elif result[key] is None:
-                        result[key] = {} if key == 'publication_info' or key == 'topics_info' else []
-                
-                # Проверяем вложенные структуры
-                if 'publication_info' in result and isinstance(result['publication_info'], dict):
-                    pub_info_keys = ['title', 'journal', 'year', 'publication_date']
-                    for key in pub_info_keys:
-                        if key not in result['publication_info']:
-                            result['publication_info'][key] = ''
-                        elif result['publication_info'][key] is None:
-                            result['publication_info'][key] = ''
-                
-                validated_results[doi] = result
-                
-            except Exception as e:
-                st.warning(f"⚠️ {source_type}: Error validating {doi}: {str(e)}")
-                validated_results[doi] = self._create_empty_article_data(doi, source_type)
-                error_count += 1
-        
-        if error_count > 0:
-            st.warning(f"⚠️ Found {error_count} invalid records in {source_type} data")
-        
-        return validated_results
-    
-    def _create_empty_article_data(self, doi: str, source_type: str) -> Dict:
-        """Создание пустых данных для статьи"""
-        return {
-            'doi': doi,
-            'status': 'failed',
-            'error': 'Data validation failed',
-            'publication_info': {
-                'title': f'Invalid data ({source_type})',
-                'journal': '',
-                'year': '',
-                'publication_date': '',
-                'citation_count_crossref': 0,
-                'citation_count_openalex': 0
-            },
-            'authors': [],
-            'countries': [],
-            'topics_info': {},
-            'orcid_urls': [],
-            'references': [],
-            'citations': [],
-            'references_count': 0,
-            'pages_formatted': '',
-            'quick_insights': {}
-        }
-    
     def _correct_country_for_author(self, author_key: str, affiliation_stats: Dict[str, Any]) -> str:
         """Correct country for author based on affiliation statistics"""
         author_info = self.author_stats[author_key]
@@ -3945,7 +3724,7 @@ class ExcelExporter:
                 status_text.text(f"✅ ROR data collected for {len(ror_data)} affiliations")
         
         return ror_data
-    
+
     def create_comprehensive_report(self, analyzed_results: Dict[str, Dict],
                                    ref_results: Dict[str, Dict] = None,
                                    citing_results: Dict[str, Dict] = None,
@@ -3960,47 +3739,10 @@ class ExcelExporter:
         if progress_container:
             progress_container.text(f"📊 Creating comprehensive report: {filename}")
     
-        # Валидируем данные перед использованием
-        if progress_container:
-            progress_container.text("🔍 Validating data...")
+        self.analyzed_results = analyzed_results
+        self.ref_results = ref_results or {}
+        self.citing_results = citing_results or {}
         
-        self.analyzed_results = self._validate_data_before_processing(analyzed_results, "analyzed")
-        self.ref_results = self._validate_data_before_processing(ref_results or {}, "ref")
-        self.citing_results = self._validate_data_before_processing(citing_results or {}, "citing")
-    
-        if progress_container:
-            # Общая статистика
-            progress_container.text(f"📊 Data validation complete.")
-            
-            # Статистика по analyzed_results
-            analyzed_success_count = sum(1 for r in self.analyzed_results.values() if r.get('status') == 'success')
-            analyzed_fail_count = len(self.analyzed_results) - analyzed_success_count
-            
-            progress_container.text(f"✅ Analyzed articles: {analyzed_success_count} successful, {analyzed_fail_count} failed")
-            
-            # Статистика по ref_results
-            ref_success_count = sum(1 for r in self.ref_results.values() if r.get('status') == 'success')
-            ref_fail_count = len(self.ref_results) - ref_success_count
-            
-            progress_container.text(f"📎 Reference articles: {ref_success_count} successful, {ref_fail_count} failed")
-            
-            # Статистика по citing_results
-            citing_success_count = sum(1 for r in self.citing_results.values() if r.get('status') == 'success')
-            citing_fail_count = len(self.citing_results) - citing_success_count
-            
-            progress_container.text(f"🔗 Citing articles: {citing_success_count} successful, {citing_fail_count} failed")
-            
-            # Проверка первых статей для диагностики
-            if len(self.analyzed_results) > 0:
-                progress_container.text("📋 Sample check - first 3 analyzed articles:")
-                sample_items = list(self.analyzed_results.items())[:3]
-                for i, (doi, result) in enumerate(sample_items):
-                    status = result.get('status', 'unknown')
-                    pub_info = result.get('publication_info', {})
-                    title = pub_info.get('title', 'No title')
-                    authors = len(result.get('authors', []))
-                    progress_container.text(f"  {i+1}. {doi[:30]}... - Status: {status}, Title: '{title[:50]}...', Authors: {authors}")
-    
         # Set ROR analysis flag
         self.enable_ror_analysis = enable_ror
         
@@ -4010,14 +3752,7 @@ class ExcelExporter:
         # Prepare summary data with ROR progress
         if progress_container:
             progress_container.text("📋 Preparing summary data...")
-        
-        try:
-            self._prepare_summary_data()
-        except Exception as e:
-            if progress_container:
-                progress_container.error(f"❌ Error in _prepare_summary_data: {str(e)}")
-            # Продолжаем с пустыми данными
-            st.error(f"Error preparing summary data: {str(e)}")
+        self._prepare_summary_data()
     
         # Prepare ROR data with progress bar (if enabled)
         affiliations_list = list(self.affiliation_stats.keys())
@@ -4032,92 +3767,59 @@ class ExcelExporter:
                 progress_container.success(f"✅ ROR data obtained for {len(ror_data)} out of {len(affiliations_list)} affiliations")
             elif progress_container:
                 progress_container.warning(f"⚠️ Failed to obtain ROR data for affiliations")
-    
+
         # Analyze keywords in titles
         if progress_container:
             progress_container.text("🔤 Analyzing keywords in titles...")
         
-        # Извлекаем названия из ВАЛИДИРОВАННЫХ данных
+        # Extract titles from all sources
         analyzed_titles = []
-        for result in self.analyzed_results.values():  # Используем self.analyzed_results, а не analyzed_results
+        for result in analyzed_results.values():
             if result.get('status') == 'success':
                 title = result.get('publication_info', {}).get('title', '')
                 if title:
                     analyzed_titles.append(title)
         
         reference_titles = []
-        for result in self.ref_results.values():  # Используем self.ref_results
+        for result in self.ref_results.values():
             if result.get('status') == 'success':
                 title = result.get('publication_info', {}).get('title', '')
                 if title:
                     reference_titles.append(title)
         
         citing_titles = []
-        for result in self.citing_results.values():  # Используем self.citing_results
+        for result in self.citing_results.values():
             if result.get('status') == 'success':
                 title = result.get('publication_info', {}).get('title', '')
                 if title:
                     citing_titles.append(title)
         
-        # Анализ ключевых слов
-        try:
-            title_keywords_analysis = self.title_keywords_analyzer.analyze_titles(
-                analyzed_titles, reference_titles, citing_titles
-            )
-            title_keywords_data = self._prepare_title_keywords_data(title_keywords_analysis)
-        except Exception as e:
-            if progress_container:
-                progress_container.error(f"❌ Error analyzing keywords: {str(e)}")
-            title_keywords_data = []
+        # Analyze keywords
+        title_keywords_analysis = self.title_keywords_analyzer.analyze_titles(
+            analyzed_titles, reference_titles, citing_titles
+        )
+        
+        # Prepare data for Title keywords sheet
+        title_keywords_data = self._prepare_title_keywords_data(title_keywords_analysis)
         
         # Prepare data for Terms and Topics sheet
         if progress_container:
             progress_container.text("🏷️ Preparing Terms and Topics data...")
-        
-        try:
-            terms_topics_data = self._prepare_terms_topics_data()
-        except Exception as e:
-            if progress_container:
-                progress_container.error(f"❌ Error preparing terms/topics: {str(e)}")
-            terms_topics_data = []
-    
+        terms_topics_data = self._prepare_terms_topics_data()
+
         # Create Excel file in memory
         output = BytesIO()
         
-        try:
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                if progress_container:
-                    progress_container.text("📑 Generating sheets...")
-    
-                # Create Excel tabs - передаем ВАЛИДИРОВАННЫЕ данные
-                self._generate_excel_sheets(writer, self.analyzed_results, self.ref_results, self.citing_results, 
-                                          title_keywords_data, terms_topics_data, progress_container)
-            
-            output.seek(0)
-            
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
             if progress_container:
-                progress_container.success("✅ Excel report created successfully!")
-            
-            return output
-            
-        except Exception as e:
-            if progress_container:
-                progress_container.error(f"❌ Error creating Excel file: {str(e)}")
-            
-            # Создаем минимальный отчет с ошибкой
-            error_output = BytesIO()
-            with pd.ExcelWriter(error_output, engine='openpyxl') as writer:
-                error_df = pd.DataFrame([{
-                    'Error': str(e),
-                    'Timestamp': datetime.now().isoformat(),
-                    'Analyzed articles': len(self.analyzed_results),
-                    'Reference articles': len(self.ref_results),
-                    'Citing articles': len(self.citing_results)
-                }])
-                error_df.to_excel(writer, sheet_name='Error_Report', index=False)
-            
-            error_output.seek(0)
-            return error_output
+                progress_container.text("📑 Generating sheets...")
+
+            # Create Excel tabs
+            self._generate_excel_sheets(writer, analyzed_results, ref_results, citing_results, 
+                                      title_keywords_data, terms_topics_data, progress_container)
+
+        output.seek(0)
+        return output
 
     def _generate_excel_sheets(self, writer, analyzed_results, ref_results, citing_results,
                              title_keywords_data, terms_topics_data, progress_container):
@@ -4167,14 +3869,6 @@ class ExcelExporter:
         affiliation_analyzed_counts = Counter()  # Affiliation article count in analyzed
 
         for doi, result in self.analyzed_results.items():
-            if result is None:
-                st.warning(f"⚠️ Skipping None result for {doi} in _prepare_summary_data")
-                continue
-                
-            if not isinstance(result, dict):
-                st.warning(f"⚠️ Skipping non-dict result for {doi}, type: {type(result)} in _prepare_summary_data")
-                continue
-    
             if result.get('status') != 'success':
                 continue
 
@@ -4920,9 +4614,9 @@ class ExcelExporter:
             if result.get('status') != 'success':
                 continue
 
-            pub_info = result.get('publication_info', {})
-            authors = result.get('authors', [])
-            topics_info = result.get('topics_info', {})
+            pub_info = result['publication_info']
+            authors = result['authors']
+            topics_info = result['topics_info']
 
             orcid_urls = result.get('orcid_urls', [])
             affiliations = list(set([aff for author in authors for aff in author.get('affiliation', []) if aff]))
@@ -4974,7 +4668,7 @@ class ExcelExporter:
             if result.get('status') != 'success':
                 continue
     
-            for author in result.get('authors', []):
+            for author in result['authors']:
                 full_name = author['name']
                 normalized_name = self.processor.normalize_author_name(full_name)
     
@@ -5887,6 +5581,22 @@ class ArticleAnalyzerSystem:
 # ============================================================================
 
 def main():
+    # Проверяем наличие сохраненного состояния
+        if 'system' not in st.session_state:
+            # Пробуем загрузить сохраненное состояние
+            loaded_state = load_system_state_from_cache()
+            if loaded_state:
+                st.session_state.system = loaded_state
+                st.session_state.resume_available = True
+            else:
+                st.session_state.system = ArticleAnalyzerSystem()
+    
+    # Application header
+    st.title("📚 Scientific Article Analyzer by DOI")
+    st.markdown("""
+    Analyze scientific articles by DOI with smart caching, link and citation analysis.
+    """)
+
     # System initialization
     if 'system' not in st.session_state:
         st.session_state.system = ArticleAnalyzerSystem()
@@ -6098,21 +5808,6 @@ def main():
                 
             except Exception as e:
                 st.error(f"❌ Report creation error: {str(e)}")
-                
-                # Дополнительная диагностика
-                import traceback
-                with st.expander("🔍 Detailed error traceback"):
-                    st.code(traceback.format_exc())
-                
-                # Попробуем показать проблемные данные
-                if hasattr(system, 'excel_exporter'):
-                    if hasattr(system.excel_exporter, 'analyzed_results'):
-                        problematic = [(doi, res) for doi, res in system.excel_exporter.analyzed_results.items() 
-                                     if res is None or not isinstance(res, dict)]
-                        if problematic:
-                            st.warning(f"Found {len(problematic)} problematic records")
-                            for doi, res in problematic[:5]:
-                                st.write(f"- {doi}: type={type(res)}")
     
     # Show statistics if there is processed data
     if st.session_state.processing_complete:
@@ -6181,13 +5876,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
