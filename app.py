@@ -153,7 +153,7 @@ class Config:
     }
 
 # ============================================================================
-# 🗂️ SMART CACHE MANAGER
+# 🗂️ SMART CACHE MANAGER (UPDATED WITH COMPLETE RESUME FUNCTIONALITY)
 # ============================================================================
 
 class SmartCacheManager:
@@ -202,6 +202,11 @@ class SmartCacheManager:
             'current_stage': {}
         }
 
+        # NEW: Add missing attributes for incremental progress
+        self.incremental_progress = {}  # For per-article progress
+        self.batch_progress = {}        # For batch progress
+        self.function_cache = {}        # For function results caching
+
         if not os.path.exists(cache_dir):
             os.makedirs(cache_dir, exist_ok=True)
 
@@ -209,6 +214,9 @@ class SmartCacheManager:
 
         self._load_popular_dois()
         self._load_progress_cache()
+        # NEW: Load incremental progress
+        self._load_incremental_progress()
+        self._load_batch_progress()
 
     def _get_cache_key(self, source: str, identifier: str) -> str:
         key_str = f"v3:{source}:{identifier}"
@@ -584,6 +592,51 @@ class SmartCacheManager:
         if len(self.incremental_progress) % 50 == 0:
             self._flush_progress_to_disk()
     
+    def _save_incremental_progress(self, doi: str, stage: str, data: Dict):
+        """Внутренний метод для сохранения инкрементального прогресса (вызывается из set())"""
+        progress_key = f"progress:{stage}:{doi}"
+        progress_data = {
+            'doi': doi,
+            'stage': stage,
+            'data': data,
+            'timestamp': time.time(),
+            'status': 'complete' if data.get('status') == 'success' else 'failed'
+        }
+        
+        # Сохраняем во временный кэш прогресса
+        self.incremental_progress[progress_key] = progress_data
+        
+        # Периодически сохраняем на диск
+        if len(self.incremental_progress) % 50 == 0:
+            self._flush_progress_to_disk()
+    
+    def _flush_progress_to_disk(self):
+        """Сохраняет инкрементальный прогресс на диск"""
+        progress_file = os.path.join(self.cache_dir, "incremental_progress.json")
+        try:
+            with open(progress_file, 'w') as f:
+                json.dump(self.incremental_progress, f, indent=2, default=str)
+        except Exception as e:
+            st.warning(f"⚠️ Error saving incremental progress: {e}")
+    
+    def _load_incremental_progress(self):
+        """Загружает инкрементальный прогресс с диска"""
+        progress_file = os.path.join(self.cache_dir, "incremental_progress.json")
+        if os.path.exists(progress_file):
+            try:
+                with open(progress_file, 'r') as f:
+                    self.incremental_progress = json.load(f)
+            except:
+                self.incremental_progress = {}
+        else:
+            self.incremental_progress = {}
+    
+    def get_incremental_progress(self, stage: str = None):
+        """Получает инкрементальный прогресс для стадии или весь"""
+        if stage:
+            return {k: v for k, v in self.incremental_progress.items() if stage in k}
+        return self.incremental_progress
+
     def save_batch_progress(self, stage: str, batch_id: int, processed_dois: List[Dict], 
                            failed_dois: List[str], total_count: int):
         """Сохраняет прогресс обработки батча"""
@@ -602,6 +655,61 @@ class SmartCacheManager:
         
         self.batch_progress[batch_key] = batch_data
         self._save_batch_progress_to_disk(batch_key, batch_data)
+    
+    def _save_batch_progress_to_disk(self, batch_key: str, batch_data: Dict):
+        """Сохраняет прогресс батча на диск"""
+        batch_file = os.path.join(self.cache_dir, f"batch_{batch_key.replace(':', '_')}.json")
+        try:
+            with open(batch_file, 'w') as f:
+                json.dump(batch_data, f, indent=2, default=str)
+        except Exception as e:
+            st.warning(f"⚠️ Error saving batch progress: {e}")
+    
+    def _load_batch_progress(self):
+        """Загружает прогресс всех батчей с диска"""
+        batch_files = [f for f in os.listdir(self.cache_dir) if f.startswith('batch_') and f.endswith('.json')]
+        self.batch_progress = {}
+        
+        for batch_file in batch_files:
+            try:
+                with open(os.path.join(self.cache_dir, batch_file), 'r') as f:
+                    batch_data = json.load(f)
+                    batch_key = batch_data.get('stage', 'unknown') + ':' + str(batch_data.get('batch_id', 0))
+                    self.batch_progress[batch_key] = batch_data
+            except:
+                pass
+    
+    def get_batch_progress(self, stage: str = None):
+        """Получает прогресс батчей для стадии или весь"""
+        if stage:
+            return {k: v for k, v in self.batch_progress.items() if stage in k}
+        return self.batch_progress
+
+    def _save_to_disk_cache(self, key: str, data: Dict, category: str = "default"):
+        """Сохраняет данные в диск кэш"""
+        cache_path = os.path.join(self.cache_dir, f"disk_cache_{category}_{key}.pkl")
+        try:
+            with open(cache_path, 'wb') as f:
+                pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+        except Exception as e:
+            st.warning(f"⚠️ Error saving to disk cache: {e}")
+    
+    def _load_from_disk_cache(self, key: str, category: str = "default") -> Optional[Dict]:
+        """Загружает данные из диск кэша"""
+        cache_path = os.path.join(self.cache_dir, f"disk_cache_{category}_{key}.pkl")
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path, 'rb') as f:
+                    return pickle.load(f)
+            except:
+                pass
+        return None
+
+    def save_progress(self, stage: str, processed_dois: List[str], remaining_dois: List[str]):
+        """Сохраняет прогресс обработки для возможности возобновления"""
+        self.progress_cache['current_stage'] = stage
+        self.progress_cache['last_processed'][stage] = processed_dois
+        self.progress_cache['remaining_dois'][stage] = remaining_dois
         
         # Save to disk
         progress_file = os.path.join(self.cache_dir, "progress_cache.json")
@@ -641,6 +749,18 @@ class SmartCacheManager:
                 os.remove(progress_file)
             except:
                 pass
+        
+        # Also clear incremental and batch progress
+        self.incremental_progress = {}
+        self.batch_progress = {}
+        
+        # Remove progress files from disk
+        for f in os.listdir(self.cache_dir):
+            if 'progress' in f or 'batch_' in f:
+                try:
+                    os.remove(os.path.join(self.cache_dir, f))
+                except:
+                    pass
 
     def _load_progress_cache(self):
         """Load progress cache from disk during initialization"""
@@ -2101,7 +2221,7 @@ class DataProcessor:
         return family
 
 # ============================================================================
-# 🎯 OPTIMIZED DOI PROCESSOR (UPDATED WITH RESUME CAPABILITY)
+# 🎯 OPTIMIZED DOI PROCESSOR (UPDATED WITH COMPLETE RESUME CAPABILITY)
 # ============================================================================
 
 class OptimizedDOIProcessor:
@@ -2142,12 +2262,89 @@ class OptimizedDOIProcessor:
             'ref': {'processed': [], 'remaining': []},
             'citing': {'processed': [], 'remaining': []}
         }
+        
+        # NEW: Batch progress tracking
+        self.batch_checkpoints = {}
+        self.current_batch_id = 0
+
+    def _create_checkpoint(self, source_type: str, batch_id: int, batch_start_idx: int, total_dois: int):
+        """Создает контрольную точку для батча"""
+        checkpoint_key = f"checkpoint:{source_type}:{batch_id}"
+        checkpoint_data = {
+            'source_type': source_type,
+            'batch_id': batch_id,
+            'batch_start_idx': batch_start_idx,
+            'total_dois': total_dois,
+            'timestamp': time.time(),
+            'stage': self.current_stage
+        }
+        
+        self.batch_checkpoints[checkpoint_key] = checkpoint_data
+        
+        # Также сохраняем в кэш менеджере
+        self.cache.set("checkpoint", checkpoint_key, checkpoint_data, category="checkpoints")
+
+    def _process_batch_with_checkpoints(self, batch: List[str], source_type: str,
+                                      original_doi: str, fetch_refs: bool, fetch_cites: bool,
+                                      checkpoint_interval: int = 10) -> Dict[str, Dict]:
+        """Обрабатывает батч с созданием контрольных точек"""
+        results = {}
+        
+        # Проверяем, есть ли уже частично обработанные результаты для этого батча
+        batch_key = f"batch:{source_type}:{self.current_batch_id}"
+        cached_batch_results = self.cache.get("batch_results", batch_key)
+        if cached_batch_results:
+            # Используем сохраненные результаты
+            results.update(cached_batch_results)
+            st.info(f"🔄 Восстановлены сохраненные результаты для батча {self.current_batch_id}")
+        
+        # Обрабатываем только те DOI, которые еще не обработаны
+        remaining_dois = [doi for doi in batch if doi not in results]
+        
+        if remaining_dois:
+            # Обрабатываем оставшиеся DOI
+            batch_results = self._process_single_batch_with_retry(
+                remaining_dois, source_type, original_doi, fetch_refs, fetch_cites
+            )
+            
+            results.update(batch_results)
+            
+            # Сохраняем результаты батча в кэш
+            self.cache.set("batch_results", batch_key, results, category="batch_results")
+        
+        return results
+
+    def _save_batch_progress(self, source_type: str, batch_id: int, batch_results: Dict[str, Dict],
+                           processed_count: int, total_count: int):
+        """Сохраняет прогресс обработки батча"""
+        processed_dois = []
+        failed_dois = []
+        
+        for doi, result in batch_results.items():
+            if result.get('status') == 'success':
+                processed_dois.append({
+                    'doi': doi,
+                    'title': result.get('publication_info', {}).get('title', ''),
+                    'status': 'success'
+                })
+            else:
+                failed_dois.append(doi)
+        
+        # Используем метод save_batch_progress из SmartCacheManager
+        self.cache.save_batch_progress(
+            source_type, batch_id, processed_dois, failed_dois, total_count
+        )
 
     def process_doi_batch_with_resume(self, dois: List[str], source_type: str = "analyzed",
                                      original_doi: str = None, fetch_refs: bool = True,
                                      fetch_cites: bool = True, batch_size: int = Config.BATCH_SIZE,
                                      progress_container=None, resume: bool = False,
                                      checkpoint_interval: int = 10) -> Dict[str, Dict]:
+        
+        # Устанавливаем текущую стадию
+        self.current_stage = source_type
+        
+        results = {}
         
         # Если возобновляем, загружаем сохраненное состояние
         if resume:
@@ -2158,102 +2355,83 @@ class OptimizedDOIProcessor:
                 # Продолжаем с оставшихся DOI
                 remaining_dois = self.stage_progress[source_type]['remaining']
                 dois = remaining_dois if remaining_dois else dois
+                
+                if progress_container:
+                    progress_container.text(f"🔄 Возобновление обработки с {len(dois)} оставшимися DOI")
         
-        results = {}
+        total_dois = len(dois)
         
-        # Обрабатываем батчами с контрольными точками
-        for batch_idx in range(0, len(dois), batch_size):
-            batch = dois[batch_idx:batch_idx + batch_size]
-            batch_id = batch_idx // batch_size
-            
-            # Создаем контрольную точку перед обработкой батча
-            self._create_checkpoint(source_type, batch_id, batch_idx, len(dois))
-            
-            # Обрабатываем батч
-            batch_results = self._process_batch_with_checkpoints(
-                batch, source_type, original_doi, fetch_refs, fetch_cites,
-                checkpoint_interval
-            )
-            
-            results.update(batch_results)
-            
-            # Сохраняем прогресс после каждого батча
-            self._save_batch_progress(
-                source_type, batch_id, batch_results,
-                processed_count=batch_idx + len(batch),
-                total_count=len(dois)
-            )
-            
-            # Также сохраняем инкрементальный прогресс для каждого DOI
-            for doi, result in batch_results.items():
-                self.cache.save_incremental_progress(doi, source_type, result)
-            
-        # Check if can resume from interrupted point
-        if resume and source_type in self.stage_progress:
-            if self.stage_progress[source_type]['remaining']:
-                # Continue from interrupted point
-                dois = self.stage_progress[source_type]['remaining']
-                st.info(f"🔄 Resuming {source_type} processing with {len(dois)} remaining DOI")
-            else:
-                # No saved progress, start from beginning
-                self.stage_progress[source_type] = {'processed': [], 'remaining': dois}
-
-        results = {}
-        total_batches = (len(dois) + batch_size - 1) // batch_size
-
         if progress_container:
-            status_text = progress_container.text(f"🔧 Processing {len(dois)} DOI (source: {source_type})")
+            status_text = progress_container.text(f"🔧 Обработка {total_dois} DOI (источник: {source_type})")
             progress_bar = progress_container.progress(0)
         else:
             status_text = None
             progress_bar = None
 
-        monitor = ProgressMonitor(len(dois), f"Processing {source_type}", progress_bar, status_text)
+        monitor = ProgressMonitor(total_dois, f"Обработка {source_type}", progress_bar, status_text)
 
         try:
-            for batch_idx in range(0, len(dois), batch_size):
+            # Обрабатываем батчами с контрольными точками
+            total_batches = (total_dois + batch_size - 1) // batch_size
+            
+            for batch_idx in range(0, total_dois, batch_size):
                 batch = dois[batch_idx:batch_idx + batch_size]
-                batch_results = self._process_single_batch_with_retry(
-                    batch, source_type, original_doi, True, True
+                batch_id = batch_idx // batch_size
+                self.current_batch_id = batch_id
+                
+                # Создаем контрольную точку перед обработкой батча
+                self._create_checkpoint(source_type, batch_id, batch_idx, total_dois)
+                
+                if progress_container:
+                    status_text.text(f"🔧 Батч {batch_id+1}/{total_batches}: обработка {len(batch)} DOI")
+                
+                # Обрабатываем батч с контрольными точками
+                batch_results = self._process_batch_with_checkpoints(
+                    batch, source_type, original_doi, fetch_refs, fetch_cites, checkpoint_interval
                 )
-
+                
                 results.update(batch_results)
 
-                # Update progress
+                # Обновляем прогресс
                 processed_batch = list(batch_results.keys())
                 self.stage_progress[source_type]['processed'].extend(processed_batch)
                 self.stage_progress[source_type]['remaining'] = dois[batch_idx + batch_size:]
                 
-                # Save progress to cache
+                # Сохраняем прогресс в кэш
                 self.cache.save_progress(
                     source_type,
                     self.stage_progress[source_type]['processed'],
                     self.stage_progress[source_type]['remaining']
                 )
+                
+                # Сохраняем прогресс батча
+                self._save_batch_progress(
+                    source_type, batch_id, batch_results,
+                    processed_count=batch_idx + len(batch),
+                    total_count=total_dois
+                )
 
                 monitor.update(len(batch), 'processed')
 
-                batch_success = sum(1 for r in batch_results.values() if r.get('status') == 'success')
-
-            # Clear saved progress after successful completion
+            # Очищаем сохраненный прогресс после успешного завершения
             self.stage_progress[source_type] = {'processed': [], 'remaining': []}
             self.cache.clear_progress()
 
             monitor.complete()
 
             successful = sum(1 for r in results.values() if r.get('status') == 'success')
-            failed = len(dois) - successful
+            failed = total_dois - successful
 
-            self.stats['total_processed'] += len(dois)
+            self.stats['total_processed'] += total_dois
             self.stats['successful'] += successful
             self.stats['failed'] += failed
 
             return results
 
         except Exception as e:
-            # Save progress on exception
-            st.warning(f"⚠️ {source_type} processing interrupted: {e}")
-            st.info(f"📊 Progress saved. Can resume from interruption point.")
+            # Сохраняем прогресс при исключении
+            st.warning(f"⚠️ Обработка {source_type} прервана: {e}")
+            st.info(f"📊 Прогресс сохранен. Можно возобновить с точки прерывания.")
             return results
 
     def _process_single_batch_with_retry(self, batch: List[str], source_type: str,
@@ -2643,17 +2821,19 @@ class OptimizedDOIProcessor:
             return None
         
         # Загружаем инкрементальный прогресс из кэша
-        incremental_data = self._load_incremental_progress(stage)
+        incremental_data = self.cache.get_incremental_progress(stage)
         
         # Загружаем данные батчей
-        batch_data = self._load_batch_progress(stage)
+        batch_data = self.cache.get_batch_progress(stage)
         
         # Восстанавливаем обработанные DOI
         recovered_results = {}
         if incremental_data:
-            for doi, data in incremental_data.items():
-                if data.get('status') == 'completed':
-                    recovered_results[doi] = data.get('data', {})
+            for key, data in incremental_data.items():
+                if data.get('status') == 'complete' or data.get('status') == 'success':
+                    doi = data.get('doi')
+                    if doi and data.get('data'):
+                        recovered_results[doi] = data['data']
         
         # Обновляем состояние процессора
         self.current_stage = stage
@@ -2669,7 +2849,7 @@ class OptimizedDOIProcessor:
             'recovered_results': len(recovered_results),
             'batch_progress': batch_data
         }
-    
+
 # ============================================================================
 # 📊 TITLE KEYWORDS ANALYZER (WITH LEMMATIZATION)
 # ============================================================================
@@ -5583,13 +5763,7 @@ class ArticleAnalyzerSystem:
 def main():
     # Проверяем наличие сохраненного состояния
     if 'system' not in st.session_state:
-        # Пробуем загрузить сохраненное состояние
-        loaded_state = None
-        if loaded_state:
-            st.session_state.system = loaded_state
-            st.session_state.resume_available = True
-        else:
-            st.session_state.system = ArticleAnalyzerSystem()
+        st.session_state.system = ArticleAnalyzerSystem()
     
     # Application header
     st.title("📚 Scientific Article Analyzer by DOI")
@@ -5873,4 +6047,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
