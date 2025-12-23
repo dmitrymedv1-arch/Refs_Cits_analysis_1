@@ -160,7 +160,7 @@ class SmartCacheManager:
     def __init__(self, cache_dir: str = Config.CACHE_DIR, ttl_hours: int = Config.TTL_HOURS):
         self.cache_dir = cache_dir
         self.ttl_seconds = ttl_hours * 3600
-
+    
         self.stats = {
             'hits': 0,
             'misses': 0,
@@ -171,22 +171,22 @@ class SmartCacheManager:
             'file_hits': 0,
             'api_calls_saved': 0
         }
-
+    
         self.memory_cache = OrderedDict()
         self.max_memory_items = 5000
-
+    
         self.failed_cache = {}
         self.failed_cache_ttl = 3600
-
+    
         self.popular_cache = {}
-
+    
         self.ror_cache = {
             'analyzed': {},
             'ref': {},
             'citing': {},
             'summary': {}
         }
-
+    
         self.insights_cache = {
             'geo_bubbles': {},
             'temporal_patterns': {},
@@ -194,13 +194,18 @@ class SmartCacheManager:
             'citation_cascades': {},
             'mutual_citations': {}
         }
-
+    
         # New cache for processing progress
         self.progress_cache = {
             'last_processed': {},
             'remaining_dois': {},
             'current_stage': {}
         }
+        
+        # Добавляем отсутствующие атрибуты:
+        self.incremental_progress = {}  # Для инкрементального прогресса
+        self.batch_progress = {}  # Для прогресса батчей
+        self.function_cache = {}  # Для кэширования результатов функций
 
         if not os.path.exists(cache_dir):
             os.makedirs(cache_dir, exist_ok=True)
@@ -6139,6 +6144,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
