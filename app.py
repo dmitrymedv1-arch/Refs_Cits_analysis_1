@@ -5584,7 +5584,7 @@ def main():
     # Проверяем наличие сохраненного состояния
     if 'system' not in st.session_state:
         # Пробуем загрузить сохраненное состояние
-        loaded_state = load_system_state_from_cache()
+        loaded_state = None
         if loaded_state:
             st.session_state.system = loaded_state
             st.session_state.resume_available = True
@@ -5873,3 +5873,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
