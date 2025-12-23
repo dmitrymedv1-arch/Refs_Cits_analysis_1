@@ -220,45 +220,6 @@ class SmartCacheManager:
     def _get_cache_metadata_path(self, key: str) -> str:
         return os.path.join(self.cache_dir, f"{key}_meta.json")
 
-    def cache_function_result(self, func_name: str, func_args: tuple, result: Any, 
-                         ttl_seconds: int = 3600):
-        """Кэширует результат выполнения функции"""
-        args_hash = hashlib.md5(str(func_args).encode()).hexdigest()
-        cache_key = f"func:{func_name}:{args_hash}"
-        
-        cache_entry = {
-            'result': result,
-            'timestamp': time.time(),
-            'ttl': ttl_seconds,
-            'func_name': func_name
-        }
-        
-        # Сохраняем в памяти
-        self.function_cache[cache_key] = cache_entry
-        
-        # Также сохраняем на диск для устойчивости
-        self._save_to_disk_cache(cache_key, cache_entry, category="function_results")
-    
-    def get_cached_function_result(self, func_name: str, func_args: tuple):
-        """Получает кэшированный результат функции"""
-        args_hash = hashlib.md5(str(func_args).encode()).hexdigest()
-        cache_key = f"func:{func_name}:{args_hash}"
-        
-        # Пробуем получить из memory cache
-        if cache_key in self.function_cache:
-            entry = self.function_cache[cache_key]
-            if time.time() - entry['timestamp'] < entry['ttl']:
-                return entry['result']
-        
-        # Пробуем получить из disk cache
-        disk_entry = self._load_from_disk_cache(cache_key, "function_results")
-        if disk_entry and time.time() - disk_entry['timestamp'] < disk_entry['ttl']:
-            # Восстанавливаем в memory cache
-            self.function_cache[cache_key] = disk_entry
-            return disk_entry['result']
-        
-        return None
-
     def _calculate_cache_size(self) -> float:
         total_size = 0
         try:
@@ -394,52 +355,41 @@ class SmartCacheManager:
         self.stats['misses'] += 1
         return None
 
-    def set(self, source: str, identifier: str, data: Any, category: str = "default", 
-            stage: str = None, progress_data: Dict = None):
-        """Расширенное кэширование с учетом этапа обработки"""
+    def set(self, source: str, identifier: str, data: Any, category: str = "default"):
         key = self._get_cache_key(source, identifier)
         cache_path = self._get_cache_path(key)
-        
-        # Добавляем информацию о стадии обработки для возобновления
+        meta_path = self._get_cache_metadata_path(key)
+
         cache_entry = {
             'timestamp': time.time(),
             'source': source,
             'identifier': identifier,
             'data': data,
-            'category': category,
-            'stage': stage,  # НОВОЕ: этап обработки
-            'progress_data': progress_data  # НОВОЕ: данные о прогрессе
+            'category': category
         }
-        
+
         try:
             with open(cache_path, 'wb') as f:
                 pickle.dump(cache_entry, f, protocol=pickle.HIGHEST_PROTOCOL)
-            
-            # Сохраняем метаданные отдельно для быстрого чтения
+
             metadata = {
                 'category': category,
-                'stage': stage,
                 'created': datetime.now().isoformat(),
                 'source': source,
-                'identifier_hash': hashlib.md5(str(identifier).encode()).hexdigest(),
-                'status': 'complete' if stage == 'final' else 'processing'
+                'identifier_hash': hashlib.md5(str(identifier).encode()).hexdigest()
             }
-            
-            meta_path = self._get_cache_metadata_path(key)
+
             with open(meta_path, 'w') as mf:
                 json.dump(metadata, mf, indent=2)
-            
-            # Также сохраняем в memory_cache
-            memory_key = f"{category}:{stage}:{key}" if stage else f"{category}:{key}"
+
+            memory_key = f"{category}:{key}"
             if len(self.memory_cache) >= self.max_memory_items:
                 self.memory_cache.popitem(last=False)
-            
+
             self.memory_cache[memory_key] = data
-            
-            # Сохраняем прогресс для возможности возобновления
-            if stage and stage != 'final':
-                self._save_incremental_progress(identifier, stage, data)
-            
+
+            self.stats['api_calls_saved'] += 1
+
         except Exception as e:
             st.warning(f"⚠️ Cache save error: {e}")
 
@@ -566,42 +516,12 @@ class SmartCacheManager:
             for insight in self.insights_cache:
                 self.insights_cache[insight].clear()
 
-    def save_incremental_progress(self, doi: str, stage: str, data: Dict):
-        """Сохраняет инкрементальный прогресс обработки DOI"""
-        progress_key = f"progress:{stage}:{doi}"
-        progress_data = {
-            'doi': doi,
-            'stage': stage,
-            'data': data,
-            'timestamp': time.time(),
-            'status': 'processing'  # или 'completed', 'failed'
-        }
-        
-        # Сохраняем во временный кэш прогресса
-        self.incremental_progress[progress_key] = progress_data
-        
-        # Периодически сохраняем на диск
-        if len(self.incremental_progress) % 50 == 0:
-            self._flush_progress_to_disk()
-    
-    def save_batch_progress(self, stage: str, batch_id: int, processed_dois: List[Dict], 
-                           failed_dois: List[str], total_count: int):
-        """Сохраняет прогресс обработки батча"""
-        batch_key = f"batch:{stage}:{batch_id}"
-        batch_data = {
-            'stage': stage,
-            'batch_id': batch_id,
-            'processed_dois': processed_dois,
-            'failed_dois': failed_dois,
-            'processed_count': len(processed_dois),
-            'failed_count': len(failed_dois),
-            'total_count': total_count,
-            'timestamp': time.time(),
-            'completed': False
-        }
-        
-        self.batch_progress[batch_key] = batch_data
-        self._save_batch_progress_to_disk(batch_key, batch_data)
+    # New methods for saving and loading processing progress
+    def save_progress(self, stage: str, processed_dois: List[str], remaining_dois: List[str]):
+        """Save processing progress to resume from interruption"""
+        self.progress_cache['current_stage'] = stage
+        self.progress_cache['last_processed'][stage] = processed_dois
+        self.progress_cache['remaining_dois'][stage] = remaining_dois
         
         # Save to disk
         progress_file = os.path.join(self.cache_dir, "progress_cache.json")
@@ -869,29 +789,6 @@ class ProgressMonitor:
 
         return summary
 
-    def create_snapshot(self) -> Dict:
-        """Создает снимок текущего состояния для восстановления"""
-        return {
-            'total_items': self.total_items,
-            'processed_items': self.processed_items,
-            'stage_name': self.stage_name,
-            'stats': self.stats.copy(),
-            'start_time': self.start_time,
-            'checkpoint_times': self.checkpoint_times.copy(),
-            'checkpoint_items': self.checkpoint_items.copy(),
-            'timestamp': time.time()
-        }
-    
-    def restore_from_snapshot(self, snapshot: Dict):
-        """Восстанавливает состояние из снимка"""
-        self.total_items = snapshot['total_items']
-        self.processed_items = snapshot['processed_items']
-        self.stage_name = snapshot['stage_name']
-        self.stats = snapshot['stats']
-        self.start_time = snapshot['start_time']
-        self.checkpoint_times = snapshot['checkpoint_times']
-        self.checkpoint_items = snapshot['checkpoint_items']
-        
 # ============================================================================
 # 📝 FAILED DOI TRACKER
 # ============================================================================
@@ -2144,50 +2041,10 @@ class OptimizedDOIProcessor:
         }
 
     def process_doi_batch_with_resume(self, dois: List[str], source_type: str = "analyzed",
-                                     original_doi: str = None, fetch_refs: bool = True,
-                                     fetch_cites: bool = True, batch_size: int = Config.BATCH_SIZE,
-                                     progress_container=None, resume: bool = False,
-                                     checkpoint_interval: int = 10) -> Dict[str, Dict]:
-        
-        # Если возобновляем, загружаем сохраненное состояние
-        if resume:
-            resume_state = self.load_complete_resume_state()
-            if resume_state:
-                # Используем восстановленные результаты
-                results = resume_state.get('recovered_results', {})
-                # Продолжаем с оставшихся DOI
-                remaining_dois = self.stage_progress[source_type]['remaining']
-                dois = remaining_dois if remaining_dois else dois
-        
-        results = {}
-        
-        # Обрабатываем батчами с контрольными точками
-        for batch_idx in range(0, len(dois), batch_size):
-            batch = dois[batch_idx:batch_idx + batch_size]
-            batch_id = batch_idx // batch_size
-            
-            # Создаем контрольную точку перед обработкой батча
-            self._create_checkpoint(source_type, batch_id, batch_idx, len(dois))
-            
-            # Обрабатываем батч
-            batch_results = self._process_batch_with_checkpoints(
-                batch, source_type, original_doi, fetch_refs, fetch_cites,
-                checkpoint_interval
-            )
-            
-            results.update(batch_results)
-            
-            # Сохраняем прогресс после каждого батча
-            self._save_batch_progress(
-                source_type, batch_id, batch_results,
-                processed_count=batch_idx + len(batch),
-                total_count=len(dois)
-            )
-            
-            # Также сохраняем инкрементальный прогресс для каждого DOI
-            for doi, result in batch_results.items():
-                self.cache.save_incremental_progress(doi, source_type, result)
-            
+                                    original_doi: str = None, fetch_refs: bool = True,
+                                    fetch_cites: bool = True, batch_size: int = Config.BATCH_SIZE,
+                                    progress_container=None, resume: bool = False) -> Dict[str, Dict]:
+
         # Check if can resume from interrupted point
         if resume and source_type in self.stage_progress:
             if self.stage_progress[source_type]['remaining']:
@@ -2634,42 +2491,15 @@ class OptimizedDOIProcessor:
 
         return retry_results
 
-    def load_complete_resume_state(self):
-        """Полная загрузка состояния для возобновления"""
-        # Загружаем основной прогресс
+    def load_resume_state(self):
+        """Load state for resume processing"""
         stage, processed, remaining = self.cache.load_progress()
-        
-        if not stage:
-            return None
-        
-        # Загружаем инкрементальный прогресс из кэша
-        incremental_data = self._load_incremental_progress(stage)
-        
-        # Загружаем данные батчей
-        batch_data = self._load_batch_progress(stage)
-        
-        # Восстанавливаем обработанные DOI
-        recovered_results = {}
-        if incremental_data:
-            for doi, data in incremental_data.items():
-                if data.get('status') == 'completed':
-                    recovered_results[doi] = data.get('data', {})
-        
-        # Обновляем состояние процессора
-        self.current_stage = stage
-        self.stage_progress[stage]['processed'] = processed
-        self.stage_progress[stage]['remaining'] = remaining
-        self.stage_progress[stage]['recovered_results'] = recovered_results
-        self.stage_progress[stage]['batch_data'] = batch_data
-        
-        return {
-            'stage': stage,
-            'processed_count': len(processed),
-            'remaining_count': len(remaining),
-            'recovered_results': len(recovered_results),
-            'batch_progress': batch_data
-        }
-    
+        if stage and stage in self.stage_progress:
+            self.stage_progress[stage]['processed'] = processed
+            self.stage_progress[stage]['remaining'] = remaining
+            return stage
+        return None
+
 # ============================================================================
 # 📊 TITLE KEYWORDS ANALYZER (WITH LEMMATIZATION)
 # ============================================================================
@@ -5581,16 +5411,6 @@ class ArticleAnalyzerSystem:
 # ============================================================================
 
 def main():
-    # Проверяем наличие сохраненного состояния
-    if 'system' not in st.session_state:
-        # Пробуем загрузить сохраненное состояние
-        loaded_state = load_system_state_from_cache()
-        if loaded_state:
-            st.session_state.system = loaded_state
-            st.session_state.resume_available = True
-        else:
-            st.session_state.system = ArticleAnalyzerSystem()
-    
     # Application header
     st.title("📚 Scientific Article Analyzer by DOI")
     st.markdown("""
@@ -5598,6 +5418,9 @@ def main():
     """)
 
     # System initialization
+    if 'system' not in st.session_state:
+        st.session_state.system = ArticleAnalyzerSystem()
+
     system = st.session_state.system
 
     # Sidebar for settings
@@ -5873,4 +5696,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
