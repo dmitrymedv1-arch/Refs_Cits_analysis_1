@@ -2612,24 +2612,24 @@ class OptimizedDOIProcessor:
                 
             return result
         
-    except Exception as e:
-        st.warning(f"⚠️ Validation error for {doi} ({source_type}): {str(e)}")
-        # Возвращаем безопасный результат
-        return {
-            'doi': doi,
-            'status': 'failed',
-            'error': f"Validation error: {str(e)}",
-            'publication_info': {},
-            'authors': [],
-            'countries': [],
-            'topics_info': {},
-            'orcid_urls': [],
-            'references': [],
-            'citations': [],
-            'references_count': 0,
-            'pages_formatted': '',
-            'quick_insights': {}
-        }
+        except Exception as e:
+            st.warning(f"⚠️ Validation error for {doi} ({source_type}): {str(e)}")
+            # Возвращаем безопасный результат
+            return {
+                'doi': doi,
+                'status': 'failed',
+                'error': f"Validation error: {str(e)}",
+                'publication_info': {},
+                'authors': [],
+                'countries': [],
+                'topics_info': {},
+                'orcid_urls': [],
+                'references': [],
+                'citations': [],
+                'references_count': 0,
+                'pages_formatted': '',
+                'quick_insights': {}
+            }
 
     def collect_all_references(self, results: Dict[str, Dict]) -> List[str]:
         all_refs = []
@@ -5938,5 +5938,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
