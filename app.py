@@ -5597,10 +5597,6 @@ def main():
     Analyze scientific articles by DOI with smart caching, link and citation analysis.
     """)
 
-    # System initialization
-    if 'system' not in st.session_state:
-        st.session_state.system = ArticleAnalyzerSystem()
-
     system = st.session_state.system
 
     # Sidebar for settings
@@ -5876,5 +5872,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
