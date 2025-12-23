@@ -5530,7 +5530,6 @@ class ArticleAnalyzerSystem:
                 )
                 
                 # After completing analyzed, continue with reference
-                all_ref_dois = self.doi_processor.collect_all_references(st.session_state.analyzed_results)
                 if all_ref_dois:
                     ref_dois_to_analyze = all_ref_dois[:10000]
                     st.session_state.ref_results = self.doi_processor.process_doi_batch_with_resume(
@@ -5539,7 +5538,6 @@ class ArticleAnalyzerSystem:
                     )
                 
                 # Continue with citing
-                all_cite_dois = self.doi_processor.collect_all_citations(st.session_state.analyzed_results)
                 if all_cite_dois:
                     cite_dois_to_analyze = all_cite_dois[:10000]
                     st.session_state.citing_results = self.doi_processor.process_doi_batch_with_resume(
@@ -5555,7 +5553,6 @@ class ArticleAnalyzerSystem:
                 )
                 
                 # After completing reference, process citing
-                all_cite_dois = self.doi_processor.collect_all_citations(st.session_state.analyzed_results)
                 if all_cite_dois:
                     cite_dois_to_analyze = all_cite_dois[:10000]
                     st.session_state.citing_results = self.doi_processor.process_doi_batch_with_resume(
@@ -5594,20 +5591,12 @@ class ArticleAnalyzerSystem:
 
             # Collect and process reference DOI
             if progress_container:
-                progress_container.text("📎 Collecting reference DOI...")
-
-            all_ref_dois = self.doi_processor.collect_all_references(st.session_state.analyzed_results)
-            self.system_stats['total_ref_dois'] = len(all_ref_dois)
-
-            if all_ref_dois:
-                if progress_container:
-                    progress_container.text(f"📎 Found {len(all_ref_dois)} reference DOI for analysis")
-
-                ref_dois_to_analyze = all_ref_dois[:10000]  # Limit for performance
-
-                st.session_state.ref_results = self.doi_processor.process_doi_batch_with_resume(
-                    ref_dois_to_analyze, "ref", None, True, True, Config.BATCH_SIZE, progress_container, resume=False
-                )
+                progress_container.text("📎 Starting reference DOI collection and processing...")
+            
+            st.session_state.ref_results = self._collect_and_process_references_parallel(
+                st.session_state.analyzed_results, 
+                progress_container
+            )
 
                 for doi, result in st.session_state.ref_results.items():
                     if result.get('status') == 'success':
@@ -5619,21 +5608,14 @@ class ArticleAnalyzerSystem:
 
             # Collect and process citation DOI
             if progress_container:
-                progress_container.text("🔗 Collecting citation DOI...")
-
-            all_cite_dois = self.doi_processor.collect_all_citations(st.session_state.analyzed_results)
-            self.system_stats['total_cite_dois'] = len(all_cite_dois)
-
-            if all_cite_dois:
-                if progress_container:
-                    progress_container.text(f"🔗 Found {len(all_cite_dois)} citation DOI for analysis")
-
-                cite_dois_to_analyze = all_cite_dois[:10000]  # Limit for performance
-
-                st.session_state.citing_results = self.doi_processor.process_doi_batch_with_resume(
-                    cite_dois_to_analyze, "citing", None, True, True, Config.BATCH_SIZE, progress_container, resume=False
-                )
-
+                progress_container.text("🔗 Starting citation DOI collection and processing...")
+            
+            # Используем новый метод для параллельного сбора и обработки
+            st.session_state.citing_results = self._collect_and_process_citations_parallel(
+                st.session_state.analyzed_results, 
+                progress_container
+            )
+            
                 for doi, result in st.session_state.citing_results.items():
                     if result.get('status') == 'success':
                         self.excel_exporter.update_counters(
@@ -5676,6 +5658,141 @@ class ArticleAnalyzerSystem:
             'total_refs': self.system_stats['total_ref_dois'],
             'total_cites': self.system_stats['total_cite_dois']
         }
+
+    def _collect_and_process_references_parallel(self, analyzed_results: Dict[str, Dict], 
+                                          progress_container=None) -> Dict[str, Dict]:
+        """
+        Параллельно собирает и обрабатывает ссылки на статьи
+        """
+        ref_results = {}
+        ref_dois_set = set()
+        batch_size = Config.BATCH_SIZE
+        
+        if progress_container:
+            status_text = progress_container.text("📎 Collecting and processing references...")
+            progress_bar = progress_container.progress(0)
+        else:
+            status_text = None
+            progress_bar = None
+        
+        total_analyzed = len([r for r in analyzed_results.values() if r.get('status') == 'success'])
+        processed_count = 0
+        
+        # Собираем ссылки из всех статей
+        for doi, result in analyzed_results.items():
+            if result.get('status') != 'success':
+                continue
+                
+            references = result.get('references', [])
+            for ref_doi in references:
+                if ref_doi and ref_doi not in ref_dois_set:
+                    ref_dois_set.add(ref_doi)
+            
+            processed_count += 1
+            
+            # Каждые N статей обрабатываем накопленные DOI
+            if len(ref_dois_set) >= batch_size * 2:  # Накопили достаточно для обработки
+                batch_dois = list(ref_dois_set)[:batch_size]
+                ref_dois_set = ref_dois_set.difference(set(batch_dois))
+                
+                # Обрабатываем батч
+                batch_results = self.doi_processor.process_doi_batch(
+                    batch_dois, "ref", doi, True, True, batch_size, None
+                )
+                ref_results.update(batch_results)
+                
+                if status_text:
+                    status_text.text(f"📎 Processed {len(ref_results)} references from {processed_count}/{total_analyzed} analyzed articles")
+                if progress_bar and total_analyzed > 0:
+                    progress_bar.progress(processed_count / total_analyzed)
+        
+        # Обрабатываем оставшиеся DOI
+        if ref_dois_set:
+            remaining_dois = list(ref_dois_set)[:10000]  # Лимит на производительность
+            batch_results = self.doi_processor.process_doi_batch(
+                remaining_dois, "ref", None, True, True, batch_size, None
+            )
+            ref_results.update(batch_results)
+        
+        if progress_bar:
+            progress_bar.progress(1.0)
+        if status_text:
+            status_text.text(f"✅ Collected and processed {len(ref_results)} reference articles")
+        
+        self.system_stats['total_ref_dois'] = len(ref_results)
+        return ref_results
+
+    def _collect_and_process_citations_parallel(self, analyzed_results: Dict[str, Dict], 
+                                          progress_container=None) -> Dict[str, Dict]:
+        """
+        Параллельно собирает и обрабатывает цитирующие статьи
+        """
+        citing_results = {}
+        citing_dois_set = set()
+        batch_size = Config.BATCH_SIZE
+        
+        if progress_container:
+            status_text = progress_container.text("🔗 Collecting and processing citations...")
+            progress_bar = progress_container.progress(0)
+        else:
+            status_text = None
+            progress_bar = None
+        
+        total_analyzed = len([r for r in analyzed_results.values() if r.get('status') == 'success'])
+        processed_count = 0
+        
+        # Для анализируемых статей собираем цитирования
+        for doi, result in analyzed_results.items():
+            if result.get('status') != 'success':
+                continue
+                
+            # Используем оптимизированный сбор цитирований
+            try:
+                # Для анализируемых статей собираем ВСЕ цитирования
+                citations = self.openalex_client.fetch_all_citations_for_analyzed_article(doi)
+            except:
+                # Fallback на обычный метод
+                cites_openalex = self.openalex_client.fetch_citations(doi)
+                cites_crossref = self.crossref_client.fetch_citations(doi)
+                citations = list(set(cites_openalex + cites_crossref))
+            
+            for cite_doi in citations:
+                if cite_doi and cite_doi not in citing_dois_set:
+                    citing_dois_set.add(cite_doi)
+            
+            processed_count += 1
+            
+            # Каждые N статей обрабатываем накопленные DOI
+            if len(citing_dois_set) >= batch_size * 2:
+                batch_dois = list(citing_dois_set)[:batch_size]
+                citing_dois_set = citing_dois_set.difference(set(batch_dois))
+                
+                # Обрабатываем батч
+                batch_results = self.doi_processor.process_doi_batch(
+                    batch_dois, "citing", doi, True, True, batch_size, None
+                )
+                citing_results.update(batch_results)
+                
+                if status_text:
+                    status_text.text(f"🔗 Processed {len(citing_results)} citations from {processed_count}/{total_analyzed} analyzed articles")
+                if progress_bar and total_analyzed > 0:
+                    progress_bar.progress(processed_count / total_analyzed)
+        
+        # Обрабатываем оставшиеся DOI
+        if citing_dois_set:
+            remaining_dois = list(citing_dois_set)[:10000]  # Лимит на производительность
+            batch_results = self.doi_processor.process_doi_batch(
+                remaining_dois, "citing", None, True, True, batch_size, None
+            )
+            citing_results.update(batch_results)
+        
+        if progress_bar:
+            progress_bar.progress(1.0)
+        if status_text:
+            status_text.text(f"✅ Collected and processed {len(citing_results)} citing articles")
+        
+        self.system_stats['total_cite_dois'] = len(citing_results)
+        return citing_results
 
     def create_excel_report(self, progress_container=None):
         """Create Excel report"""
@@ -6012,5 +6129,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
