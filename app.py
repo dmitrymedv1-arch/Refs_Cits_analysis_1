@@ -5582,14 +5582,14 @@ class ArticleAnalyzerSystem:
 
 def main():
     # Проверяем наличие сохраненного состояния
-        if 'system' not in st.session_state:
-            # Пробуем загрузить сохраненное состояние
-            loaded_state = load_system_state_from_cache()
-            if loaded_state:
-                st.session_state.system = loaded_state
-                st.session_state.resume_available = True
-            else:
-                st.session_state.system = ArticleAnalyzerSystem()
+    if 'system' not in st.session_state:
+        # Пробуем загрузить сохраненное состояние
+        loaded_state = load_system_state_from_cache()
+        if loaded_state:
+            st.session_state.system = loaded_state
+            st.session_state.resume_available = True
+        else:
+            st.session_state.system = ArticleAnalyzerSystem()
     
     # Application header
     st.title("📚 Scientific Article Analyzer by DOI")
@@ -5598,9 +5598,6 @@ def main():
     """)
 
     # System initialization
-    if 'system' not in st.session_state:
-        st.session_state.system = ArticleAnalyzerSystem()
-
     system = st.session_state.system
 
     # Sidebar for settings
@@ -5876,3 +5873,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
