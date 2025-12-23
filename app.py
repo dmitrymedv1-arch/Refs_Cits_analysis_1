@@ -2330,6 +2330,9 @@ class OptimizedDOIProcessor:
                 doi, source_type, original_doi, True, True
             )
             
+            validated_result = self._validate_result_before_caching(result, doi, source_type)
+            return validated_result
+            
             # Restore original delay
             self.delay.current_delay = original_delay
             
@@ -2386,6 +2389,8 @@ class OptimizedDOIProcessor:
             return self._process_single_doi_optimized(
                 doi, source_type, original_doi, True, True
             )
+            validated_result = self._validate_result_before_caching(result, doi, source_type)
+            return validated_result
         except Exception as e:
             self._handle_processing_error(doi, str(e), source_type, original_doi)
             return {
@@ -2524,6 +2529,9 @@ class OptimizedDOIProcessor:
                             self.author_affiliation_map[author_name].add(affiliation)
                             self.doi_affiliation_map[doi].add(affiliation)
 
+        validated_result = self._validate_result_before_caching(result, doi, source_type)
+        result = validated_result
+                                         
         if result.get('status') == 'success':
             self.stats['successful'] += 1
 
@@ -5938,6 +5946,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
