@@ -2160,17 +2160,33 @@ class OptimizedDOIProcessor:
                 dois = remaining_dois if remaining_dois else dois
         
         results = {}
-        
-        # Обрабатываем батчами с контрольными точками
+
+        # Обрабатываем батчами с сохранением прогресса
         for batch_idx in range(0, len(dois), batch_size):
             batch = dois[batch_idx:batch_idx + batch_size]
             batch_id = batch_idx // batch_size
             
-            # Сохраняем прогресс в кэш менеджере вместо создания контрольной точки
-            self.cache.save_progress(
-                source_type,
-                self.stage_progress[source_type]['processed'],
-                self.stage_progress[source_type]['remaining']
+            # Сохраняем текущий прогресс в кэш менеджере
+            processed_so_far = self.stage_progress[source_type]['processed']
+            remaining_dois = dois[batch_idx:]
+            
+            # Используем существующий метод save_batch_progress
+            processed_dois_info = []
+            for doi in processed_so_far:
+                if doi in results:
+                    processed_dois_info.append({'doi': doi, 'status': results[doi].get('status', 'unknown')})
+            
+            self.cache.save_batch_progress(
+                stage=source_type,
+                batch_id=batch_id,
+                processed_dois=processed_dois_info,
+                failed_dois=[],  # Можно добавить логику для неудачных DOI
+                total_count=len(dois)
+            )
+            
+            # Обрабатываем батч
+            batch_results = self._process_single_batch_with_retry(
+                batch, source_type, original_doi, fetch_refs, fetch_cites
             )
             
             # Обрабатываем батч
@@ -6123,6 +6139,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
