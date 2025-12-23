@@ -5616,13 +5616,13 @@ class ArticleAnalyzerSystem:
                 progress_container
             )
             
-                for doi, result in st.session_state.citing_results.items():
-                    if result.get('status') == 'success':
-                        self.excel_exporter.update_counters(
-                            result.get('references', []),
-                            result.get('citations', []),
-                            "citing"
-                        )
+            for doi, result in st.session_state.citing_results.items():
+                if result.get('status') == 'success':
+                    self.excel_exporter.update_counters(
+                        result.get('references', []),
+                        result.get('citations', []),
+                        "citing"
+                    )
 
         # Retry failed DOI
         failed_stats = self.failed_tracker.get_stats()
@@ -6129,6 +6129,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
