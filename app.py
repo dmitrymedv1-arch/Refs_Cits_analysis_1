@@ -5696,3 +5696,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+st.markdown("""
+    Analyze scientific articles by DOI with smart caching, link and citation analysis.
+    """)
