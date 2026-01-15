@@ -783,7 +783,7 @@ class AnalysisStateManager:
 
 def cached_extract_article_data(crossref_data: Dict, openalex_data: Dict, 
                                doi: str, references: List[str], citations: List[str],
-                               processor: DataProcessor) -> Dict:
+                               processor) -> Dict:
     """
     Cached extraction of article data with intelligent caching
     """
@@ -6540,6 +6540,7 @@ if __name__ == "__main__":
 st.markdown("""
     You can use https://rca-title-keywords.streamlit.app/ for the Title Keywords analysis, https://rca-terms-concepts.streamlit.app/ for the Terms and Topics analysis, and https://rca-analysis.streamlit.app/ for the Article_Analyzed, Article_ref, and Article_citing data 
     """)
+
 
 
 
