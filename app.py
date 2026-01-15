@@ -3862,10 +3862,11 @@ class TitleKeywordsAnalyzer:
 
 class ExcelExporter:
     def __init__(self, data_processor: DataProcessor, ror_client: RORClient,
-                 failed_tracker: FailedDOITracker):
+                 failed_tracker: FailedDOITracker, doi_processor=None):
         self.processor = data_processor
         self.ror_client = ror_client
         self.failed_tracker = failed_tracker
+        self.doi_processor = doi_processor
 
         self.references_counter = Counter()
         self.citations_counter = Counter()
@@ -4086,7 +4087,8 @@ class ExcelExporter:
                                    citing_results: Dict[str, Dict] = None,
                                    filename: str = None,
                                    progress_container=None,
-                                   enable_ror: bool = False) -> BytesIO:
+                                   enable_ror: bool = False,
+                                   doi_processor=None) -> BytesIO:
         """Create comprehensive Excel report with error handling"""
         if filename is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -4105,7 +4107,38 @@ class ExcelExporter:
         
         if self.enable_ror_analysis and progress_container:
             progress_container.info("🔍 ROR analysis enabled. Organization data will be collected.")
-    
+
+        if hasattr(self, 'doi_processor') and self.doi_processor and progress_container:
+            progress_container.text("🔄 Проверка и повторная обработка пропущенных DOI...")
+            
+            # Сначала идентифицируем пропущенные DOI
+            missing_count = 0
+            
+            # Проверяем ссылки
+            for ref_doi in self.ref_to_analyzed.keys():
+                if ref_doi not in self.ref_results:
+                    missing_count += 1
+            
+            # Проверяем цитирования
+            for analyzed_list in self.analyzed_to_citing.values():
+                for cite_doi in analyzed_list:
+                    if cite_doi not in self.citing_results:
+                        missing_count += 1
+            
+            if missing_count > 0:
+                progress_container.text(f"🔄 Найдено {missing_count} пропущенных DOI, повторная обработка...")
+                
+                # Вызываем метод повторной обработки
+                # Этот метод нужно будет добавить в класс ExcelExporter
+                retry_results = self.retry_missing_dois(
+                    self.doi_processor,
+                    lambda msg: progress_container.text(msg) if progress_container else None
+                )
+                
+                if retry_results:
+                    success_count = sum(1 for r in retry_results.values() if r.get('status') == 'success')
+                    progress_container.text(f"✅ Повторно обработано: {success_count}/{missing_count} DOI")
+                                       
         # Prepare summary data with ROR progress
         if progress_container:
             progress_container.text("📋 Preparing summary data...")
@@ -4927,27 +4960,112 @@ class ExcelExporter:
         return self._prepare_article_sheet(results, "analyzed")
 
     def _prepare_article_ref(self) -> List[Dict]:
+        """Подготовка данных для листа Article_ref с повторной обработкой неудачных DOI"""
         data = []
-
+        
+        # Собираем все DOI, которые должны быть в отчете
+        all_ref_dois = set()
+        
+        # DOI из обработанных результатов
         processed_refs = {}
         for ref_doi, ref_result in self.ref_results.items():
             if isinstance(ref_result, dict) and ref_result.get('status') == 'success':
                 processed_refs[ref_doi] = ref_result
-
-        for ref_doi, ref_result in processed_refs.items():
+                all_ref_dois.add(ref_doi)
+        
+        # DOI из связей (ref_to_analyzed)
+        for ref_doi in self.ref_to_analyzed.keys():
+            all_ref_dois.add(ref_doi)
+        
+        # Идентифицируем DOI без данных
+        missing_dois = []
+        for ref_doi in all_ref_dois:
+            if ref_doi not in processed_refs:
+                missing_dois.append(ref_doi)
+        
+        # Пытаемся обработать недостающие DOI (повторная попытка)
+        if missing_dois:
+            print(f"🔄 Найдено {len(missing_dois)} DOI без данных в ссылках, пробуем повторную обработку...")
+            
+            # Импортируем необходимые компоненты
+            from your_module import CrossrefClient, OpenAlexClient, DataProcessor
+            
+            # Создаем временные клиенты для повторной обработки
+            # (нужно получить доступ к cache_manager и delay_manager)
+            try:
+                # Используем существующие клиенты из системы или создаем новые
+                cache_manager = self.cache_manager if hasattr(self, 'cache_manager') else None
+                delay_manager = self.delay_manager if hasattr(self, 'delay_manager') else None
+                
+                if cache_manager and delay_manager:
+                    crossref_client = CrossrefClient(cache_manager, delay_manager)
+                    openalex_client = OpenAlexClient(cache_manager, delay_manager)
+                    data_processor = DataProcessor(cache_manager)
+                    
+                    # Обрабатываем пакетами для экономии времени
+                    batch_size = 50
+                    for i in range(0, len(missing_dois), batch_size):
+                        batch = missing_dois[i:i+batch_size]
+                        print(f"  🔄 Обработка пакета {i//batch_size + 1}/{(len(missing_dois) + batch_size - 1)//batch_size}")
+                        
+                        for doi in batch:
+                            try:
+                                # Получаем данные из API
+                                crossref_data = crossref_client.fetch_article(doi)
+                                openalex_data = openalex_client.fetch_article(doi)
+                                
+                                # Извлекаем информацию
+                                refs = crossref_client.fetch_references(doi) if isinstance(crossref_data, dict) and 'message' in crossref_data else []
+                                cites = openalex_client.fetch_citations(doi, max_pages=1)  # Ограничиваем для скорости
+                                
+                                result = data_processor.extract_article_info(
+                                    crossref_data, openalex_data, doi, refs, cites
+                                )
+                                
+                                if result.get('status') == 'success':
+                                    processed_refs[doi] = result
+                                    print(f"    ✅ Успешно обработан: {doi}")
+                                else:
+                                    print(f"    ⚠️ Не удалось обработать: {doi}")
+                                    
+                            except Exception as e:
+                                print(f"    ❌ Ошибка при обработке {doi}: {str(e)[:100]}")
+                                
+            except Exception as e:
+                print(f"⚠️ Не удалось выполнить повторную обработку: {e}")
+        
+        # Теперь создаем отчет со всеми DOI
+        for ref_doi in all_ref_dois:
+            if ref_doi in processed_refs:
+                ref_result = processed_refs[ref_doi]
+            else:
+                # Создаем пустую запись для DOI без данных
+                ref_result = {
+                    'status': 'failed',
+                    'doi': ref_doi,
+                    'publication_info': {},
+                    'authors': [],
+                    'topics_info': {},
+                    'orcid_urls': [],
+                    'countries': [],
+                    'pages_formatted': '',
+                    'references_count': 0
+                }
+            
+            # Получаем количество связей
             count = len(self.ref_to_analyzed.get(ref_doi, []))
-
+            
             pub_info = ref_result.get('publication_info', {})
             authors = ref_result.get('authors', [])
             topics_info = ref_result.get('topics_info', {})
-
+    
             orcid_urls = ref_result.get('orcid_urls', [])
             affiliations = list(set([aff for author in authors 
                                    if isinstance(author, dict) 
                                    for aff in author.get('affiliation', []) 
                                    if aff and isinstance(aff, str)]))
             countries = ref_result.get('countries', [])
-
+    
             annual_cr = self._calculate_annual_citation_rate(
                 pub_info.get('citation_count_crossref', 0),
                 pub_info.get('year', '')
@@ -4956,7 +5074,7 @@ class ExcelExporter:
                 pub_info.get('citation_count_openalex', 0),
                 pub_info.get('year', '')
             )
-
+    
             row = {
                 'doi': ref_doi,
                 'publication_date': pub_info.get('publication_date', ''),
@@ -4983,65 +5101,128 @@ class ExcelExporter:
                 'Domain': topics_info.get('domain', ''),
                 'Concepts': '; '.join(topics_info.get('concepts', [])) if topics_info.get('concepts') else ''
             }
-
+    
             data.append(row)
-
-        for ref_doi in self.ref_to_analyzed:
-            if ref_doi not in processed_refs:
-                count = len(self.ref_to_analyzed.get(ref_doi, []))
-                row = {
-                    'doi': ref_doi,
-                    'publication_date': '',
-                    'Title': '',
-                    'authors': '',
-                    'ORCID ID 1; ORCID ID 2... ORCID ID last': '',
-                    'author count': 0,
-                    'affiliations {aff 1; aff 2... aff last}': '',
-                    'countries {country 1; ... country last}': '',
-                    'Full journal Name': '',
-                    'year': '',
-                    'Volume': '',
-                    'Pages (or article number)': '',
-                    'Citation counts (CR)': 0,
-                    'Citation counts (OA)': 0,
-                    'Annual cit counts (CR)': 0.0,
-                    'Annual cit counts (OA)': 0.0,
-                    'references_count': 0,
-                    'count': count,
-                    'Topic': '',
-                    'Subfield': '',
-                    'Field': '',
-                    'Domain': '',
-                    'Concepts': ''
-                }
-                data.append(row)
-
+    
         data = self._sort_article_data_by_count_and_date(data)
-
+    
+        # Статистика
+        processed_count = sum(1 for r in data if r['Title'])  # Считаем с заполненными заголовками
+        empty_count = len(data) - processed_count
+        
+        print(f"📊 Article_ref статистика: Всего {len(data)} записей, из них:")
+        print(f"   ✅ Обработано: {processed_count}")
+        print(f"   ⚠️ Без данных: {empty_count}")
+        
         return data
-
+    
+    
     def _prepare_article_citing(self) -> List[Dict]:
+        """Подготовка данных для листа Article_citing с повторной обработкой неудачных DOI"""
         data = []
-
+        
+        # Собираем все DOI, которые должны быть в отчете
+        all_cite_dois = set()
+        
+        # DOI из обработанных результатов
         processed_cites = {}
         for cite_doi, cite_result in self.citing_results.items():
             if isinstance(cite_result, dict) and cite_result.get('status') == 'success':
                 processed_cites[cite_doi] = cite_result
-
-        for cite_doi, cite_result in processed_cites.items():
+                all_cite_dois.add(cite_doi)
+        
+        # DOI из связей (analyzed_to_citing)
+        for analyzed_list in self.analyzed_to_citing.values():
+            all_cite_dois.update(analyzed_list)
+        
+        # Идентифицируем DOI без данных
+        missing_dois = []
+        for cite_doi in all_cite_dois:
+            if cite_doi not in processed_cites:
+                missing_dois.append(cite_doi)
+        
+        # Пытаемся обработать недостающие DOI (повторная попытка)
+        if missing_dois:
+            print(f"🔄 Найдено {len(missing_dois)} DOI без данных в цитировании, пробуем повторную обработку...")
+            
+            # Импортируем необходимые компоненты
+            from your_module import CrossrefClient, OpenAlexClient, DataProcessor
+            
+            # Создаем временные клиенты для повторной обработки
+            try:
+                # Используем существующие клиенты из системы или создаем новые
+                cache_manager = self.cache_manager if hasattr(self, 'cache_manager') else None
+                delay_manager = self.delay_manager if hasattr(self, 'delay_manager') else None
+                
+                if cache_manager and delay_manager:
+                    crossref_client = CrossrefClient(cache_manager, delay_manager)
+                    openalex_client = OpenAlexClient(cache_manager, delay_manager)
+                    data_processor = DataProcessor(cache_manager)
+                    
+                    # Обрабатываем пакетами для экономии времени
+                    batch_size = 50
+                    for i in range(0, len(missing_dois), batch_size):
+                        batch = missing_dois[i:i+batch_size]
+                        print(f"  🔄 Обработка пакета {i//batch_size + 1}/{(len(missing_dois) + batch_size - 1)//batch_size}")
+                        
+                        for doi in batch:
+                            try:
+                                # Получаем данные из API
+                                crossref_data = crossref_client.fetch_article(doi)
+                                openalex_data = openalex_client.fetch_article(doi)
+                                
+                                # Извлекаем информацию
+                                refs = crossref_client.fetch_references(doi) if isinstance(crossref_data, dict) and 'message' in crossref_data else []
+                                cites = openalex_client.fetch_citations(doi, max_pages=1)  # Ограничиваем для скорости
+                                
+                                result = data_processor.extract_article_info(
+                                    crossref_data, openalex_data, doi, refs, cites
+                                )
+                                
+                                if result.get('status') == 'success':
+                                    processed_cites[doi] = result
+                                    print(f"    ✅ Успешно обработан: {doi}")
+                                else:
+                                    print(f"    ⚠️ Не удалось обработать: {doi}")
+                                    
+                            except Exception as e:
+                                print(f"    ❌ Ошибка при обработке {doi}: {str(e)[:100]}")
+                                
+            except Exception as e:
+                print(f"⚠️ Не удалось выполнить повторную обработку: {e}")
+        
+        # Теперь создаем отчет со всеми DOI
+        for cite_doi in all_cite_dois:
+            if cite_doi in processed_cites:
+                cite_result = processed_cites[cite_doi]
+            else:
+                # Создаем пустую запись для DOI без данных
+                cite_result = {
+                    'status': 'failed',
+                    'doi': cite_doi,
+                    'publication_info': {},
+                    'authors': [],
+                    'topics_info': {},
+                    'orcid_urls': [],
+                    'countries': [],
+                    'pages_formatted': '',
+                    'references_count': 0
+                }
+            
+            # Получаем количество связей
             count = sum(1 for analyzed_list in self.analyzed_to_citing.values() if cite_doi in analyzed_list)
-
+    
             pub_info = cite_result.get('publication_info', {})
             authors = cite_result.get('authors', [])
             topics_info = cite_result.get('topics_info', {})
-
+    
             orcid_urls = cite_result.get('orcid_urls', [])
             affiliations = list(set([aff for author in authors 
                                    if isinstance(author, dict) 
                                    for aff in author.get('affiliation', []) 
                                    if aff and isinstance(aff, str)]))
             countries = cite_result.get('countries', [])
-
+    
             annual_cr = self._calculate_annual_citation_rate(
                 pub_info.get('citation_count_crossref', 0),
                 pub_info.get('year', '')
@@ -5050,7 +5231,7 @@ class ExcelExporter:
                 pub_info.get('citation_count_openalex', 0),
                 pub_info.get('year', '')
             )
-
+    
             row = {
                 'doi': cite_doi,
                 'publication_date': pub_info.get('publication_date', ''),
@@ -5077,45 +5258,19 @@ class ExcelExporter:
                 'Domain': topics_info.get('domain', ''),
                 'Concepts': '; '.join(topics_info.get('concepts', [])) if topics_info.get('concepts') else ''
             }
-
+    
             data.append(row)
-
-        all_citing_dois = set()
-        for analyzed_list in self.analyzed_to_citing.values():
-            all_citing_dois.update(analyzed_list)
-
-        for cite_doi in all_citing_dois:
-            if cite_doi not in processed_cites:
-                count = sum(1 for analyzed_list in self.analyzed_to_citing.values() if cite_doi in analyzed_list)
-                row = {
-                    'doi': cite_doi,
-                    'publication_date': '',
-                    'Title': '',
-                    'authors': '',
-                    'ORCID ID 1; ORCID ID 2... ORCID ID last': '',
-                    'author count': 0,
-                    'affiliations {aff 1; aff 2... aff last}': '',
-                    'countries {country 1; ... country last}': '',
-                    'Full journal Name': '',
-                    'year': '',
-                    'Volume': '',
-                    'Pages (or article number)': '',
-                    'Citation counts (CR)': 0,
-                    'Citation counts (OA)': 0,
-                    'Annual cit counts (CR)': 0.0,
-                    'Annual cit counts (OA)': 0.0,
-                    'references_count': 0,
-                    'count': count,
-                    'Topic': '',
-                    'Subfield': '',
-                    'Field': '',
-                    'Domain': '',
-                    'Concepts': ''
-                }
-                data.append(row)
-
+    
         data = self._sort_article_data_by_count_and_date(data)
-
+    
+        # Статистика
+        processed_count = sum(1 for r in data if r['Title'])  # Считаем с заполненными заголовками
+        empty_count = len(data) - processed_count
+        
+        print(f"📊 Article_citing статистика: Всего {len(data)} записей, из них:")
+        print(f"   ✅ Обработано: {processed_count}")
+        print(f"   ⚠️ Без данных: {empty_count}")
+        
         return data
 
     def _sort_article_data_by_count_and_date(self, data: List[Dict]) -> List[Dict]:
@@ -5819,6 +5974,74 @@ class ExcelExporter:
             if cite and isinstance(cite, str):
                 counter_cite[cite] += 1
 
+    def retry_missing_dois(self, doi_processor, progress_callback=None):
+        """Повторная попытка обработки DOI, которые не были обработаны в основном процессе"""
+        
+        # Определяем DOI, которые есть в связях, но нет в результатах
+        missing_ref_dois = []
+        for ref_doi in self.ref_to_analyzed.keys():
+            if ref_doi not in self.ref_results:
+                missing_ref_dois.append(ref_doi)
+        
+        missing_cite_dois = []
+        for analyzed_list in self.analyzed_to_citing.values():
+            for cite_doi in analyzed_list:
+                if cite_doi not in self.citing_results:
+                    missing_cite_dois.append(cite_doi)
+        
+        # Убираем дубликаты
+        missing_ref_dois = list(set(missing_ref_dois))
+        missing_cite_dois = list(set(missing_cite_dois))
+        
+        if not missing_ref_dois and not missing_cite_dois:
+            return {}
+        
+        total_missing = len(missing_ref_dois) + len(missing_cite_dois)
+        
+        if progress_callback:
+            progress_callback(f"🔄 Повторная обработка {total_missing} пропущенных DOI...")
+        
+        # Объединяем все DOI
+        all_missing_dois = missing_ref_dois + missing_cite_dois
+        
+        # Обрабатываем пакетами
+        results = {}
+        batch_size = 100
+        total_batches = (len(all_missing_dois) + batch_size - 1) // batch_size
+        
+        for batch_num in range(total_batches):
+            start_idx = batch_num * batch_size
+            end_idx = min(start_idx + batch_size, len(all_missing_dois))
+            batch = all_missing_dois[start_idx:end_idx]
+            
+            if progress_callback:
+                progress_callback(f"  Пакет {batch_num + 1}/{total_batches}: {len(batch)} DOI")
+            
+            try:
+                # Используем doi_processor для обработки
+                batch_results = doi_processor._process_single_batch_with_retry(
+                    batch, "retry_missing", None, True, True
+                )
+                
+                results.update(batch_results)
+                
+                # Обновляем результаты
+                for doi, result in batch_results.items():
+                    if doi in missing_ref_dois and result.get('status') == 'success':
+                        self.ref_results[doi] = result
+                    if doi in missing_cite_dois and result.get('status') == 'success':
+                        self.citing_results[doi] = result
+                
+            except Exception as e:
+                if progress_callback:
+                    progress_callback(f"    ❌ Ошибка в пакете {batch_num + 1}: {str(e)}")
+        
+        if progress_callback:
+            success_count = sum(1 for r in results.values() if r.get('status') == 'success')
+            progress_callback(f"✅ Повторная обработка завершена: {success_count}/{total_missing} успешно")
+        
+        return results
+    
 # ============================================================================
 # 🚀 MAIN SYSTEM CLASS (UPDATED FOR STREAMLIT WITH RESUME)
 # ============================================================================
@@ -5849,7 +6072,7 @@ class ArticleAnalyzerSystem:
             self.cache_manager, self.delay_manager,
             self.data_processor, self.failed_tracker
         )
-        self.excel_exporter = ExcelExporter(self.data_processor, self.ror_client, self.failed_tracker)
+        self.excel_exporter = ExcelExporter(self.data_processor, self.ror_client, self.failed_tracker, self.doi_processor)
 
         # Initialize data in session state (load from state manager)
         if not st.session_state.get('processing_complete'):
@@ -6797,6 +7020,7 @@ if __name__ == "__main__":
 st.markdown("""
     You can use https://rca-title-keywords.streamlit.app/ for the Title Keywords analysis, https://rca-terms-concepts.streamlit.app/ for the Terms and Topics analysis, and https://rca-analysis.streamlit.app/ for the Article_Analyzed, Article_ref, and Article_citing data 
     """)
+
 
 
 
