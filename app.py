@@ -47,6 +47,36 @@ st.set_page_config(
 )
 
 # ============================================================================
+# 📦 IN-MEMORY CACHE LAYERS (SPECIALIZED CACHES)
+# ============================================================================
+
+# 1. Article metadata caches
+_article_metadata_cache = {}  # Unified article metadata by DOI
+_crossref_article_cache = {}  # Crossref data by DOI
+_openalex_article_cache = {}  # OpenAlex data by DOI
+
+# 2. Journal information caches
+_journal_search_cache = {}  # Journal search results by query
+_journal_info_cache = {}  # Journal info by ISSN/ID
+
+# 3. Relationship caches
+_citing_works_cache = {}  # Citing works by DOI (full list)
+_reference_works_cache = {}  # References by DOI (full list)
+_relationship_cache = {}  # Article relationships
+
+# 4. Processing state caches
+_processing_state_cache = {}  # Processing state by task ID
+_progress_cache = {}  # Progress tracking
+
+# Cache statistics
+_cache_stats = {
+    'hits': 0,
+    'misses': 0,
+    'saves': 0,
+    'memory_size': 0
+}
+
+# ============================================================================
 # ⚙️ CONFIGURATION
 # ============================================================================
 
@@ -575,6 +605,340 @@ class SmartCacheManager:
                     'remaining_dois': {},
                     'current_stage': {}
                 }
+
+# ============================================================================
+# 🏗️ ANALYSIS STATE MANAGER (SESSION-BASED STATE)
+# ============================================================================
+
+class AnalysisStateManager:
+    """Manages analysis state across session restarts"""
+    
+    def __init__(self):
+        # Session state caches
+        self.crossref_cache = {}
+        self.openalex_cache = {}
+        self.unified_cache = {}
+        self.citing_cache = defaultdict(list)
+        self.reference_cache = defaultdict(list)
+        
+        # Processing state
+        self.current_stage = None
+        self.current_batch = 0
+        self.total_batches = 0
+        self.processed_items = []
+        self.pending_items = []
+        
+        # Analysis results
+        self.analyzed_results = {}
+        self.ref_results = {}
+        self.citing_results = {}
+        
+        # Statistics
+        self.api_calls_saved = 0
+        self.total_processed = 0
+        self.start_time = time.time()
+        
+        # Initialize from session state if exists
+        self._load_from_session()
+    
+    def _load_from_session(self):
+        """Load state from Streamlit session state"""
+        if 'analysis_state' not in st.session_state:
+            st.session_state.analysis_state = {
+                'crossref_cache': {},
+                'openalex_cache': {},
+                'unified_cache': {},
+                'citing_cache': defaultdict(list),
+                'reference_cache': defaultdict(list),
+                'current_stage': None,
+                'current_batch': 0,
+                'processed_items': [],
+                'pending_items': [],
+                'analyzed_results': {},
+                'ref_results': {},
+                'citing_results': {},
+                'api_calls_saved': 0,
+                'total_processed': 0,
+                'start_time': time.time()
+            }
+        
+        state = st.session_state.analysis_state
+        self.crossref_cache = state.get('crossref_cache', {})
+        self.openalex_cache = state.get('openalex_cache', {})
+        self.unified_cache = state.get('unified_cache', {})
+        self.citing_cache = state.get('citing_cache', defaultdict(list))
+        self.reference_cache = state.get('reference_cache', defaultdict(list))
+        self.current_stage = state.get('current_stage')
+        self.current_batch = state.get('current_batch', 0)
+        self.processed_items = state.get('processed_items', [])
+        self.pending_items = state.get('pending_items', [])
+        self.analyzed_results = state.get('analyzed_results', {})
+        self.ref_results = state.get('ref_results', {})
+        self.citing_results = state.get('citing_results', {})
+        self.api_calls_saved = state.get('api_calls_saved', 0)
+        self.total_processed = state.get('total_processed', 0)
+        self.start_time = state.get('start_time', time.time())
+    
+    def save_to_session(self):
+        """Save state to Streamlit session state"""
+        st.session_state.analysis_state = {
+            'crossref_cache': self.crossref_cache,
+            'openalex_cache': self.openalex_cache,
+            'unified_cache': self.unified_cache,
+            'citing_cache': dict(self.citing_cache),
+            'reference_cache': dict(self.reference_cache),
+            'current_stage': self.current_stage,
+            'current_batch': self.current_batch,
+            'processed_items': self.processed_items,
+            'pending_items': self.pending_items,
+            'analyzed_results': self.analyzed_results,
+            'ref_results': self.ref_results,
+            'citing_results': self.citing_results,
+            'api_calls_saved': self.api_calls_saved,
+            'total_processed': self.total_processed,
+            'start_time': self.start_time
+        }
+    
+    def set_stage(self, stage: str, total_items: int = 0):
+        """Set current processing stage"""
+        self.current_stage = stage
+        self.current_batch = 0
+        self.total_batches = (total_items + Config.BATCH_SIZE - 1) // Config.BATCH_SIZE
+        self.save_to_session()
+    
+    def update_progress(self, batch_num: int, processed: List[str], pending: List[str]):
+        """Update processing progress"""
+        self.current_batch = batch_num
+        self.processed_items = processed
+        self.pending_items = pending
+        self.save_to_session()
+    
+    def save_result(self, doi: str, result: Dict, result_type: str = 'analyzed'):
+        """Save analysis result"""
+        if result_type == 'analyzed':
+            self.analyzed_results[doi] = result
+        elif result_type == 'ref':
+            self.ref_results[doi] = result
+        elif result_type == 'citing':
+            self.citing_results[doi] = result
+        self.save_to_session()
+    
+    def get_cached_result(self, doi: str, source: str = 'unified'):
+        """Get cached result for DOI"""
+        if source == 'crossref' and doi in self.crossref_cache:
+            return self.crossref_cache[doi]
+        elif source == 'openalex' and doi in self.openalex_cache:
+            return self.openalex_cache[doi]
+        elif doi in self.unified_cache:
+            return self.unified_cache[doi]
+        return None
+    
+    def cache_result(self, doi: str, data: Dict, source: str = 'unified'):
+        """Cache result for DOI"""
+        if source == 'crossref':
+            self.crossref_cache[doi] = data
+        elif source == 'openalex':
+            self.openalex_cache[doi] = data
+        else:
+            self.unified_cache[doi] = data
+        self.api_calls_saved += 1
+        self.save_to_session()
+    
+    def get_stats(self):
+        """Get state statistics"""
+        elapsed = time.time() - self.start_time
+        return {
+            'api_calls_saved': self.api_calls_saved,
+            'total_processed': self.total_processed,
+            'crossref_cache_size': len(self.crossref_cache),
+            'openalex_cache_size': len(self.openalex_cache),
+            'unified_cache_size': len(self.unified_cache),
+            'elapsed_time': round(elapsed, 1),
+            'current_stage': self.current_stage,
+            'progress': f"{self.current_batch}/{self.total_batches}" if self.total_batches > 0 else "0/0"
+        }
+    
+    def clear_state(self):
+        """Clear all state"""
+        self.crossref_cache.clear()
+        self.openalex_cache.clear()
+        self.unified_cache.clear()
+        self.citing_cache.clear()
+        self.reference_cache.clear()
+        self.analyzed_results.clear()
+        self.ref_results.clear()
+        self.citing_results.clear()
+        self.current_stage = None
+        self.current_batch = 0
+        self.processed_items = []
+        self.pending_items = []
+        self.api_calls_saved = 0
+        self.total_processed = 0
+        self.start_time = time.time()
+        self.save_to_session()
+
+# ============================================================================
+# 🔄 DECLARATIVE CACHING FUNCTIONS
+# ============================================================================
+
+def cached_extract_article_data(crossref_data: Dict, openalex_data: Dict, 
+                               doi: str, references: List[str], citations: List[str],
+                               processor: DataProcessor) -> Dict:
+    """
+    Cached extraction of article data with intelligent caching
+    """
+    # Create cache key from inputs
+    cache_key_parts = [
+        str(hash(json.dumps(crossref_data, sort_keys=True) if crossref_data else '')),
+        str(hash(json.dumps(openalex_data, sort_keys=True) if openalex_data else '')),
+        doi,
+        str(hash(tuple(sorted(references))) if references else ''),
+        str(hash(tuple(sorted(citations))) if citations else '')
+    ]
+    cache_key = hashlib.sha256('|'.join(cache_key_parts).encode()).hexdigest()[:32]
+    
+    # Check in-memory cache first
+    if cache_key in _article_metadata_cache:
+        _cache_stats['hits'] += 1
+        return _article_metadata_cache[cache_key]
+    
+    _cache_stats['misses'] += 1
+    
+    # Extract data (expensive operation)
+    result = processor.extract_article_info(
+        crossref_data, openalex_data, doi, references, citations
+    )
+    
+    # Cache in memory
+    _article_metadata_cache[cache_key] = result
+    _cache_stats['saves'] += 1
+    _cache_stats['memory_size'] += len(str(result))
+    
+    # Limit memory cache size
+    if len(_article_metadata_cache) > 10000:
+        # Remove oldest entries
+        keys_to_remove = list(_article_metadata_cache.keys())[:1000]
+        for key in keys_to_remove:
+            del _article_metadata_cache[key]
+    
+    return result
+
+def cached_fetch_article_data(doi: str, crossref_client: CrossrefClient,
+                             openalex_client: OpenAlexClient, 
+                             state_manager: AnalysisStateManager) -> Tuple[Dict, Dict]:
+    """
+    Cached fetching of article data from APIs with multi-level caching
+    """
+    # Check session state cache first (fastest)
+    cached = state_manager.get_cached_result(doi, 'unified')
+    if cached:
+        return cached.get('crossref', {}), cached.get('openalex', {})
+    
+    # Check in-memory caches
+    if doi in _crossref_article_cache and doi in _openalex_article_cache:
+        return _crossref_article_cache[doi], _openalex_article_cache[doi]
+    
+    # Fetch from APIs
+    crossref_data = crossref_client.fetch_article(doi)
+    openalex_data = openalex_client.fetch_article(doi)
+    
+    # Cache in memory
+    _crossref_article_cache[doi] = crossref_data
+    _openalex_article_cache[doi] = openalex_data
+    
+    # Cache in session state
+    unified_data = {
+        'crossref': crossref_data,
+        'openalex': openalex_data,
+        'timestamp': time.time()
+    }
+    state_manager.cache_result(doi, unified_data, 'unified')
+    
+    return crossref_data, openalex_data
+
+def cached_get_citing_works(doi: str, openalex_client: OpenAlexClient,
+                          source_type: str = "analyzed",
+                          state_manager: AnalysisStateManager = None) -> List[str]:
+    """
+    Cached fetching of citing works with intelligent caching
+    """
+    cache_key = f"citing:{doi}:{source_type}"
+    
+    # Check relationship cache
+    if cache_key in _citing_works_cache:
+        _cache_stats['hits'] += 1
+        return _citing_works_cache[cache_key]
+    
+    # Check session state cache
+    if state_manager and doi in state_manager.citing_cache:
+        _cache_stats['hits'] += 1
+        return state_manager.citing_cache[doi]
+    
+    _cache_stats['misses'] += 1
+    
+    # Fetch citing works
+    if source_type == "analyzed":
+        citing_works = openalex_client.fetch_all_citations_for_analyzed_article(doi)
+    else:
+        citing_works = openalex_client.fetch_citations(doi)
+    
+    # Cache in memory
+    _citing_works_cache[cache_key] = citing_works
+    _cache_stats['saves'] += 1
+    
+    # Cache in session state
+    if state_manager:
+        state_manager.citing_cache[doi] = citing_works
+        state_manager.save_to_session()
+    
+    return citing_works
+
+def cached_get_references(doi: str, crossref_client: CrossrefClient,
+                        state_manager: AnalysisStateManager = None) -> List[str]:
+    """
+    Cached fetching of references
+    """
+    # Check in-memory cache
+    if doi in _reference_works_cache:
+        _cache_stats['hits'] += 1
+        return _reference_works_cache[doi]
+    
+    # Check session state cache
+    if state_manager and doi in state_manager.reference_cache:
+        _cache_stats['hits'] += 1
+        return state_manager.reference_cache[doi]
+    
+    _cache_stats['misses'] += 1
+    
+    # Fetch references
+    references = crossref_client.fetch_references(doi)
+    
+    # Cache in memory
+    _reference_works_cache[doi] = references
+    _cache_stats['saves'] += 1
+    
+    # Cache in session state
+    if state_manager:
+        state_manager.reference_cache[doi] = references
+        state_manager.save_to_session()
+    
+    return references
+
+def get_cache_stats() -> Dict:
+    """Get cache statistics"""
+    return {
+        'in_memory_hits': _cache_stats['hits'],
+        'in_memory_misses': _cache_stats['misses'],
+        'in_memory_saves': _cache_stats['saves'],
+        'in_memory_size': _cache_stats['memory_size'],
+        'article_cache_size': len(_article_metadata_cache),
+        'crossref_cache_size': len(_crossref_article_cache),
+        'openalex_cache_size': len(_openalex_article_cache),
+        'citing_cache_size': len(_citing_works_cache),
+        'reference_cache_size': len(_reference_works_cache),
+        'hit_ratio': (_cache_stats['hits'] / (_cache_stats['hits'] + _cache_stats['misses']) * 100) 
+                     if (_cache_stats['hits'] + _cache_stats['misses']) > 0 else 0
+    }
 
 # ============================================================================
 # 🚀 ADAPTIVE DELAY MANAGER
@@ -2029,9 +2393,14 @@ class OptimizedDOIProcessor:
             'successful': 0,
             'failed': 0,
             'cached_hits': 0,
-            'api_calls': 0
+            'api_calls': 0,
+            'in_memory_hits': 0,
+            'session_state_hits': 0
         }
 
+        # State manager for session-based caching
+        self.state_manager = AnalysisStateManager()
+        
         # New variables for resume management
         self.current_stage = None
         self.stage_progress = {
@@ -2040,20 +2409,85 @@ class OptimizedDOIProcessor:
             'citing': {'processed': [], 'remaining': []}
         }
 
+        if not os.path.exists(Config.CACHE_DIR):
+            os.makedirs(Config.CACHE_DIR, exist_ok=True)
+
+    def collect_and_deduplicate_dois(self, dois_list: List[str], source_type: str = "general") -> List[str]:
+        """
+        Собирает и удаляет дубликаты из списка DOI
+        Args:
+            dois_list: Список DOI
+            source_type: Тип источников для логирования
+        Returns:
+            Список уникальных DOI
+        """
+        if not dois_list:
+            return []
+        
+        # Удаляем пустые значения
+        clean_dois = [doi for doi in dois_list if doi and isinstance(doi, str) and len(doi.strip()) > 5]
+        
+        if not clean_dois:
+            return []
+        
+        # Собираем уникальные DOI
+        unique_dois = []
+        seen_dois = set()
+        duplicate_count = 0
+        
+        for doi in clean_dois:
+            clean_doi = self._clean_doi_for_deduplication(doi)
+            if clean_doi and clean_doi not in seen_dois:
+                seen_dois.add(clean_doi)
+                unique_dois.append(clean_doi)
+            elif clean_doi in seen_dois:
+                duplicate_count += 1
+        
+        if duplicate_count > 0:
+            st.info(f"📊 В {source_type} найдено {duplicate_count} дубликатов DOI")
+        
+        st.info(f"📊 Всего DOI в {source_type}: {len(clean_dois)}, уникальных: {len(unique_dois)}")
+        
+        return unique_dois
+
+    def _clean_doi_for_deduplication(self, doi: str) -> str:
+        """Очищает DOI для дедупликации"""
+        if not doi or not isinstance(doi, str):
+            return ""
+        
+        doi = doi.strip()
+        
+        # Удаляем стандартные префиксы
+        prefixes = ['doi:', 'DOI:', 'https://doi.org/', 'http://doi.org/', 
+                    'https://dx.doi.org/', 'http://dx.doi.org/']
+        
+        for prefix in prefixes:
+            if doi.lower().startswith(prefix.lower()):
+                doi = doi[len(prefix):]
+        
+        return doi.strip()
+
     def process_doi_batch_with_resume(self, dois: List[str], source_type: str = "analyzed",
                                     original_doi: str = None, fetch_refs: bool = True,
                                     fetch_cites: bool = True, batch_size: int = Config.BATCH_SIZE,
                                     progress_container=None, resume: bool = False) -> Dict[str, Dict]:
 
+        # Set current stage in state manager
+        self.state_manager.set_stage(source_type, len(dois))
+        
         # Check if can resume from interrupted point
         if resume and source_type in self.stage_progress:
             if self.stage_progress[source_type]['remaining']:
                 # Continue from interrupted point
                 dois = self.stage_progress[source_type]['remaining']
-                st.info(f"🔄 Resuming {source_type} processing with {len(dois)} remaining DOI")
+                if progress_container:
+                    progress_container.info(f"🔄 Resuming {source_type} processing with {len(dois)} remaining DOI")
             else:
                 # No saved progress, start from beginning
                 self.stage_progress[source_type] = {'processed': [], 'remaining': dois}
+        else:
+            # Normal start
+            self.stage_progress[source_type] = {'processed': [], 'remaining': dois}
 
         results = {}
         total_batches = (len(dois) + batch_size - 1) // batch_size
@@ -2070,16 +2504,46 @@ class OptimizedDOIProcessor:
         try:
             for batch_idx in range(0, len(dois), batch_size):
                 batch = dois[batch_idx:batch_idx + batch_size]
-                batch_results = self._process_single_batch_with_retry(
-                    batch, source_type, original_doi, True, True
-                )
-
-                results.update(batch_results)
+                
+                # Check which DOI are already cached
+                batch_to_process = []
+                cached_results = {}
+                
+                for doi in batch:
+                    # Check session state cache
+                    if source_type == 'analyzed' and doi in self.state_manager.analyzed_results:
+                        cached_results[doi] = self.state_manager.analyzed_results[doi]
+                        self.stats['session_state_hits'] += 1
+                    elif source_type == 'ref' and doi in self.state_manager.ref_results:
+                        cached_results[doi] = self.state_manager.ref_results[doi]
+                        self.stats['session_state_hits'] += 1
+                    elif source_type == 'citing' and doi in self.state_manager.citing_results:
+                        cached_results[doi] = self.state_manager.citing_results[doi]
+                        self.stats['session_state_hits'] += 1
+                    else:
+                        batch_to_process.append(doi)
+                
+                # Add cached results
+                results.update(cached_results)
+                
+                # Process only non-cached DOI
+                if batch_to_process:
+                    batch_results = self._process_single_batch_with_retry(
+                        batch_to_process, source_type, original_doi, True, True
+                    )
+                    results.update(batch_results)
 
                 # Update progress
-                processed_batch = list(batch_results.keys())
+                processed_batch = list(batch_to_process) + list(cached_results.keys())
                 self.stage_progress[source_type]['processed'].extend(processed_batch)
                 self.stage_progress[source_type]['remaining'] = dois[batch_idx + batch_size:]
+                
+                # Update state manager
+                self.state_manager.update_progress(
+                    batch_idx // batch_size + 1,
+                    self.stage_progress[source_type]['processed'],
+                    self.stage_progress[source_type]['remaining']
+                )
                 
                 # Save progress to cache
                 self.cache.save_progress(
@@ -2090,11 +2554,13 @@ class OptimizedDOIProcessor:
 
                 monitor.update(len(batch), 'processed')
 
-                batch_success = sum(1 for r in batch_results.values() if r.get('status') == 'success')
-
             # Clear saved progress after successful completion
             self.stage_progress[source_type] = {'processed': [], 'remaining': []}
             self.cache.clear_progress()
+            
+            # Update state manager
+            self.state_manager.current_stage = None
+            self.state_manager.save_to_session()
 
             monitor.complete()
 
@@ -2109,8 +2575,12 @@ class OptimizedDOIProcessor:
 
         except Exception as e:
             # Save progress on exception
-            st.warning(f"⚠️ {source_type} processing interrupted: {e}")
-            st.info(f"📊 Progress saved. Can resume from interruption point.")
+            if progress_container:
+                progress_container.warning(f"⚠️ {source_type} processing interrupted: {e}")
+                progress_container.info(f"📊 Progress saved. Can resume from interruption point.")
+            
+            # Ensure state is saved
+            self.state_manager.save_to_session()
             return results
 
     def _process_single_batch_with_retry(self, batch: List[str], source_type: str,
@@ -2270,27 +2740,30 @@ class OptimizedDOIProcessor:
     def _process_single_doi_optimized(self, doi: str, source_type: str,
                                      original_doi: str, fetch_refs: bool, fetch_cites: bool) -> Dict:
 
+        # Check if already processed in this session
+        if source_type == 'analyzed' and doi in self.state_manager.analyzed_results:
+            self.stats['session_state_hits'] += 1
+            return self.state_manager.analyzed_results[doi]
+        elif source_type == 'ref' and doi in self.state_manager.ref_results:
+            self.stats['session_state_hits'] += 1
+            return self.state_manager.ref_results[doi]
+        elif source_type == 'citing' and doi in self.state_manager.citing_results:
+            self.stats['session_state_hits'] += 1
+            return self.state_manager.citing_results[doi]
+
         cache_key = f"full_result:{doi}"
         cached_result = self.cache.get("full_analysis", cache_key)
 
         if cached_result is not None:
             self.stats['cached_hits'] += 1
+            # Also save to session state for faster access
+            self.state_manager.save_result(doi, cached_result, source_type)
             return cached_result
 
-        crossref_data = {}
-        openalex_data = {}
-
-        try:
-            crossref_data = self.crossref_client.fetch_article(doi)
-            openalex_data = self.openalex_client.fetch_article(doi)
-        except Exception as e:
-            error_msg = f"Data retrieval error: {str(e)}"
-            self._handle_processing_error(doi, error_msg, source_type, original_doi)
-            return {
-                'doi': doi,
-                'status': 'failed',
-                'error': error_msg
-            }
+        # Use cached API fetching
+        crossref_data, openalex_data = cached_fetch_article_data(
+            doi, self.crossref_client, self.openalex_client, self.state_manager
+        )
 
         crossref_error = None
         openalex_error = None
@@ -2314,7 +2787,8 @@ class OptimizedDOIProcessor:
 
         references = []
         try:
-            refs = self.crossref_client.fetch_references(doi)
+            # Use cached references fetching
+            refs = cached_get_references(doi, self.crossref_client, self.state_manager)
             references = refs if isinstance(refs, list) else []
 
             if references:
@@ -2324,10 +2798,11 @@ class OptimizedDOIProcessor:
 
         citations = []
         try:
+            # Use cached citing works fetching
             # IMPORTANT CHANGE: Different citation collection logic depending on article type
             if source_type == "analyzed":
                 # For analyzed articles: collect ALL citations through new logic
-                cites_openalex = self.openalex_client.fetch_all_citations_for_analyzed_article(doi)
+                cites_openalex = cached_get_citing_works(doi, self.openalex_client, source_type, self.state_manager)
 
                 # Also get citations from Crossref for data completeness
                 cites_crossref = self.crossref_client.fetch_citations(doi)
@@ -2340,7 +2815,7 @@ class OptimizedDOIProcessor:
 
             else:
                 # For reference and citing articles: use old logic (only up to 2000)
-                cites_openalex = self.openalex_client.fetch_citations(doi)
+                cites_openalex = cached_get_citing_works(doi, self.openalex_client, source_type, self.state_manager)
                 cites_crossref = self.crossref_client.fetch_citations(doi)
 
                 cites_openalex = cites_openalex if isinstance(cites_openalex, list) else []
@@ -2356,7 +2831,7 @@ class OptimizedDOIProcessor:
             # try to use old logic as fallback
             if source_type == "analyzed":
                 try:
-                    cites_openalex = self.openalex_client.fetch_citations(doi)
+                    cites_openalex = cached_get_citing_works(doi, self.openalex_client, "general", self.state_manager)
                     cites_crossref = self.crossref_client.fetch_citations(doi)
                     cites_openalex = cites_openalex if isinstance(cites_openalex, list) else []
                     cites_crossref = cites_crossref if isinstance(cites_crossref, list) else []
@@ -2367,8 +2842,9 @@ class OptimizedDOIProcessor:
                 except Exception as e2:
                     st.warning(f"❌ Fallback also failed for {doi}: {e2}")
 
-        result = self.data_processor.extract_article_info(
-            crossref_data, openalex_data, doi, references, citations
+        # Use cached article data extraction
+        result = cached_extract_article_data(
+            crossref_data, openalex_data, doi, references, citations, self.data_processor
         )
 
         if result.get('status') == 'success':
@@ -2384,7 +2860,9 @@ class OptimizedDOIProcessor:
         if result.get('status') == 'success':
             self.stats['successful'] += 1
 
+            # Cache at all levels
             self.cache.set("full_analysis", cache_key, result, category="full_analysis")
+            self.state_manager.save_result(doi, result, source_type)
 
             self.cache.update_popularity(doi)
         else:
@@ -2464,61 +2942,6 @@ class OptimizedDOIProcessor:
         
         return unique_cites
 
-    def collect_and_deduplicate_dois(self, dois_list: List[str], source_type: str = "general") -> List[str]:
-        """
-        Собирает и удаляет дубликаты из списка DOI
-        Args:
-            dois_list: Список DOI
-            source_type: Тип источников для логирования
-        Returns:
-            Список уникальных DOI
-        """
-        if not dois_list:
-            return []
-        
-        # Удаляем пустые значения
-        clean_dois = [doi for doi in dois_list if doi and isinstance(doi, str) and len(doi.strip()) > 5]
-        
-        if not clean_dois:
-            return []
-        
-        # Собираем уникальные DOI
-        unique_dois = []
-        seen_dois = set()
-        duplicate_count = 0
-        
-        for doi in clean_dois:
-            clean_doi = self._clean_doi_for_deduplication(doi)
-            if clean_doi and clean_doi not in seen_dois:
-                seen_dois.add(clean_doi)
-                unique_dois.append(clean_doi)
-            elif clean_doi in seen_dois:
-                duplicate_count += 1
-        
-        if duplicate_count > 0:
-            st.info(f"📊 В {source_type} найдено {duplicate_count} дубликатов DOI")
-        
-        st.info(f"📊 Всего DOI в {source_type}: {len(clean_dois)}, уникальных: {len(unique_dois)}")
-        
-        return unique_dois
-    
-    def _clean_doi_for_deduplication(self, doi: str) -> str:
-        """Очищает DOI для дедупликации"""
-        if not doi or not isinstance(doi, str):
-            return ""
-        
-        doi = doi.strip()
-        
-        # Удаляем стандартные префиксы
-        prefixes = ['doi:', 'DOI:', 'https://doi.org/', 'http://doi.org/', 
-                    'https://dx.doi.org/', 'http://dx.doi.org/']
-        
-        for prefix in prefixes:
-            if doi.lower().startswith(prefix.lower()):
-                doi = doi[len(prefix):]
-        
-        return doi.strip()
-
     def get_relationships(self) -> Dict[str, Any]:
         return {
             'reference_relationships': dict(self.reference_relationships),
@@ -2534,14 +2957,22 @@ class OptimizedDOIProcessor:
         }
 
     def get_stats(self) -> Dict[str, Any]:
+        """Get comprehensive statistics"""
+        cache_stats = get_cache_stats()
+        state_stats = self.state_manager.get_stats()
+        
         return {
             'total_processed': self.stats['total_processed'],
             'successful': self.stats['successful'],
             'failed': self.stats['failed'],
             'cached_hits': self.stats['cached_hits'],
             'api_calls': self.stats['api_calls'],
+            'in_memory_hits': self.stats['in_memory_hits'],
+            'session_state_hits': self.stats['session_state_hits'],
             'cache_efficiency': round((self.stats['cached_hits'] / max(1, self.stats['total_processed'])) * 100, 1),
-            'success_rate': round((self.stats['successful'] / max(1, self.stats['total_processed'])) * 100, 1)
+            'success_rate': round((self.stats['successful'] / max(1, self.stats['total_processed'])) * 100, 1),
+            'in_memory_cache_stats': cache_stats,
+            'session_state_stats': state_stats
         }
 
     def retry_failed_dois(self, failed_tracker: FailedDOITracker, max_retries: int = 1) -> Dict[str, Dict]:
@@ -5165,10 +5596,13 @@ class ArticleAnalyzerSystem:
             st.session_state.delay_manager = AdaptiveDelayManager()
         if 'failed_tracker' not in st.session_state:
             st.session_state.failed_tracker = FailedDOITracker()
+        if 'analysis_state_manager' not in st.session_state:
+            st.session_state.analysis_state_manager = AnalysisStateManager()
 
         self.cache_manager = st.session_state.cache_manager
         self.delay_manager = st.session_state.delay_manager
         self.failed_tracker = st.session_state.failed_tracker
+        self.state_manager = st.session_state.analysis_state_manager
 
         self.crossref_client = CrossrefClient(self.cache_manager, self.delay_manager)
         self.openalex_client = OpenAlexClient(self.cache_manager, self.delay_manager)
@@ -5181,18 +5615,19 @@ class ArticleAnalyzerSystem:
         )
         self.excel_exporter = ExcelExporter(self.data_processor, self.ror_client, self.failed_tracker)
 
-        # Initialize data in session state
-        if 'analyzed_results' not in st.session_state:
-            st.session_state.analyzed_results = {}
-        if 'ref_results' not in st.session_state:
-            st.session_state.ref_results = {}
-        if 'citing_results' not in st.session_state:
-            st.session_state.citing_results = {}
-        if 'processing_complete' not in st.session_state:
-            st.session_state.processing_complete = False
-        if 'resume_available' not in st.session_state:
-            st.session_state.resume_available = False
-        if 'enable_ror_analysis' not in st.session_state:
+        # Initialize data in session state (load from state manager)
+        if not st.session_state.get('processing_complete'):
+            # Load from state manager
+            self.state_manager = st.session_state.analysis_state_manager
+            st.session_state.analyzed_results = self.state_manager.analyzed_results
+            st.session_state.ref_results = self.state_manager.ref_results
+            st.session_state.citing_results = self.state_manager.citing_results
+            st.session_state.processing_complete = (
+                len(self.state_manager.analyzed_results) > 0 or
+                len(self.state_manager.ref_results) > 0 or
+                len(self.state_manager.citing_results) > 0
+            )
+            st.session_state.resume_available = self.state_manager.current_stage is not None
             st.session_state.enable_ror_analysis = False
 
         self.system_stats = {
@@ -5210,11 +5645,16 @@ class ArticleAnalyzerSystem:
 
     def _check_resume_availability(self):
         """Check if there is saved progress for resuming"""
+        # Check both disk cache and state manager
         stage, processed, remaining = self.cache_manager.load_progress()
         if stage and remaining:
             st.session_state.resume_available = True
             st.session_state.resume_stage = stage
             st.session_state.resume_remaining = remaining
+        elif self.state_manager.current_stage and self.state_manager.pending_items:
+            st.session_state.resume_available = True
+            st.session_state.resume_stage = self.state_manager.current_stage
+            st.session_state.resume_remaining = self.state_manager.pending_items
         else:
             st.session_state.resume_available = False
 
@@ -5280,7 +5720,7 @@ class ArticleAnalyzerSystem:
         # Set ROR analysis flag
         self.excel_exporter.enable_ror_analysis = enable_ror
         st.session_state.enable_ror_analysis = enable_ror
-    
+
         # Check resume possibility
         if resume and st.session_state.resume_available:
             stage = st.session_state.resume_stage
@@ -5331,7 +5771,7 @@ class ArticleAnalyzerSystem:
                 # Собираем ВСЕ цитирующие работы для ВСЕХ анализируемых статей
                 if progress_container:
                     progress_container.text("🔗 Собираем все цитирующие работы для анализируемых статей...")
-    
+
                 # Получаем все цитирующие работы
                 all_cite_lists = []
                 for doi, result in st.session_state.analyzed_results.items():
@@ -5368,7 +5808,7 @@ class ArticleAnalyzerSystem:
                 # Собираем ВСЕ цитирующие работы для ВСЕХ анализируемых статей
                 if progress_container:
                     progress_container.text("🔗 Собираем все цитирующие работы для анализируемых статей...")
-    
+
                 # Получаем все цитирующие работы
                 all_cite_lists = []
                 for doi, result in st.session_state.analyzed_results.items():
@@ -5408,12 +5848,12 @@ class ArticleAnalyzerSystem:
             # Normal processing from beginning
             if progress_container:
                 progress_container.text("📚 Processing original DOI...")
-    
+
             # Process original DOI
             st.session_state.analyzed_results = self.doi_processor.process_doi_batch_with_resume(
                 dois, "analyzed", None, True, True, Config.BATCH_SIZE, progress_container, resume=False
             )
-    
+
             # Update counters
             for doi, result in st.session_state.analyzed_results.items():
                 if result.get('status') == 'success':
@@ -5422,11 +5862,11 @@ class ArticleAnalyzerSystem:
                         result.get('citations', []),
                         "analyzed"
                     )
-    
+
             # Собираем ВСЕ ссылки из ВСЕХ анализируемых статей
             if progress_container:
                 progress_container.text("📎 Собираем все ссылки из анализируемых статей...")
-    
+
             # Получаем все ссылки
             all_ref_lists = []
             for doi, result in st.session_state.analyzed_results.items():
@@ -5458,11 +5898,11 @@ class ArticleAnalyzerSystem:
                             result.get('citations', []),
                             "ref"
                         )
-    
+
             # Собираем ВСЕ цитирующие работы для ВСЕХ анализируемых статей
             if progress_container:
                 progress_container.text("🔗 Собираем все цитирующие работы для анализируемых статей...")
-    
+
             # Получаем все цитирующие работы
             all_cite_lists = []
             for doi, result in st.session_state.analyzed_results.items():
@@ -5494,14 +5934,14 @@ class ArticleAnalyzerSystem:
                             result.get('citations', []),
                             "citing"
                         )
-    
+
         # Retry failed DOI
         failed_stats = self.failed_tracker.get_stats()
         if failed_stats['total_failed'] > 0:
             if progress_container:
                 progress_container.text("🔄 Retrying failed DOI...")
             retry_results = self.doi_processor.retry_failed_dois(self.failed_tracker)
-    
+
             for doi, result in retry_results.items():
                 if result.get('status') == 'success':
                     source_type = self.failed_tracker.sources.get(doi, 'retry')
@@ -5511,17 +5951,17 @@ class ArticleAnalyzerSystem:
                         st.session_state.ref_results[doi] = result
                     elif source_type == 'citing' and doi in self.failed_tracker.failed_dois:
                         st.session_state.citing_results[doi] = result
-    
+
         processing_time = time.time() - start_time
-    
+
         # Update statistics
         self.system_stats['total_dois_processed'] += len(dois)
         successful = sum(1 for r in st.session_state.analyzed_results.values() if r.get('status') == 'success')
         failed = len(dois) - successful
-    
+
         st.session_state.processing_complete = True
         st.rerun()
-    
+
         return {
             'processing_time': processing_time,
             'successful': successful,
@@ -5559,6 +5999,7 @@ class ArticleAnalyzerSystem:
 
     def clear_data(self):
         """Clear all data"""
+        self.state_manager.clear_state()
         st.session_state.analyzed_results = {}
         st.session_state.ref_results = {}
         st.session_state.citing_results = {}
@@ -5567,6 +6008,24 @@ class ArticleAnalyzerSystem:
         st.session_state.enable_ror_analysis = False
         self.failed_tracker.clear()
         self.cache_manager.clear_progress()
+        
+        # Clear in-memory caches
+        global _article_metadata_cache, _crossref_article_cache, _openalex_article_cache
+        global _citing_works_cache, _reference_works_cache
+        _article_metadata_cache.clear()
+        _crossref_article_cache.clear()
+        _openalex_article_cache.clear()
+        _citing_works_cache.clear()
+        _reference_works_cache.clear()
+        
+        # Clear cache stats
+        global _cache_stats
+        _cache_stats = {
+            'hits': 0,
+            'misses': 0,
+            'saves': 0,
+            'memory_size': 0
+        }
 
 # ============================================================================
 # 🎛️ STREAMLIT INTERFACE (UPDATED)
@@ -5577,6 +6036,7 @@ def main():
     st.title("📚 Scientific Article Analyzer by DOI")
     st.markdown("""
     Analyze scientific articles by DOI with smart caching, link and citation analysis.
+    Multi-level caching system ensures fast recovery from interruptions.
     """)
 
     # System initialization
@@ -5605,28 +6065,76 @@ def main():
             help="Enable ROR ID search for affiliations (takes additional time)"
         )
         
+        # Cache settings
         st.markdown("---")
+        st.subheader("🗂️ Cache Settings")
+        
+        # Cache TTL setting
+        cache_ttl = st.slider(
+            "Cache TTL (hours)",
+            min_value=1,
+            max_value=168,
+            value=Config.TTL_HOURS,
+            help="How long to keep cached data before refreshing"
+        )
+        Config.TTL_HOURS = cache_ttl
         
         # Cache management
-        st.subheader("🗂️ Cache Management")
-        
-        if st.button("Clear cache", type="secondary"):
-            system.cache_manager.clear_all()
-            st.success("Cache cleared!")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Clear cache", type="secondary", use_container_width=True):
+                system.cache_manager.clear_all()
+                system.state_manager.clear_state()
+                st.success("Cache cleared at all levels!")
+                
+        with col2:
+            if st.button("Clear all data", type="secondary", use_container_width=True):
+                system.clear_data()
+                st.success("All data cleared!")
+                st.rerun()
         
         # Show cache statistics
-        cache_stats = system.cache_manager.get_stats()
-        with st.expander("Cache statistics"):
-            st.write(f"Efficiency: {cache_stats['hit_ratio']}%")
-            st.write(f"API calls saved: {cache_stats['api_calls_saved']}")
-            st.write(f"Cache size: {cache_stats['cache_size_mb']} MB")
+        with st.expander("📊 Cache Statistics"):
+            # Disk cache stats
+            cache_stats = system.cache_manager.get_stats()
+            st.write("**Disk Cache:**")
+            st.write(f"• Efficiency: {cache_stats['hit_ratio']}%")
+            st.write(f"• API calls saved: {cache_stats['api_calls_saved']}")
+            st.write(f"• Size: {cache_stats['cache_size_mb']} MB")
+            st.write(f"• Memory items: {cache_stats['memory_items']}")
+            
+            # In-memory cache stats
+            mem_cache_stats = get_cache_stats()
+            st.write("**Memory Cache:**")
+            st.write(f"• Hit ratio: {mem_cache_stats['hit_ratio']:.1f}%")
+            st.write(f"• Total hits: {mem_cache_stats['in_memory_hits']}")
+            st.write(f"• Article cache: {mem_cache_stats['article_cache_size']} items")
+            
+            # Session state cache stats
+            state_stats = system.state_manager.get_stats()
+            st.write("**Session Cache:**")
+            st.write(f"• Crossref cache: {state_stats['crossref_cache_size']}")
+            st.write(f"• OpenAlex cache: {state_stats['openalex_cache_size']}")
+            st.write(f"• Unified cache: {state_stats['unified_cache_size']}")
+            st.write(f"• API calls saved: {state_stats['api_calls_saved']}")
+            
+            if state_stats['current_stage']:
+                st.write(f"**Current stage:** {state_stats['current_stage']}")
+                st.write(f"**Progress:** {state_stats['progress']}")
         
         # Check resume availability
         if st.session_state.resume_available:
             st.markdown("---")
-            st.subheader("🔄 Resume")
+            st.subheader("🔄 Resume Options")
             st.info(f"Resume available from stage: {st.session_state.resume_stage}")
             st.write(f"Remaining DOI: {len(st.session_state.resume_remaining)}")
+            
+            if st.button("Force Clear Resume", type="secondary"):
+                system.cache_manager.clear_progress()
+                system.state_manager.current_stage = None
+                st.session_state.resume_available = False
+                st.success("Resume state cleared!")
+                st.rerun()
 
     # Main input area
     st.header("📝 DOI Input")
@@ -5638,6 +6146,7 @@ def main():
         help="Can enter multiple DOI separated by commas, semicolons or line breaks"
     )
     
+    # Quick actions row
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
@@ -5645,7 +6154,7 @@ def main():
     
     with col2:
         if st.session_state.resume_available:
-            resume_btn = st.button("🔄 Resume", type="primary", use_container_width=True)
+            resume_btn = st.button("🔄 Resume Processing", type="primary", use_container_width=True)
         else:
             resume_btn = None
             st.button("🔄 Resume", type="secondary", use_container_width=True, disabled=True)
@@ -5667,6 +6176,23 @@ def main():
                              use_container_width=True,
                              disabled=export_disabled)
     
+    # Progress visualization (always visible)
+    if system.state_manager.current_stage:
+        st.markdown("---")
+        st.subheader("📈 Current Progress")
+        
+        progress = system.state_manager.get_stats()
+        if progress['current_stage']:
+            # Progress bar
+            if progress['progress'] and '/' in progress['progress']:
+                current, total = map(int, progress['progress'].split('/'))
+                if total > 0:
+                    progress_percent = (current / total) * 100
+                    st.progress(progress_percent / 100)
+                    st.caption(f"Stage: {progress['current_stage']} - {current}/{total} batches")
+            
+            st.info(f"🔄 Processing paused. {len(system.state_manager.pending_items)} items pending. Click 'Resume' to continue.")
+    
     # Handle button clicks
     if process_btn and doi_input:
         dois = system._parse_dois(doi_input)
@@ -5676,11 +6202,27 @@ def main():
         else:
             st.info(f"🔍 Found {len(dois)} valid DOI for processing")
             
+            # Show cache status before processing
+            with st.expander("🔄 Cache Status Before Processing"):
+                pre_cache_stats = system.cache_manager.get_stats()
+                pre_state_stats = system.state_manager.get_stats()
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write("**Disk Cache:**")
+                    st.write(f"• Hit ratio: {pre_cache_stats['hit_ratio']}%")
+                    st.write(f"• Memory items: {pre_cache_stats['memory_items']}")
+                
+                with col2:
+                    st.write("**Session Cache:**")
+                    st.write(f"• Unified cache: {pre_state_stats['unified_cache_size']}")
+                    st.write(f"• API calls saved: {pre_state_stats['api_calls_saved']}")
+            
             # Progress container
             progress_container = st.container()
             
             with progress_container:
-                st.write("🚀 Starting processing...")
+                st.write("🚀 Starting processing with multi-level caching...")
                 
                 # Start processing
                 try:
@@ -5694,6 +6236,7 @@ def main():
                     
                     st.success(f"✅ Processing completed in {results['processing_time']:.1f} seconds")
                     
+                    # Show processing metrics
                     col1, col2, col3, col4 = st.columns(4)
                     with col1:
                         st.metric("Successful", results['successful'])
@@ -5704,6 +6247,12 @@ def main():
                     with col4:
                         st.metric("Citation DOI", results['total_cites'])
                     
+                    # Show cache efficiency metrics
+                    processor_stats = system.doi_processor.get_stats()
+                    st.info(f"📊 Cache efficiency: {processor_stats['cache_efficiency']:.1f}% "
+                           f"(in-memory: {processor_stats['in_memory_hits']}, "
+                           f"session: {processor_stats['session_state_hits']})")
+                    
                     # Show failed DOI statistics
                     failed_stats = system.failed_tracker.get_stats()
                     if failed_stats['total_failed'] > 0:
@@ -5711,6 +6260,27 @@ def main():
                             st.write(f"• From analyzed: {failed_stats['analyzed_failed']}")
                             st.write(f"• From references: {failed_stats['ref_failed']}")
                             st.write(f"• From citations: {failed_stats['citing_failed']}")
+                            
+                            if failed_stats.get('error_types'):
+                                st.write("**Error types:**")
+                                for error_type, count in failed_stats['error_types'].items():
+                                    st.write(f"  - {error_type}: {count}")
+                    
+                    # Show cache status after processing
+                    with st.expander("📊 Cache Status After Processing"):
+                        post_cache_stats = system.cache_manager.get_stats()
+                        post_state_stats = system.state_manager.get_stats()
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.write("**Disk Cache:**")
+                            st.write(f"• New API calls saved: {post_cache_stats['api_calls_saved'] - pre_cache_stats['api_calls_saved']}")
+                            st.write(f"• Total saved: {post_cache_stats['api_calls_saved']}")
+                        
+                        with col2:
+                            st.write("**Session Cache:**")
+                            st.write(f"• New API calls saved: {post_state_stats['api_calls_saved'] - pre_state_stats['api_calls_saved']}")
+                            st.write(f"• Total saved: {post_state_stats['api_calls_saved']}")
                     
                     # Show examples of processed articles
                     with st.expander("📊 Examples of processed articles"):
@@ -5727,7 +6297,19 @@ def main():
                 
                 except Exception as e:
                     st.error(f"❌ Processing error: {str(e)}")
-                    st.info("⚠️ Processing progress saved. Can resume from interruption point.")
+                    
+                    # Save state for recovery
+                    system.state_manager.save_to_session()
+                    
+                    st.info("""
+                    ⚠️ **Processing interrupted but progress saved!**
+                    
+                    You can:
+                    1. Click **"Resume Processing"** to continue from where it stopped
+                    2. Or **"Clear data"** to start over
+                    
+                    All cached data is preserved for faster recovery.
+                    """)
     
     elif resume_btn and st.session_state.resume_available:
         # Resume processing
@@ -5747,6 +6329,7 @@ def main():
                 
                 st.success(f"✅ Processing resumed and completed")
                 
+                # Show metrics
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
                     st.metric("Successful", results['successful'])
@@ -5757,15 +6340,24 @@ def main():
                 with col4:
                     st.metric("Citation DOI", results['total_cites'])
                     
+                # Show cache efficiency
+                processor_stats = system.doi_processor.get_stats()
+                st.info(f"📊 Cache efficiency during resume: {processor_stats['cache_efficiency']:.1f}%")
+                
             except Exception as e:
                 st.error(f"❌ Resume processing error: {str(e)}")
+                
+                # Save state again for next recovery attempt
+                system.state_manager.save_to_session()
+                
+                st.info("⚠️ Resume failed but state preserved. You can try to resume again.")
     
     elif process_btn and not doi_input:
         st.warning("⚠️ Enter DOI for processing")
     
     if clear_btn:
         system.clear_data()
-        st.success("✅ Data cleared")
+        st.success("✅ All data and caches cleared")
         st.rerun()
     
     if export_btn and st.session_state.processing_complete:
@@ -5778,16 +6370,32 @@ def main():
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 filename = f"articles_analysis_{timestamp}.xlsx"
                 
+                # Show file info
+                st.success(f"✅ Excel report created: {filename}")
+                
                 # Provide file for download
                 st.download_button(
                     label="⬇️ Download Excel file",
                     data=excel_file,
                     file_name=filename,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary"
                 )
                 
-                st.success("✅ Excel report created and ready for download")
-                
+                # Show report statistics
+                with st.expander("📋 Report Contents"):
+                    analyzed_count = len([r for r in st.session_state.analyzed_results.values() 
+                                         if r.get('status') == 'success'])
+                    ref_count = len([r for r in st.session_state.ref_results.values() 
+                                    if r.get('status') == 'success'])
+                    citing_count = len([r for r in st.session_state.citing_results.values() 
+                                       if r.get('status') == 'success'])
+                    
+                    st.write(f"• Analyzed articles: {analyzed_count}")
+                    st.write(f"• Reference articles: {ref_count}")
+                    st.write(f"• Citing articles: {citing_count}")
+                    st.write(f"• Total articles: {analyzed_count + ref_count + citing_count}")
+                    
             except Exception as e:
                 st.error(f"❌ Report creation error: {str(e)}")
     
@@ -5847,10 +6455,80 @@ def main():
             st.write(f"**Unique reference DOI:** {len(system.excel_exporter.references_counter)}")
             st.write(f"**Unique citation DOI:** {len(system.excel_exporter.citations_counter)}")
             
-            # Cache statistics
+            # Cache statistics section
+            st.markdown("### 🗂️ Cache Statistics")
+            
+            # Disk cache stats
             cache_stats = system.cache_manager.get_stats()
-            st.write(f"**Cache efficiency:** {cache_stats['hit_ratio']}%")
-            st.write(f"**API calls saved:** {cache_stats['api_calls_saved']}")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write("**Disk Cache:**")
+                st.write(f"• Hit ratio: {cache_stats['hit_ratio']}%")
+                st.write(f"• API calls saved: {cache_stats['api_calls_saved']}")
+                st.write(f"• Size: {cache_stats['cache_size_mb']} MB")
+            
+            # In-memory cache stats
+            mem_cache_stats = get_cache_stats()
+            with col2:
+                st.write("**Memory Cache:**")
+                st.write(f"• Hit ratio: {mem_cache_stats['hit_ratio']:.1f}%")
+                st.write(f"• Total hits: {mem_cache_stats['in_memory_hits']}")
+                st.write(f"• Article cache: {mem_cache_stats['article_cache_size']} items")
+            
+            # Session state cache stats
+            state_stats = system.state_manager.get_stats()
+            col3, col4 = st.columns(2)
+            with col3:
+                st.write("**Session Cache:**")
+                st.write(f"• Crossref cache: {state_stats['crossref_cache_size']}")
+                st.write(f"• OpenAlex cache: {state_stats['openalex_cache_size']}")
+                st.write(f"• Unified cache: {state_stats['unified_cache_size']}")
+            
+            with col4:
+                st.write("**Performance:**")
+                st.write(f"• API calls saved: {state_stats['api_calls_saved']}")
+                st.write(f"• Total processed: {state_stats['total_processed']}")
+                st.write(f"• Elapsed time: {state_stats['elapsed_time']}s")
+            
+            # Processor statistics
+            processor_stats = system.doi_processor.get_stats()
+            st.markdown("### ⚡ Processor Statistics")
+            col5, col6 = st.columns(2)
+            with col5:
+                st.write("**Cache Efficiency:**")
+                st.write(f"• Disk cache: {processor_stats['cache_efficiency']:.1f}%")
+                st.write(f"• In-memory hits: {processor_stats['in_memory_hits']}")
+                st.write(f"• Session hits: {processor_stats['session_state_hits']}")
+            
+            with col6:
+                st.write("**Processing:**")
+                st.write(f"• Success rate: {processor_stats['success_rate']:.1f}%")
+                st.write(f"• API calls made: {processor_stats['api_calls']}")
+                st.write(f"• Total processed: {processor_stats['total_processed']}")
+    
+    # Footer with system info
+    st.markdown("---")
+    footer_col1, footer_col2, footer_col3 = st.columns(3)
+    
+    with footer_col1:
+        st.caption(f"Cache TTL: {Config.TTL_HOURS}h")
+    
+    with footer_col2:
+        # Get current cache sizes
+        cache_stats = system.cache_manager.get_stats()
+        state_stats = system.state_manager.get_stats()
+        mem_stats = get_cache_stats()
+        total_saved = cache_stats['api_calls_saved'] + state_stats['api_calls_saved']
+        st.caption(f"API calls saved: {total_saved}")
+    
+    with footer_col3:
+        st.caption(f"System version: 4.0 (Multi-level caching)")
+    
+    st.markdown("""
+    You can use https://rca-title-keywords.streamlit.app/ for the Title Keywords analysis, 
+    https://rca-terms-concepts.streamlit.app/ for the Terms and Topics analysis, and 
+    https://rca-analysis.streamlit.app/ for the Article_Analyzed, Article_ref, and Article_citing data 
+    """)
 
 # ============================================================================
 # 🏃‍♂️ RUN APPLICATION
@@ -5862,5 +6540,6 @@ if __name__ == "__main__":
 st.markdown("""
     You can use https://rca-title-keywords.streamlit.app/ for the Title Keywords analysis, https://rca-terms-concepts.streamlit.app/ for the Terms and Topics analysis, and https://rca-analysis.streamlit.app/ for the Article_Analyzed, Article_ref, and Article_citing data 
     """)
+
 
 
