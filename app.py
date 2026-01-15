@@ -2411,36 +2411,113 @@ class OptimizedDOIProcessor:
         self.cache.mark_as_failed("full_analysis", doi, error)
 
     def collect_all_references(self, results: Dict[str, Dict]) -> List[str]:
+        """Собирает ВСЕ ссылки из всех статей, возвращает только уникальные DOI"""
         all_refs = []
-
+        
         for doi, result in results.items():
             if result.get('status') == 'success':
                 refs = result.get('references', [])
                 if refs:
                     all_refs.extend(refs)
-
+        
+        # Удаляем дубликаты и пустые значения
+        unique_refs = []
+        seen_refs = set()
+        for ref in all_refs:
+            if ref and ref not in seen_refs:
+                seen_refs.add(ref)
+                unique_refs.append(ref)
+        
+        st.info(f"📊 Собрано {len(all_refs)} ссылок, из них {len(unique_refs)} уникальных")
+        
+        # Сохраняем связи для каждого найденного DOI ссылки
         for doi, result in results.items():
             if result.get('status') == 'success':
                 refs = result.get('references', [])
                 if refs:
                     for ref_doi in refs:
-                        if ref_doi not in self.reference_relationships:
-                            self.reference_relationships[ref_doi] = []
-                        if doi not in self.reference_relationships[ref_doi]:
-                            self.reference_relationships[ref_doi].append(doi)
-
-        return all_refs
+                        if ref_doi and ref_doi in self.reference_relationships:
+                            if doi not in self.reference_relationships[ref_doi]:
+                                self.reference_relationships[ref_doi].append(doi)
+        
+        return unique_refs
 
     def collect_all_citations(self, results: Dict[str, Dict]) -> List[str]:
+        """Собирает ВСЕ цитирующие работы для всех статей, возвращает только уникальные DOI"""
         all_cites = []
-
+        
         for doi, result in results.items():
             if result.get('status') == 'success':
                 cites = result.get('citations', [])
                 if cites:
                     all_cites.extend(cites)
+        
+        # Удаляем дубликаты и пустые значения
+        unique_cites = []
+        seen_cites = set()
+        for cite in all_cites:
+            if cite and cite not in seen_cites:
+                seen_cites.add(cite)
+                unique_cites.append(cite)
+        
+        st.info(f"📊 Собрано {len(all_cites)} цитирующих работ, из них {len(unique_cites)} уникальных")
+        
+        return unique_cites
 
-        return all_cites
+    def collect_and_deduplicate_dois(self, dois_list: List[str], source_type: str = "general") -> List[str]:
+        """
+        Собирает и удаляет дубликаты из списка DOI
+        Args:
+            dois_list: Список DOI
+            source_type: Тип источников для логирования
+        Returns:
+            Список уникальных DOI
+        """
+        if not dois_list:
+            return []
+        
+        # Удаляем пустые значения
+        clean_dois = [doi for doi in dois_list if doi and isinstance(doi, str) and len(doi.strip()) > 5]
+        
+        if not clean_dois:
+            return []
+        
+        # Собираем уникальные DOI
+        unique_dois = []
+        seen_dois = set()
+        duplicate_count = 0
+        
+        for doi in clean_dois:
+            clean_doi = self._clean_doi_for_deduplication(doi)
+            if clean_doi and clean_doi not in seen_dois:
+                seen_dois.add(clean_doi)
+                unique_dois.append(clean_doi)
+            elif clean_doi in seen_dois:
+                duplicate_count += 1
+        
+        if duplicate_count > 0:
+            st.info(f"📊 В {source_type} найдено {duplicate_count} дубликатов DOI")
+        
+        st.info(f"📊 Всего DOI в {source_type}: {len(clean_dois)}, уникальных: {len(unique_dois)}")
+        
+        return unique_dois
+    
+    def _clean_doi_for_deduplication(self, doi: str) -> str:
+        """Очищает DOI для дедупликации"""
+        if not doi or not isinstance(doi, str):
+            return ""
+        
+        doi = doi.strip()
+        
+        # Удаляем стандартные префиксы
+        prefixes = ['doi:', 'DOI:', 'https://doi.org/', 'http://doi.org/', 
+                    'https://dx.doi.org/', 'http://dx.doi.org/']
+        
+        for prefix in prefixes:
+            if doi.lower().startswith(prefix.lower()):
+                doi = doi[len(prefix):]
+        
+        return doi.strip()
 
     def get_relationships(self) -> Dict[str, Any]:
         return {
@@ -5203,7 +5280,7 @@ class ArticleAnalyzerSystem:
         # Set ROR analysis flag
         self.excel_exporter.enable_ror_analysis = enable_ror
         st.session_state.enable_ror_analysis = enable_ror
-
+    
         # Check resume possibility
         if resume and st.session_state.resume_available:
             stage = st.session_state.resume_stage
@@ -5221,18 +5298,60 @@ class ArticleAnalyzerSystem:
                 )
                 
                 # After completing analyzed, continue with reference
-                all_ref_dois = self.doi_processor.collect_all_references(st.session_state.analyzed_results)
-                if all_ref_dois:
-                    ref_dois_to_analyze = all_ref_dois[:10000]
+                # Собираем ВСЕ ссылки из ВСЕХ анализируемых статей
+                if progress_container:
+                    progress_container.text("📎 Собираем все ссылки из анализируемых статей...")
+                
+                # Получаем все ссылки
+                all_ref_lists = []
+                for doi, result in st.session_state.analyzed_results.items():
+                    if result.get('status') == 'success':
+                        refs = result.get('references', [])
+                        if refs:
+                            all_ref_lists.extend(refs)
+                
+                # Дедуплицируем ссылки
+                unique_ref_dois = self.doi_processor.collect_and_deduplicate_dois(all_ref_lists, "ссылки")
+                self.system_stats['total_ref_dois'] = len(unique_ref_dois)
+                
+                # Анализируем только уникальные ссылки
+                if unique_ref_dois:
+                    if progress_container:
+                        progress_container.text(f"📎 Найдено {len(unique_ref_dois)} уникальных ссылок для анализа")
+                    
+                    # Ограничиваем количество для производительности
+                    ref_dois_to_analyze = unique_ref_dois[:10000]
+                    
                     st.session_state.ref_results = self.doi_processor.process_doi_batch_with_resume(
                         ref_dois_to_analyze, "ref", None, True, True, Config.BATCH_SIZE,
                         progress_container, resume=False
                     )
                 
                 # Continue with citing
-                all_cite_dois = self.doi_processor.collect_all_citations(st.session_state.analyzed_results)
-                if all_cite_dois:
-                    cite_dois_to_analyze = all_cite_dois[:10000]
+                # Собираем ВСЕ цитирующие работы для ВСЕХ анализируемых статей
+                if progress_container:
+                    progress_container.text("🔗 Собираем все цитирующие работы для анализируемых статей...")
+    
+                # Получаем все цитирующие работы
+                all_cite_lists = []
+                for doi, result in st.session_state.analyzed_results.items():
+                    if result.get('status') == 'success':
+                        cites = result.get('citations', [])
+                        if cites:
+                            all_cite_lists.extend(cites)
+                
+                # Дедуплицируем цитирующие работы
+                unique_cite_dois = self.doi_processor.collect_and_deduplicate_dois(all_cite_lists, "цитирующие работы")
+                self.system_stats['total_cite_dois'] = len(unique_cite_dois)
+                
+                # Анализируем только уникальные цитирующие работы
+                if unique_cite_dois:
+                    if progress_container:
+                        progress_container.text(f"🔗 Найдено {len(unique_cite_dois)} уникальных цитирующих работ для анализа")
+                    
+                    # Ограничиваем количество для производительности
+                    cite_dois_to_analyze = unique_cite_dois[:10000]
+                    
                     st.session_state.citing_results = self.doi_processor.process_doi_batch_with_resume(
                         cite_dois_to_analyze, "citing", None, True, True, Config.BATCH_SIZE,
                         progress_container, resume=False
@@ -5246,9 +5365,30 @@ class ArticleAnalyzerSystem:
                 )
                 
                 # After completing reference, process citing
-                all_cite_dois = self.doi_processor.collect_all_citations(st.session_state.analyzed_results)
-                if all_cite_dois:
-                    cite_dois_to_analyze = all_cite_dois[:10000]
+                # Собираем ВСЕ цитирующие работы для ВСЕХ анализируемых статей
+                if progress_container:
+                    progress_container.text("🔗 Собираем все цитирующие работы для анализируемых статей...")
+    
+                # Получаем все цитирующие работы
+                all_cite_lists = []
+                for doi, result in st.session_state.analyzed_results.items():
+                    if result.get('status') == 'success':
+                        cites = result.get('citations', [])
+                        if cites:
+                            all_cite_lists.extend(cites)
+                
+                # Дедуплицируем цитирующие работы
+                unique_cite_dois = self.doi_processor.collect_and_deduplicate_dois(all_cite_lists, "цитирующие работы")
+                self.system_stats['total_cite_dois'] = len(unique_cite_dois)
+                
+                # Анализируем только уникальные цитирующие работы
+                if unique_cite_dois:
+                    if progress_container:
+                        progress_container.text(f"🔗 Найдено {len(unique_cite_dois)} уникальных цитирующих работ для анализа")
+                    
+                    # Ограничиваем количество для производительности
+                    cite_dois_to_analyze = unique_cite_dois[:10000]
+                    
                     st.session_state.citing_results = self.doi_processor.process_doi_batch_with_resume(
                         cite_dois_to_analyze, "citing", None, True, True, Config.BATCH_SIZE,
                         progress_container, resume=False
@@ -5268,12 +5408,12 @@ class ArticleAnalyzerSystem:
             # Normal processing from beginning
             if progress_container:
                 progress_container.text("📚 Processing original DOI...")
-
+    
             # Process original DOI
             st.session_state.analyzed_results = self.doi_processor.process_doi_batch_with_resume(
                 dois, "analyzed", None, True, True, Config.BATCH_SIZE, progress_container, resume=False
             )
-
+    
             # Update counters
             for doi, result in st.session_state.analyzed_results.items():
                 if result.get('status') == 'success':
@@ -5282,24 +5422,35 @@ class ArticleAnalyzerSystem:
                         result.get('citations', []),
                         "analyzed"
                     )
-
-            # Collect and process reference DOI
+    
+            # Собираем ВСЕ ссылки из ВСЕХ анализируемых статей
             if progress_container:
-                progress_container.text("📎 Collecting reference DOI...")
-
-            all_ref_dois = self.doi_processor.collect_all_references(st.session_state.analyzed_results)
-            self.system_stats['total_ref_dois'] = len(all_ref_dois)
-
-            if all_ref_dois:
+                progress_container.text("📎 Собираем все ссылки из анализируемых статей...")
+    
+            # Получаем все ссылки
+            all_ref_lists = []
+            for doi, result in st.session_state.analyzed_results.items():
+                if result.get('status') == 'success':
+                    refs = result.get('references', [])
+                    if refs:
+                        all_ref_lists.extend(refs)
+            
+            # Дедуплицируем ссылки
+            unique_ref_dois = self.doi_processor.collect_and_deduplicate_dois(all_ref_lists, "ссылки")
+            self.system_stats['total_ref_dois'] = len(unique_ref_dois)
+            
+            # Анализируем только уникальные ссылки
+            if unique_ref_dois:
                 if progress_container:
-                    progress_container.text(f"📎 Found {len(all_ref_dois)} reference DOI for analysis")
-
-                ref_dois_to_analyze = all_ref_dois[:10000]  # Limit for performance
-
+                    progress_container.text(f"📎 Найдено {len(unique_ref_dois)} уникальных ссылок для анализа")
+                
+                # Ограничиваем количество для производительности
+                ref_dois_to_analyze = unique_ref_dois[:10000]
+                
                 st.session_state.ref_results = self.doi_processor.process_doi_batch_with_resume(
                     ref_dois_to_analyze, "ref", None, True, True, Config.BATCH_SIZE, progress_container, resume=False
                 )
-
+                
                 for doi, result in st.session_state.ref_results.items():
                     if result.get('status') == 'success':
                         self.excel_exporter.update_counters(
@@ -5307,24 +5458,35 @@ class ArticleAnalyzerSystem:
                             result.get('citations', []),
                             "ref"
                         )
-
-            # Collect and process citation DOI
+    
+            # Собираем ВСЕ цитирующие работы для ВСЕХ анализируемых статей
             if progress_container:
-                progress_container.text("🔗 Collecting citation DOI...")
-
-            all_cite_dois = self.doi_processor.collect_all_citations(st.session_state.analyzed_results)
-            self.system_stats['total_cite_dois'] = len(all_cite_dois)
-
-            if all_cite_dois:
+                progress_container.text("🔗 Собираем все цитирующие работы для анализируемых статей...")
+    
+            # Получаем все цитирующие работы
+            all_cite_lists = []
+            for doi, result in st.session_state.analyzed_results.items():
+                if result.get('status') == 'success':
+                    cites = result.get('citations', [])
+                    if cites:
+                        all_cite_lists.extend(cites)
+            
+            # Дедуплицируем цитирующие работы
+            unique_cite_dois = self.doi_processor.collect_and_deduplicate_dois(all_cite_lists, "цитирующие работы")
+            self.system_stats['total_cite_dois'] = len(unique_cite_dois)
+            
+            # Анализируем только уникальные цитирующие работы
+            if unique_cite_dois:
                 if progress_container:
-                    progress_container.text(f"🔗 Found {len(all_cite_dois)} citation DOI for analysis")
-
-                cite_dois_to_analyze = all_cite_dois[:10000]  # Limit for performance
-
+                    progress_container.text(f"🔗 Найдено {len(unique_cite_dois)} уникальных цитирующих работ для анализа")
+                
+                # Ограничиваем количество для производительности
+                cite_dois_to_analyze = unique_cite_dois[:10000]
+                
                 st.session_state.citing_results = self.doi_processor.process_doi_batch_with_resume(
                     cite_dois_to_analyze, "citing", None, True, True, Config.BATCH_SIZE, progress_container, resume=False
                 )
-
+                
                 for doi, result in st.session_state.citing_results.items():
                     if result.get('status') == 'success':
                         self.excel_exporter.update_counters(
@@ -5332,14 +5494,14 @@ class ArticleAnalyzerSystem:
                             result.get('citations', []),
                             "citing"
                         )
-
+    
         # Retry failed DOI
         failed_stats = self.failed_tracker.get_stats()
         if failed_stats['total_failed'] > 0:
             if progress_container:
                 progress_container.text("🔄 Retrying failed DOI...")
             retry_results = self.doi_processor.retry_failed_dois(self.failed_tracker)
-
+    
             for doi, result in retry_results.items():
                 if result.get('status') == 'success':
                     source_type = self.failed_tracker.sources.get(doi, 'retry')
@@ -5349,17 +5511,17 @@ class ArticleAnalyzerSystem:
                         st.session_state.ref_results[doi] = result
                     elif source_type == 'citing' and doi in self.failed_tracker.failed_dois:
                         st.session_state.citing_results[doi] = result
-
+    
         processing_time = time.time() - start_time
-
+    
         # Update statistics
         self.system_stats['total_dois_processed'] += len(dois)
         successful = sum(1 for r in st.session_state.analyzed_results.values() if r.get('status') == 'success')
         failed = len(dois) - successful
-
+    
         st.session_state.processing_complete = True
         st.rerun()
-
+    
         return {
             'processing_time': processing_time,
             'successful': successful,
@@ -5700,4 +5862,5 @@ if __name__ == "__main__":
 st.markdown("""
     You can use https://rca-title-keywords.streamlit.app/ for the Title Keywords analysis, https://rca-terms-concepts.streamlit.app/ for the Terms and Topics analysis, and https://rca-analysis.streamlit.app/ for the Article_Analyzed, Article_ref, and Article_citing data 
     """)
+
 
