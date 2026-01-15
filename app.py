@@ -3856,6 +3856,10 @@ class TitleKeywordsAnalyzer:
 # 📊 EXCEL EXPORTER (UPDATED WITH ROR INTEGRATION AND FIXED NORMALIZATION)
 # ============================================================================
 
+# ============================================================================
+# 📊 EXCEL EXPORTER (FIXED VERSION WITH NULL-SAFE OPERATIONS)
+# ============================================================================
+
 class ExcelExporter:
     def __init__(self, data_processor: DataProcessor, ror_client: RORClient,
                  failed_tracker: FailedDOITracker):
@@ -3884,27 +3888,25 @@ class ExcelExporter:
         self.ref_to_analyzed = defaultdict(list)
         self.analyzed_to_citing = defaultdict(list)
 
-        # CHANGE: Simplify author structure - use only normalized_name as key
         self.author_stats = defaultdict(lambda: {
             'normalized_name': '',
-            'orcid': set(),  # ORCID set for one author
+            'orcid': set(),
             'affiliation': '',
             'country': '',
-            'total_count': 0,  # Sum of normalized values
-            'normalized_analyzed': 0,  # Only normalized value for analyzed
-            'article_count_analyzed': 0,  # Absolute article count in analyzed
+            'total_count': 0,
+            'normalized_analyzed': 0,
+            'article_count_analyzed': 0,
             'normalized_reference': 0,
             'normalized_citing': 0
         })
 
-        # CHANGE: Simplify affiliation structure
         self.affiliation_stats = defaultdict(lambda: {
             'colab_id': '',
             'website': '',
             'countries': [],
-            'total_count': 0,  # Sum of normalized values
-            'normalized_analyzed': 0,  # Only normalized value for analyzed
-            'article_count_analyzed': 0,  # Absolute article count in analyzed
+            'total_count': 0,
+            'normalized_analyzed': 0,
+            'article_count_analyzed': 0,
             'normalized_reference': 0,
             'normalized_citing': 0
         })
@@ -3912,10 +3914,8 @@ class ExcelExporter:
         self.affiliation_country_stats = defaultdict(lambda: defaultdict(int))
         self.current_year = datetime.now().year
 
-        # Initialize keywords analyzer
         self.title_keywords_analyzer = TitleKeywordsAnalyzer()
 
-        # Statistics for Terms and Topics
         self.terms_topics_stats = defaultdict(lambda: {
             'type': '',
             'analyzed_count': 0,
@@ -3927,30 +3927,44 @@ class ExcelExporter:
             'peak_count': 0
         })
 
-        # Flag for enabling ROR analysis
         self.enable_ror_analysis = False
+
+    def _safe_get(self, data, *keys, default=''):
+        """Safe value extraction from dictionary (prevents NoneType errors)"""
+        if not isinstance(data, dict):
+            return default
+
+        current = data
+        for key in keys:
+            if isinstance(current, dict):
+                current = current.get(key)
+            else:
+                return default
+
+        return current if current is not None else default
 
     def _correct_country_for_author(self, author_key: str, affiliation_stats: Dict[str, Any]) -> str:
         """Correct country for author based on affiliation statistics"""
-        author_info = self.author_stats[author_key]
-        if not author_info['affiliation']:
-            return author_info['country']
-    
+        author_info = self.author_stats.get(author_key, {})
+        if not author_info:
+            return ""
+        
+        if not author_info.get('affiliation'):
+            return author_info.get('country', '')
+
         affiliation = author_info['affiliation']
         
-        # First try to determine country from affiliation itself
         country_from_affiliation = self._get_country_from_affiliation(affiliation)
         if country_from_affiliation:
             return country_from_affiliation
         
-        # If not successful, use affiliation statistics
-        if affiliation in affiliation_stats and affiliation_stats[affiliation]['countries']:
+        if affiliation in affiliation_stats and affiliation_stats[affiliation].get('countries'):
             countries = affiliation_stats[affiliation]['countries']
             if countries:
                 country_counter = Counter(countries)
                 most_common_country = country_counter.most_common(1)[0][0]
     
-                if author_info['country'] != most_common_country:
+                if author_info.get('country') != most_common_country:
                     website = affiliation_stats[affiliation].get('website', '')
                     if website:
                         domain_match = re.search(r'\.([a-z]{2,3})$', website.lower())
@@ -3975,7 +3989,7 @@ class ExcelExporter:
                             if country_freq >= 0.7:
                                 return most_common_country
     
-        return author_info['country']
+        return author_info.get('country', '')
         
     def _get_country_from_affiliation(self, affiliation: str) -> str:
         """Determine country from affiliation text"""
@@ -3985,16 +3999,20 @@ class ExcelExporter:
         affiliation_lower = affiliation.lower()
         
         # Use same country_codes dictionary from DataProcessor
-        # Find it through self.processor.country_codes
-        for country_name, country_code in self.processor.country_codes.items():
+        if hasattr(self.processor, 'country_codes'):
+            country_codes = self.processor.country_codes
+        else:
+            # Fallback if not available
+            country_codes = Config.COUNTRY_CODES
+        
+        for country_name, country_code in country_codes.items():
             country_lower = country_name.lower()
-            # Look for whole word
             pattern = r'\b' + re.escape(country_lower) + r'\b'
             if re.search(pattern, affiliation_lower):
                 return country_code
         
         # Look for country codes
-        for country_name, country_code in self.processor.country_codes.items():
+        for country_name, country_code in country_codes.items():
             if len(country_code) == 2:
                 if re.search(r'\b' + country_code + r'\b', affiliation, re.IGNORECASE):
                     return country_code
@@ -4069,7 +4087,7 @@ class ExcelExporter:
                                    filename: str = None,
                                    progress_container=None,
                                    enable_ror: bool = False) -> BytesIO:
-    
+        """Create comprehensive Excel report with error handling"""
         if filename is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"articles_analysis_comprehensive_{timestamp}.xlsx"
@@ -4077,7 +4095,8 @@ class ExcelExporter:
         if progress_container:
             progress_container.text(f"📊 Creating comprehensive report: {filename}")
     
-        self.analyzed_results = analyzed_results
+        # Initialize with empty dicts if None
+        self.analyzed_results = analyzed_results or {}
         self.ref_results = ref_results or {}
         self.citing_results = citing_results or {}
         
@@ -4090,6 +4109,11 @@ class ExcelExporter:
         # Prepare summary data with ROR progress
         if progress_container:
             progress_container.text("📋 Preparing summary data...")
+        
+        # Initialize counters first
+        self._initialize_counters()
+        
+        # Then prepare summary data
         self._prepare_summary_data()
     
         # Prepare ROR data with progress bar (if enabled)
@@ -4098,7 +4122,6 @@ class ExcelExporter:
         if self.enable_ror_analysis and affiliations_list:
             if progress_container:
                 progress_container.text(f"🔍 Collecting ROR data for {len(affiliations_list)} affiliations...")
-            # Use same container for progress
             ror_data = self._prepare_ror_data_with_progress(affiliations_list, progress_container)
             
             if ror_data and progress_container:
@@ -4110,32 +4133,46 @@ class ExcelExporter:
         if progress_container:
             progress_container.text("🔤 Analyzing keywords in titles...")
         
-        # Extract titles from all sources
+        # Extract titles from all sources with error handling
         analyzed_titles = []
-        for result in analyzed_results.values():
-            if result.get('status') == 'success':
-                title = result.get('publication_info', {}).get('title', '')
-                if title:
-                    analyzed_titles.append(title)
+        for result in self.analyzed_results.values():
+            try:
+                if isinstance(result, dict) and result.get('status') == 'success':
+                    title = self._safe_get(result, 'publication_info', 'title', default='')
+                    if title and title not in ['Title not found', 'Request timeout', 'Network error', 'Retrieval error']:
+                        analyzed_titles.append(title)
+            except:
+                continue
         
         reference_titles = []
         for result in self.ref_results.values():
-            if result.get('status') == 'success':
-                title = result.get('publication_info', {}).get('title', '')
-                if title:
-                    reference_titles.append(title)
+            try:
+                if isinstance(result, dict) and result.get('status') == 'success':
+                    title = self._safe_get(result, 'publication_info', 'title', default='')
+                    if title and title not in ['Title not found', 'Request timeout', 'Network error', 'Retrieval error']:
+                        reference_titles.append(title)
+            except:
+                continue
         
         citing_titles = []
         for result in self.citing_results.values():
-            if result.get('status') == 'success':
-                title = result.get('publication_info', {}).get('title', '')
-                if title:
-                    citing_titles.append(title)
+            try:
+                if isinstance(result, dict) and result.get('status') == 'success':
+                    title = self._safe_get(result, 'publication_info', 'title', default='')
+                    if title and title not in ['Title not found', 'Request timeout', 'Network error', 'Retrieval error']:
+                        citing_titles.append(title)
+            except:
+                continue
         
         # Analyze keywords
-        title_keywords_analysis = self.title_keywords_analyzer.analyze_titles(
-            analyzed_titles, reference_titles, citing_titles
-        )
+        title_keywords_analysis = {}
+        try:
+            title_keywords_analysis = self.title_keywords_analyzer.analyze_titles(
+                analyzed_titles, reference_titles, citing_titles
+            )
+        except Exception as e:
+            if progress_container:
+                progress_container.warning(f"⚠️ Title keywords analysis error: {e}")
         
         # Prepare data for Title keywords sheet
         title_keywords_data = self._prepare_title_keywords_data(title_keywords_analysis)
@@ -4148,20 +4185,50 @@ class ExcelExporter:
         # Create Excel file in memory
         output = BytesIO()
         
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            if progress_container:
-                progress_container.text("📑 Generating sheets...")
+        try:
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                if progress_container:
+                    progress_container.text("📑 Generating sheets...")
 
-            # Create Excel tabs
-            self._generate_excel_sheets(writer, analyzed_results, ref_results, citing_results, 
-                                      title_keywords_data, terms_topics_data, progress_container)
+                # Create Excel tabs
+                self._generate_excel_sheets(writer, analyzed_results, ref_results, citing_results, 
+                                          title_keywords_data, terms_topics_data, progress_container)
+                
+                if progress_container:
+                    progress_container.success("✅ Excel report generated successfully!")
+                    
+        except Exception as e:
+            if progress_container:
+                progress_container.error(f"❌ Excel generation error: {e}")
+            
+            # Create minimal report with error message
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                error_df = pd.DataFrame([{'Error': f'Report generation failed: {str(e)}'}])
+                error_df.to_excel(writer, sheet_name='Error', index=False)
 
         output.seek(0)
         return output
 
+    def _initialize_counters(self):
+        """Initialize all counters to prevent NoneType errors"""
+        # Initialize relationship dictionaries
+        self.ref_to_analyzed = defaultdict(list)
+        self.analyzed_to_citing = defaultdict(list)
+        
+        # Initialize source DOI sets
+        self.source_dois = {
+            'analyzed': set(),
+            'ref': set(),
+            'citing': set()
+        }
+        
+        # Initialize DOI to source counts
+        self.doi_to_source_counts = defaultdict(lambda: defaultdict(int))
+
     def _generate_excel_sheets(self, writer, analyzed_results, ref_results, citing_results,
                              title_keywords_data, terms_topics_data, progress_container):
-        """Generate all Excel sheets"""
+        """Generate all Excel sheets with error handling"""
         sheets = [
             ('Article_Analyzed', lambda: self._prepare_analyzed_articles(analyzed_results)),
             ('Author freq_analyzed', lambda: self._prepare_author_frequency(analyzed_results, "analyzed")),
@@ -4182,32 +4249,50 @@ class ExcelExporter:
             ('Affiliation_summary', lambda: self._prepare_affiliation_summary()),
             ('Time (Ref,analyzed)_connections', lambda: self._prepare_time_ref_analyzed_connections()),
             ('Time (analyzed,citing)_connections', lambda: self._prepare_time_analyzed_citing_connections()),
-            ('Failed_DOI', lambda: self.failed_tracker.get_failed_for_excel()),
+            ('Failed_DOI', lambda: self.failed_tracker.get_failed_for_excel() if hasattr(self.failed_tracker, 'get_failed_for_excel') else []),
             ('Analysis_Stats', lambda: self._prepare_analysis_stats(analyzed_results, ref_results, citing_results)),
-            ('Title keywords', lambda: title_keywords_data),
-            ('Terms and Topics', lambda: terms_topics_data),
+            ('Title keywords', lambda: title_keywords_data if title_keywords_data else []),
+            ('Terms and Topics', lambda: terms_topics_data if terms_topics_data else []),
         ]
 
+        total_sheets = len(sheets)
         for idx, (sheet_name, data_func) in enumerate(sheets):
             if progress_container:
-                progress_container.text(f"  {idx+1}. {sheet_name}...")
+                progress_container.text(f"  {idx+1}/{total_sheets}. {sheet_name}...")
             
-            data = data_func()
-            if data:
-                df = pd.DataFrame(data)
-                df.to_excel(writer, sheet_name=sheet_name, index=False)
+            try:
+                data = data_func()
+                if data:
+                    df = pd.DataFrame(data)
+                    df.to_excel(writer, sheet_name=sheet_name[:31], index=False)  # Sheet name max 31 chars
+                else:
+                    # Create empty sheet
+                    empty_df = pd.DataFrame([{'Message': f'No data available for {sheet_name}'}])
+                    empty_df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
+            except Exception as e:
+                if progress_container:
+                    progress_container.warning(f"⚠️ Error in sheet '{sheet_name}': {e}")
+                
+                # Create error sheet instead
+                error_df = pd.DataFrame([{'Sheet': sheet_name, 'Error': str(e)}])
+                error_df.to_excel(writer, sheet_name=f"Error_{idx}"[:31], index=False)
 
     def _prepare_summary_data(self):
-        total_analyzed_articles = len([r for r in self.analyzed_results.values() if r.get('status') == 'success'])
-        total_ref_articles = len([r for r in self.ref_results.values() if r.get('status') == 'success'])
-        total_citing_articles = len([r for r in self.citing_results.values() if r.get('status') == 'success'])
+        """Prepare summary data with error handling"""
+        total_analyzed_articles = len([r for r in self.analyzed_results.values() 
+                                     if isinstance(r, dict) and r.get('status') == 'success'])
+        total_ref_articles = len([r for r in self.ref_results.values() 
+                                if isinstance(r, dict) and r.get('status') == 'success'])
+        total_citing_articles = len([r for r in self.citing_results.values() 
+                                   if isinstance(r, dict) and r.get('status') == 'success'])
 
-        # CHANGE: Temporary counters for correct normalization
-        author_analyzed_counts = Counter()  # Author article count in analyzed
-        affiliation_analyzed_counts = Counter()  # Affiliation article count in analyzed
+        # Temporary counters for correct normalization
+        author_analyzed_counts = Counter()
+        affiliation_analyzed_counts = Counter()
 
+        # Process analyzed articles
         for doi, result in self.analyzed_results.items():
-            if result.get('status') != 'success':
+            if not isinstance(result, dict) or result.get('status') != 'success':
                 continue
 
             self.source_dois['analyzed'].add(doi)
@@ -4215,73 +4300,99 @@ class ExcelExporter:
             # Update Terms and Topics statistics for analyzed articles
             self._update_terms_topics_stats(doi, result, 'analyzed')
 
-            for ref_doi in result.get('references', []):
-                self.ref_to_analyzed[ref_doi].append(doi)
-                self.doi_to_source_counts[ref_doi]['ref'] += 1
-                self.source_dois['ref'].add(ref_doi)
+            # Update reference relationships
+            refs = result.get('references', [])
+            if isinstance(refs, list):
+                for ref_doi in refs:
+                    if ref_doi:
+                        self.ref_to_analyzed[ref_doi].append(doi)
+                        self.doi_to_source_counts[ref_doi]['ref'] += 1
+                        self.source_dois['ref'].add(ref_doi)
 
-            for cite_doi in result.get('citations', []):
-                self.analyzed_to_citing[doi].append(cite_doi)
-                self.doi_to_source_counts[cite_doi]['citing'] += 1
-                self.source_dois['citing'].add(cite_doi)
+            # Update citation relationships
+            cites = result.get('citations', [])
+            if isinstance(cites, list):
+                for cite_doi in cites:
+                    if cite_doi:
+                        self.analyzed_to_citing[doi].append(cite_doi)
+                        self.doi_to_source_counts[cite_doi]['citing'] += 1
+                        self.source_dois['citing'].add(cite_doi)
 
-            # CHANGE: Count authors in analyzed articles
-            for author in result.get('authors', []):
-                full_name = author.get('name', '')
-                if not full_name:
-                    continue
-            
-                normalized_name = self.processor.normalize_author_name(full_name)
-                # USE ONLY normalized_name as key
-                key = normalized_name
+            # Count authors in analyzed articles
+            authors = result.get('authors', [])
+            if isinstance(authors, list):
+                for author in authors:
+                    if not isinstance(author, dict):
+                        continue
+                        
+                    full_name = author.get('name', '')
+                    if not full_name:
+                        continue
                 
-                # Increase article counter for this author in analyzed
-                author_analyzed_counts[key] += 1
-            
-                # Initialize author record if not exists
-                if key not in self.author_stats:
-                    self.author_stats[key] = {
-                        'normalized_name': normalized_name,
-                        'orcid': set(),
-                        'affiliation': '',
-                        'country': '',
-                        'total_count': 0,
-                        'normalized_analyzed': 0,
-                        'article_count_analyzed': 0,
-                        'normalized_reference': 0,
-                        'normalized_citing': 0
-                    }
-            
-                # Update ORCID as set
-                if author.get('orcid'):
-                    self.author_stats[key]['orcid'].add(self.processor._format_orcid_id(author.get('orcid', '')))
-            
-                # Determine affiliation
-                if not self.author_stats[key]['affiliation'] and author.get('affiliation'):
-                    self.author_stats[key]['affiliation'] = author.get('affiliation')[0] if author.get('affiliation') else ''
+                    normalized_name = self.processor.normalize_author_name(full_name)
+                    key = normalized_name
+                    
+                    # Increase article counter for this author in analyzed
+                    author_analyzed_counts[key] += 1
                 
-                # IMPORTANT FIX: Determine author country from his data
-                if not self.author_stats[key]['country']:
-                    # 1. Try to take from author_country (new field)
-                    if 'author_country' in author and author['author_country']:
-                        self.author_stats[key]['country'] = author['author_country']
-                    # 2. If not, determine from affiliation
-                    elif self.author_stats[key]['affiliation']:
-                        country_from_aff = self._get_country_from_affiliation(self.author_stats[key]['affiliation'])
-                        if country_from_aff:
-                            self.author_stats[key]['country'] = country_from_aff
-                    # 3. Fallback: from article
-                    elif result.get('countries'):
-                        self.author_stats[key]['country'] = result.get('countries')[0] if result.get('countries') else ''
-            
-                self.author_stats[key]['normalized_name'] = normalized_name
+                    # Initialize author record if not exists
+                    if key not in self.author_stats:
+                        self.author_stats[key] = {
+                            'normalized_name': normalized_name,
+                            'orcid': set(),
+                            'affiliation': '',
+                            'country': '',
+                            'total_count': 0,
+                            'normalized_analyzed': 0,
+                            'article_count_analyzed': 0,
+                            'normalized_reference': 0,
+                            'normalized_citing': 0
+                        }
+                
+                    # Update ORCID as set
+                    if author.get('orcid'):
+                        try:
+                            orcid_url = self.processor._format_orcid_id(author.get('orcid', ''))
+                            if orcid_url:
+                                self.author_stats[key]['orcid'].add(orcid_url)
+                        except:
+                            pass
+                
+                    # Determine affiliation
+                    if not self.author_stats[key]['affiliation']:
+                        affs = author.get('affiliation', [])
+                        if affs and isinstance(affs, list) and len(affs) > 0:
+                            self.author_stats[key]['affiliation'] = affs[0]
+                
+                    # Determine author country
+                    if not self.author_stats[key]['country']:
+                        # Try to take from author_country
+                        if 'author_country' in author and author['author_country']:
+                            self.author_stats[key]['country'] = author['author_country']
+                        # If not, determine from affiliation
+                        elif self.author_stats[key]['affiliation']:
+                            country_from_aff = self._get_country_from_affiliation(self.author_stats[key]['affiliation'])
+                            if country_from_aff:
+                                self.author_stats[key]['country'] = country_from_aff
+                        # Fallback: from article
+                        elif result.get('countries'):
+                            countries = result.get('countries', [])
+                            if countries and isinstance(countries, list) and len(countries) > 0:
+                                self.author_stats[key]['country'] = countries[0]
+                
+                    self.author_stats[key]['normalized_name'] = normalized_name
 
-            # CHANGE: Update affiliation statistics FOR ANALYZED
+            # Update affiliation statistics FOR ANALYZED
             unique_affiliations_in_article = set()
             for author in result.get('authors', []):
-                for affiliation in author.get('affiliation', []):
-                    if affiliation:
-                        unique_affiliations_in_article.add(affiliation)
+                if not isinstance(author, dict):
+                    continue
+                    
+                affs = author.get('affiliation', [])
+                if isinstance(affs, list):
+                    for affiliation in affs:
+                        if affiliation and isinstance(affiliation, str):
+                            unique_affiliations_in_article.add(affiliation)
 
             # Count absolute article number for each affiliation in analyzed
             for affiliation in unique_affiliations_in_article:
@@ -4301,11 +4412,13 @@ class ExcelExporter:
                     }
                 
                 if result.get('countries'):
-                    for country in result.get('countries'):
-                        if country:
-                            self.affiliation_stats[affiliation]['countries'].append(country)
+                    countries = result.get('countries', [])
+                    if isinstance(countries, list):
+                        for country in countries:
+                            if country and isinstance(country, str):
+                                self.affiliation_stats[affiliation]['countries'].append(country)
 
-        # CHANGE: After counting all analyzed articles, calculate normalized values FOR AUTHORS
+        # After counting all analyzed articles, calculate normalized values FOR AUTHORS
         for author_key, count in author_analyzed_counts.items():
             if total_analyzed_articles > 0:
                 normalized_value = count / total_analyzed_articles
@@ -4314,7 +4427,7 @@ class ExcelExporter:
                 # Update total_count for author
                 self.author_stats[author_key]['total_count'] += normalized_value
 
-        # CHANGE: After counting all analyzed articles, calculate normalized values FOR AFFILIATIONS
+        # After counting all analyzed articles, calculate normalized values FOR AFFILIATIONS
         for affiliation, count in affiliation_analyzed_counts.items():
             if total_analyzed_articles > 0:
                 normalized_value = count / total_analyzed_articles
@@ -4325,46 +4438,64 @@ class ExcelExporter:
 
         # Process ref results
         for doi, result in self.ref_results.items():
-            if result.get('status') != 'success':
+            if not isinstance(result, dict) or result.get('status') != 'success':
                 continue
 
             # Update Terms and Topics statistics for reference articles
             self._update_terms_topics_stats(doi, result, 'reference')
 
-            # CHANGE: Update author stats for ref articles - ONLY normalized values
-            for author in result.get('authors', []):
-                full_name = author.get('name', '')
-                if not full_name:
-                    continue
+            # Update author stats for ref articles - ONLY normalized values
+            authors = result.get('authors', [])
+            if isinstance(authors, list):
+                for author in authors:
+                    if not isinstance(author, dict):
+                        continue
+                        
+                    full_name = author.get('name', '')
+                    if not full_name:
+                        continue
 
-                normalized_name = self.processor.normalize_author_name(full_name)
-                # USE ONLY normalized_name as key
-                key = normalized_name
+                    normalized_name = self.processor.normalize_author_name(full_name)
+                    key = normalized_name
 
-                # Calculate normalized value for ref articles
-                if total_ref_articles > 0:
-                    normalized_value = 1 / total_ref_articles
-                    self.author_stats[key]['normalized_reference'] += normalized_value
-                    self.author_stats[key]['total_count'] += normalized_value
+                    # Calculate normalized value for ref articles
+                    if total_ref_articles > 0:
+                        normalized_value = 1 / total_ref_articles
+                        self.author_stats[key]['normalized_reference'] += normalized_value
+                        self.author_stats[key]['total_count'] += normalized_value
 
-                # Update ORCID as set
-                if author.get('orcid'):
-                    self.author_stats[key]['orcid'].add(self.processor._format_orcid_id(author.get('orcid', '')))
+                    # Update ORCID as set
+                    if author.get('orcid'):
+                        try:
+                            orcid_url = self.processor._format_orcid_id(author.get('orcid', ''))
+                            if orcid_url:
+                                self.author_stats[key]['orcid'].add(orcid_url)
+                        except:
+                            pass
 
-                if not self.author_stats[key]['affiliation'] and author.get('affiliation'):
-                    self.author_stats[key]['affiliation'] = author.get('affiliation')[0] if author.get('affiliation') else ''
+                    if not self.author_stats[key]['affiliation']:
+                        affs = author.get('affiliation', [])
+                        if affs and isinstance(affs, list) and len(affs) > 0:
+                            self.author_stats[key]['affiliation'] = affs[0]
 
-                if not self.author_stats[key]['country'] and result.get('countries'):
-                    self.author_stats[key]['country'] = result.get('countries')[0] if result.get('countries') else ''
+                    if not self.author_stats[key]['country']:
+                        countries = result.get('countries', [])
+                        if countries and isinstance(countries, list) and len(countries) > 0:
+                            self.author_stats[key]['country'] = countries[0]
 
-                self.author_stats[key]['normalized_name'] = normalized_name
+                    self.author_stats[key]['normalized_name'] = normalized_name
 
-            # CHANGE: Update affiliation stats for ref articles - ONLY normalized values
+            # Update affiliation stats for ref articles - ONLY normalized values
             unique_affiliations_in_article = set()
             for author in result.get('authors', []):
-                for affiliation in author.get('affiliation', []):
-                    if affiliation:
-                        unique_affiliations_in_article.add(affiliation)
+                if not isinstance(author, dict):
+                    continue
+                    
+                affs = author.get('affiliation', [])
+                if isinstance(affs, list):
+                    for affiliation in affs:
+                        if affiliation and isinstance(affiliation, str):
+                            unique_affiliations_in_article.add(affiliation)
 
             if total_ref_articles > 0:
                 normalized_aff_value = 1 / total_ref_articles
@@ -4374,46 +4505,64 @@ class ExcelExporter:
 
         # Process citing results
         for doi, result in self.citing_results.items():
-            if result.get('status') != 'success':
+            if not isinstance(result, dict) or result.get('status') != 'success':
                 continue
 
             # Update Terms and Topics statistics for citing articles
             self._update_terms_topics_stats(doi, result, 'citing')
 
-            # CHANGE: Update author stats for citing articles - ONLY normalized values
-            for author in result.get('authors', []):
-                full_name = author.get('name', '')
-                if not full_name:
-                    continue
+            # Update author stats for citing articles - ONLY normalized values
+            authors = result.get('authors', [])
+            if isinstance(authors, list):
+                for author in authors:
+                    if not isinstance(author, dict):
+                        continue
+                        
+                    full_name = author.get('name', '')
+                    if not full_name:
+                        continue
 
-                normalized_name = self.processor.normalize_author_name(full_name)
-                # USE ONLY normalized_name as key
-                key = normalized_name
+                    normalized_name = self.processor.normalize_author_name(full_name)
+                    key = normalized_name
 
-                # Calculate normalized value for citing articles
-                if total_citing_articles > 0:
-                    normalized_value = 1 / total_citing_articles
-                    self.author_stats[key]['normalized_citing'] += normalized_value
-                    self.author_stats[key]['total_count'] += normalized_value
+                    # Calculate normalized value for citing articles
+                    if total_citing_articles > 0:
+                        normalized_value = 1 / total_citing_articles
+                        self.author_stats[key]['normalized_citing'] += normalized_value
+                        self.author_stats[key]['total_count'] += normalized_value
 
-                # Update ORCID as set
-                if author.get('orcid'):
-                    self.author_stats[key]['orcid'].add(self.processor._format_orcid_id(author.get('orcid', '')))
+                    # Update ORCID as set
+                    if author.get('orcid'):
+                        try:
+                            orcid_url = self.processor._format_orcid_id(author.get('orcid', ''))
+                            if orcid_url:
+                                self.author_stats[key]['orcid'].add(orcid_url)
+                        except:
+                            pass
 
-                if not self.author_stats[key]['affiliation'] and author.get('affiliation'):
-                    self.author_stats[key]['affiliation'] = author.get('affiliation')[0] if author.get('affiliation') else ''
+                    if not self.author_stats[key]['affiliation']:
+                        affs = author.get('affiliation', [])
+                        if affs and isinstance(affs, list) and len(affs) > 0:
+                            self.author_stats[key]['affiliation'] = affs[0]
 
-                if not self.author_stats[key]['country'] and result.get('countries'):
-                    self.author_stats[key]['country'] = result.get('countries')[0] if result.get('countries') else ''
+                    if not self.author_stats[key]['country']:
+                        countries = result.get('countries', [])
+                        if countries and isinstance(countries, list) and len(countries) > 0:
+                            self.author_stats[key]['country'] = countries[0]
 
-                self.author_stats[key]['normalized_name'] = normalized_name
+                    self.author_stats[key]['normalized_name'] = normalized_name
 
-            # CHANGE: Update affiliation stats for citing articles - ONLY normalized values
+            # Update affiliation stats for citing articles - ONLY normalized values
             unique_affiliations_in_article = set()
             for author in result.get('authors', []):
-                for affiliation in author.get('affiliation', []):
-                    if affiliation:
-                        unique_affiliations_in_article.add(affiliation)
+                if not isinstance(author, dict):
+                    continue
+                    
+                affs = author.get('affiliation', [])
+                if isinstance(affs, list):
+                    for affiliation in affs:
+                        if affiliation and isinstance(affiliation, str):
+                            unique_affiliations_in_article.add(affiliation)
 
             if total_citing_articles > 0:
                 normalized_aff_value = 1 / total_citing_articles
@@ -4422,16 +4571,22 @@ class ExcelExporter:
                     self.affiliation_stats[affiliation]['total_count'] += normalized_aff_value
 
     def _update_terms_topics_stats(self, doi: str, result: Dict, source_type: str):
-        """Update terms and topics statistics"""
-        if result.get('status') != 'success':
+        """Update terms and topics statistics with error handling"""
+        if not isinstance(result, dict) or result.get('status') != 'success':
             return
 
         topics_info = result.get('topics_info', {})
+        if not isinstance(topics_info, dict):
+            return
+            
         pub_info = result.get('publication_info', {})
+        if not isinstance(pub_info, dict):
+            return
+            
         year_str = pub_info.get('year', '')
 
         try:
-            year = int(year_str) if year_str and year_str.isdigit() else None
+            year = int(year_str) if year_str and str(year_str).isdigit() else None
         except:
             year = None
 
@@ -4439,7 +4594,7 @@ class ExcelExporter:
         term_types = ['topic', 'subfield', 'field', 'domain']
         for term_type in term_types:
             term = topics_info.get(term_type, '')
-            if term:
+            if term and isinstance(term, str):
                 key = f"{term_type}:{term}"
                 
                 if source_type == 'analyzed':
@@ -4466,108 +4621,132 @@ class ExcelExporter:
 
         # Update statistics for concepts
         concepts = topics_info.get('concepts', [])
-        for concept in concepts:
-            key = f"concept:{concept}"
-            
-            if source_type == 'analyzed':
-                self.terms_topics_stats[key]['analyzed_count'] += 1
-            elif source_type == 'reference':
-                self.terms_topics_stats[key]['reference_count'] += 1
-            elif source_type == 'citing':
-                self.terms_topics_stats[key]['citing_count'] += 1
-            
-            self.terms_topics_stats[key]['type'] = 'Concept'
-            
-            if year:
-                self.terms_topics_stats[key]['years'].append(year)
-                
-                # Update first year
-                if self.terms_topics_stats[key]['first_year'] is None or year < self.terms_topics_stats[key]['first_year']:
-                    self.terms_topics_stats[key]['first_year'] = year
-                
-                # Update peak year
-                year_count = self.terms_topics_stats[key]['years'].count(year)
-                if year_count > self.terms_topics_stats[key]['peak_count']:
-                    self.terms_topics_stats[key]['peak_year'] = year
-                    self.terms_topics_stats[key]['peak_count'] = year_count
+        if isinstance(concepts, list):
+            for concept in concepts:
+                if concept and isinstance(concept, str):
+                    key = f"concept:{concept}"
+                    
+                    if source_type == 'analyzed':
+                        self.terms_topics_stats[key]['analyzed_count'] += 1
+                    elif source_type == 'reference':
+                        self.terms_topics_stats[key]['reference_count'] += 1
+                    elif source_type == 'citing':
+                        self.terms_topics_stats[key]['citing_count'] += 1
+                    
+                    self.terms_topics_stats[key]['type'] = 'Concept'
+                    
+                    if year:
+                        self.terms_topics_stats[key]['years'].append(year)
+                        
+                        # Update first year
+                        if self.terms_topics_stats[key]['first_year'] is None or year < self.terms_topics_stats[key]['first_year']:
+                            self.terms_topics_stats[key]['first_year'] = year
+                        
+                        # Update peak year
+                        year_count = self.terms_topics_stats[key]['years'].count(year)
+                        if year_count > self.terms_topics_stats[key]['peak_count']:
+                            self.terms_topics_stats[key]['peak_year'] = year
+                            self.terms_topics_stats[key]['peak_count'] = year_count
         
     def _prepare_title_keywords_data(self, keywords_analysis: dict) -> List[Dict]:
-            """Prepare data for Title keywords sheet with grouping by lemmas"""
-            data = []
-            
-            # Total articles for normalization
-            total_analyzed = keywords_analysis['analyzed']['total_titles']
-            total_reference = keywords_analysis['reference']['total_titles']
-            total_citing = keywords_analysis['citing']['total_titles']
-            
-            # Collect all unique lemmas
-            all_lemmas = {}
-            
-            # Process analyzed articles
-            for word_info in keywords_analysis['analyzed']['words']:
-                lemma = word_info['lemma']
-                if lemma not in all_lemmas:
-                    all_lemmas[lemma] = {
-                        'type': word_info['type'],
-                        'analyzed': 0,
-                        'reference': 0,
-                        'citing': 0,
-                        'analyzed_variants': Counter(),
-                        'reference_variants': Counter(),
-                        'citing_variants': Counter()
-                    }
-                all_lemmas[lemma]['analyzed'] = word_info['count']
-                all_lemmas[lemma]['analyzed_variants'] = word_info['variants']
-            
-            # Process reference articles
-            for word_info in keywords_analysis['reference']['words']:
-                lemma = word_info['lemma']
-                if lemma not in all_lemmas:
-                    all_lemmas[lemma] = {
-                        'type': word_info['type'],
-                        'analyzed': 0,
-                        'reference': 0,
-                        'citing': 0,
-                        'analyzed_variants': Counter(),
-                        'reference_variants': Counter(),
-                        'citing_variants': Counter()
-                    }
-                all_lemmas[lemma]['reference'] = word_info['count']
-                all_lemmas[lemma]['reference_variants'] = word_info['variants']
-            
-            # Process citing articles
-            for word_info in keywords_analysis['citing']['words']:
-                lemma = word_info['lemma']
-                if lemma not in all_lemmas:
-                    all_lemmas[lemma] = {
-                        'type': word_info['type'],
-                        'analyzed': 0,
-                        'reference': 0,
-                        'citing': 0,
-                        'analyzed_variants': Counter(),
-                        'reference_variants': Counter(),
-                        'citing_variants': Counter()
-                    }
-                all_lemmas[lemma]['citing'] = word_info['count']
-                all_lemmas[lemma]['citing_variants'] = word_info['variants']
-            
-            # Merge similar lemmas between types (analyzed, reference, citing)
-            merged_lemmas = {}
-            lemmas_to_merge = {}
-            
-            # Find similar lemmas
-            all_lemma_list = list(all_lemmas.keys())
-            for i in range(len(all_lemma_list)):
-                lemma1 = all_lemma_list[i]
-                if lemma1 in lemmas_to_merge:
+        """Prepare data for Title keywords sheet with grouping by lemmas"""
+        data = []
+        
+        if not isinstance(keywords_analysis, dict):
+            return data
+        
+        # Total articles for normalization
+        total_analyzed = keywords_analysis.get('analyzed', {}).get('total_titles', 1)
+        total_reference = keywords_analysis.get('reference', {}).get('total_titles', 1)
+        total_citing = keywords_analysis.get('citing', {}).get('total_titles', 1)
+        
+        # Collect all unique lemmas
+        all_lemmas = {}
+        
+        # Process analyzed articles
+        analyzed_words = keywords_analysis.get('analyzed', {}).get('words', [])
+        if isinstance(analyzed_words, list):
+            for word_info in analyzed_words:
+                if isinstance(word_info, dict):
+                    lemma = word_info.get('lemma', '')
+                    if lemma:
+                        if lemma not in all_lemmas:
+                            all_lemmas[lemma] = {
+                                'type': word_info.get('type', ''),
+                                'analyzed': 0,
+                                'reference': 0,
+                                'citing': 0,
+                                'analyzed_variants': Counter(),
+                                'reference_variants': Counter(),
+                                'citing_variants': Counter()
+                            }
+                        all_lemmas[lemma]['analyzed'] = word_info.get('count', 0)
+                        variants = word_info.get('variants', {})
+                        if isinstance(variants, dict) or hasattr(variants, 'most_common'):
+                            all_lemmas[lemma]['analyzed_variants'] = variants
+        
+        # Process reference articles
+        reference_words = keywords_analysis.get('reference', {}).get('words', [])
+        if isinstance(reference_words, list):
+            for word_info in reference_words:
+                if isinstance(word_info, dict):
+                    lemma = word_info.get('lemma', '')
+                    if lemma:
+                        if lemma not in all_lemmas:
+                            all_lemmas[lemma] = {
+                                'type': word_info.get('type', ''),
+                                'analyzed': 0,
+                                'reference': 0,
+                                'citing': 0,
+                                'analyzed_variants': Counter(),
+                                'reference_variants': Counter(),
+                                'citing_variants': Counter()
+                            }
+                        all_lemmas[lemma]['reference'] = word_info.get('count', 0)
+                        variants = word_info.get('variants', {})
+                        if isinstance(variants, dict) or hasattr(variants, 'most_common'):
+                            all_lemmas[lemma]['reference_variants'] = variants
+        
+        # Process citing articles
+        citing_words = keywords_analysis.get('citing', {}).get('words', [])
+        if isinstance(citing_words, list):
+            for word_info in citing_words:
+                if isinstance(word_info, dict):
+                    lemma = word_info.get('lemma', '')
+                    if lemma:
+                        if lemma not in all_lemmas:
+                            all_lemmas[lemma] = {
+                                'type': word_info.get('type', ''),
+                                'analyzed': 0,
+                                'reference': 0,
+                                'citing': 0,
+                                'analyzed_variants': Counter(),
+                                'reference_variants': Counter(),
+                                'citing_variants': Counter()
+                            }
+                        all_lemmas[lemma]['citing'] = word_info.get('count', 0)
+                        variants = word_info.get('variants', {})
+                        if isinstance(variants, dict) or hasattr(variants, 'most_common'):
+                            all_lemmas[lemma]['citing_variants'] = variants
+        
+        # Merge similar lemmas between types (analyzed, reference, citing)
+        merged_lemmas = {}
+        lemmas_to_merge = {}
+        
+        # Find similar lemmas
+        all_lemma_list = list(all_lemmas.keys())
+        for i in range(len(all_lemma_list)):
+            lemma1 = all_lemma_list[i]
+            if lemma1 in lemmas_to_merge:
+                continue
+                
+            for j in range(i+1, len(all_lemma_list)):
+                lemma2 = all_lemma_list[j]
+                if lemma2 in lemmas_to_merge:
                     continue
-                    
-                for j in range(i+1, len(all_lemma_list)):
-                    lemma2 = all_lemma_list[j]
-                    if lemma2 in lemmas_to_merge:
-                        continue
-                    
-                    # Check if lemmas are similar using improved analyzer
+                
+                # Check if lemmas are similar using improved analyzer
+                if hasattr(self.title_keywords_analyzer, '_are_similar_lemmas'):
                     if self.title_keywords_analyzer._are_similar_lemmas(lemma1, lemma2):
                         # Choose shorter lemma as main
                         if len(lemma1) <= len(lemma2):
@@ -4582,112 +4761,125 @@ class ExcelExporter:
                         
                         lemmas_to_merge[main_lemma].append(secondary_lemma)
                         lemmas_to_merge[secondary_lemma] = [main_lemma]
+        
+        # Merge data
+        for lemma, stats in all_lemmas.items():
+            if lemma in lemmas_to_merge and lemma not in lemmas_to_merge.get(lemma, []):
+                # This lemma will be merged with another
+                continue
             
-            # Merge data
-            for lemma, stats in all_lemmas.items():
-                if lemma in lemmas_to_merge and lemma not in lemmas_to_merge.get(lemma, []):
-                    # This lemma will be merged with another
-                    continue
+            # Check if need to merge this lemma with others
+            if lemma in lemmas_to_merge:
+                main_lemma = lemma
+                # Create new record for main lemma
+                merged_stats = {
+                    'type': stats.get('type', ''),
+                    'analyzed': stats.get('analyzed', 0),
+                    'reference': stats.get('reference', 0),
+                    'citing': stats.get('citing', 0),
+                    'analyzed_variants': stats.get('analyzed_variants', Counter()),
+                    'reference_variants': stats.get('reference_variants', Counter()),
+                    'citing_variants': stats.get('citing_variants', Counter())
+                }
                 
-                # Check if need to merge this lemma with others
-                if lemma in lemmas_to_merge:
-                    main_lemma = lemma
-                    # Create new record for main lemma
-                    merged_stats = {
-                        'type': stats['type'],
-                        'analyzed': stats['analyzed'],
-                        'reference': stats['reference'],
-                        'citing': stats['citing'],
-                        'analyzed_variants': stats['analyzed_variants'].copy(),
-                        'reference_variants': stats['reference_variants'].copy(),
-                        'citing_variants': stats['citing_variants'].copy()
-                    }
-                    
-                    # Merge with secondary lemmas
-                    for secondary_lemma in lemmas_to_merge[lemma]:
-                        if secondary_lemma in all_lemmas:
-                            sec_stats = all_lemmas[secondary_lemma]
-                            merged_stats['analyzed'] += sec_stats['analyzed']
-                            merged_stats['reference'] += sec_stats['reference']
-                            merged_stats['citing'] += sec_stats['citing']
-                            
-                            # Merge variants
-                            for variant, count in sec_stats['analyzed_variants'].items():
-                                merged_stats['analyzed_variants'][variant] += count
-                            for variant, count in sec_stats['reference_variants'].items():
-                                merged_stats['reference_variants'][variant] += count
-                            for variant, count in sec_stats['citing_variants'].items():
-                                merged_stats['citing_variants'][variant] += count
-                    
-                    merged_lemmas[main_lemma] = merged_stats
-                else:
-                    # Lemma doesn't require merging
-                    merged_lemmas[lemma] = stats
+                # Merge with secondary lemmas
+                for secondary_lemma in lemmas_to_merge[lemma]:
+                    if secondary_lemma in all_lemmas:
+                        sec_stats = all_lemmas[secondary_lemma]
+                        merged_stats['analyzed'] += sec_stats.get('analyzed', 0)
+                        merged_stats['reference'] += sec_stats.get('reference', 0)
+                        merged_stats['citing'] += sec_stats.get('citing', 0)
+                        
+                        # Merge variants
+                        for variant, count in sec_stats.get('analyzed_variants', {}).items():
+                            merged_stats['analyzed_variants'][variant] += count
+                        for variant, count in sec_stats.get('reference_variants', {}).items():
+                            merged_stats['reference_variants'][variant] += count
+                        for variant, count in sec_stats.get('citing_variants', {}).items():
+                            merged_stats['citing_variants'][variant] += count
+                
+                merged_lemmas[main_lemma] = merged_stats
+            else:
+                # Lemma doesn't require merging
+                merged_lemmas[lemma] = stats
+        
+        # Create data rows
+        for lemma, stats in merged_lemmas.items():
+            # Calculate normalized values
+            analyzed_norm = stats.get('analyzed', 0) / total_analyzed if total_analyzed > 0 else 0
+            reference_norm = stats.get('reference', 0) / total_reference if total_reference > 0 else 0
+            citing_norm = stats.get('citing', 0) / total_citing if total_citing > 0 else 0
+            total_norm = analyzed_norm + reference_norm + citing_norm
             
-            # Create data rows
-            for lemma, stats in merged_lemmas.items():
-                # Calculate normalized values
-                analyzed_norm = stats['analyzed'] / total_analyzed if total_analyzed > 0 else 0
-                reference_norm = stats['reference'] / total_reference if total_reference > 0 else 0
-                citing_norm = stats['citing'] / total_citing if total_citing > 0 else 0
-                total_norm = analyzed_norm + reference_norm + citing_norm
-                
-                # Collect all word variants
-                all_variants = set()
-                variants_info = []
-                
-                # Variants from analyzed articles
-                if stats['analyzed_variants']:
-                    for variant, count in stats['analyzed_variants'].most_common(3):
-                        all_variants.add(variant)
+            # Collect all word variants
+            all_variants = set()
+            variants_info = []
+            
+            # Variants from analyzed articles
+            analyzed_variants = stats.get('analyzed_variants', {})
+            if analyzed_variants and hasattr(analyzed_variants, 'most_common'):
+                for variant, count in analyzed_variants.most_common(3):
+                    all_variants.add(variant)
+                    variants_info.append(f"{variant}({count})")
+            
+            # Variants from reference articles
+            reference_variants = stats.get('reference_variants', {})
+            if reference_variants and hasattr(reference_variants, 'most_common'):
+                for variant, count in reference_variants.most_common(3):
+                    all_variants.add(variant)
+                    if variant not in [v.split('(')[0] for v in variants_info]:
                         variants_info.append(f"{variant}({count})")
-                
-                # Variants from reference articles
-                if stats['reference_variants']:
-                    for variant, count in stats['reference_variants'].most_common(3):
-                        all_variants.add(variant)
-                        if variant not in [v.split('(')[0] for v in variants_info]:
-                            variants_info.append(f"{variant}({count})")
-                
-                # Variants from citing articles
-                if stats['citing_variants']:
-                    for variant, count in stats['citing_variants'].most_common(3):
-                        all_variants.add(variant)
-                        if variant not in [v.split('(')[0] for v in variants_info]:
-                            variants_info.append(f"{variant}({count})")
-                
-                # Format variants string
-                variants_str = ', '.join(sorted(all_variants))
-                
-                data.append({
-                    'Title term': lemma,
-                    'Variants': variants_str,
-                    'Type': stats['type'],
-                    'Analyzed count': stats['analyzed'],
-                    'Reference count': stats['reference'],
-                    'Citing Count': stats['citing'],
-                    'Analyzed norm count': round(analyzed_norm, 4),
-                    'Reference norm count': round(reference_norm, 4),
-                    'Citing norm Count': round(citing_norm, 4),
-                    'Total norm count': round(total_norm, 4)
-                })
             
-            # Sort by Total norm count (descending)
-            data.sort(key=lambda x: x['Total norm count'], reverse=True)
+            # Variants from citing articles
+            citing_variants = stats.get('citing_variants', {})
+            if citing_variants and hasattr(citing_variants, 'most_common'):
+                for variant, count in citing_variants.most_common(3):
+                    all_variants.add(variant)
+                    if variant not in [v.split('(')[0] for v in variants_info]:
+                        variants_info.append(f"{variant}({count})")
             
-            return data
+            # Format variants string
+            variants_str = ', '.join(sorted(all_variants))
+            
+            data.append({
+                'Title term': lemma,
+                'Variants': variants_str,
+                'Type': stats.get('type', ''),
+                'Analyzed count': stats.get('analyzed', 0),
+                'Reference count': stats.get('reference', 0),
+                'Citing Count': stats.get('citing', 0),
+                'Analyzed norm count': round(analyzed_norm, 4),
+                'Reference norm count': round(reference_norm, 4),
+                'Citing norm Count': round(citing_norm, 4),
+                'Total norm count': round(total_norm, 4)
+            })
+        
+        # Sort by Total norm count (descending)
+        data.sort(key=lambda x: x.get('Total norm count', 0), reverse=True)
+        
+        return data
 
     def _prepare_terms_topics_data(self) -> List[Dict]:
         """Prepare data for Terms and Topics sheet"""
         data = []
         
         # Total articles for normalization
-        total_analyzed = len([r for r in self.analyzed_results.values() if r.get('status') == 'success'])
-        total_reference = len([r for r in self.ref_results.values() if r.get('status') == 'success'])
-        total_citing = len([r for r in self.citing_results.values() if r.get('status') == 'success'])
+        total_analyzed = len([r for r in self.analyzed_results.values() 
+                            if isinstance(r, dict) and r.get('status') == 'success'])
+        total_reference = len([r for r in self.ref_results.values() 
+                              if isinstance(r, dict) and r.get('status') == 'success'])
+        total_citing = len([r for r in self.citing_results.values() 
+                           if isinstance(r, dict) and r.get('status') == 'success'])
         
         for key, stats in self.terms_topics_stats.items():
-            if stats['analyzed_count'] == 0 and stats['reference_count'] == 0 and stats['citing_count'] == 0:
+            if not isinstance(stats, dict):
+                continue
+                
+            analyzed_count = stats.get('analyzed_count', 0)
+            reference_count = stats.get('reference_count', 0)
+            citing_count = stats.get('citing_count', 0)
+            
+            if analyzed_count == 0 and reference_count == 0 and citing_count == 0:
                 continue
             
             # Extract term from key
@@ -4697,36 +4889,37 @@ class ExcelExporter:
                 term = key
             
             # Calculate normalized values
-            analyzed_norm = stats['analyzed_count'] / total_analyzed if total_analyzed > 0 else 0
-            reference_norm = stats['reference_count'] / total_reference if total_reference > 0 else 0
-            citing_norm = stats['citing_count'] / total_citing if total_citing > 0 else 0
+            analyzed_norm = analyzed_count / total_analyzed if total_analyzed > 0 else 0
+            reference_norm = reference_count / total_reference if total_reference > 0 else 0
+            citing_norm = citing_count / total_citing if total_citing > 0 else 0
             total_norm = analyzed_norm + reference_norm + citing_norm
             
             # Calculate count for last 5 years
             recent_5_years_count = 0
-            if stats['years']:
+            years = stats.get('years', [])
+            if years and isinstance(years, list):
                 current_year = datetime.now().year
-                for year in stats['years']:
+                for year in years:
                     if year and year >= current_year - 5:
                         recent_5_years_count += 1
             
             data.append({
                 'Term': term,
-                'Type': stats['type'],
-                'Analyzed count': stats['analyzed_count'],
-                'Reference count': stats['reference_count'],
-                'Citing Count': stats['citing_count'],
+                'Type': stats.get('type', ''),
+                'Analyzed count': analyzed_count,
+                'Reference count': reference_count,
+                'Citing Count': citing_count,
                 'Analyzed norm count': round(analyzed_norm, 4),
                 'Reference norm count': round(reference_norm, 4),
                 'Citing norm Count': round(citing_norm, 4),
                 'Total norm count': round(total_norm, 4),
-                'First_Year': stats['first_year'] if stats['first_year'] else '',
-                'Peak_Year': stats['peak_year'] if stats['peak_year'] else '',
+                'First_Year': stats.get('first_year', ''),
+                'Peak_Year': stats.get('peak_year', ''),
                 'Recent_5_Years_Count': recent_5_years_count
             })
         
         # Sort by Total norm count (descending)
-        data.sort(key=lambda x: x['Total norm count'], reverse=True)
+        data.sort(key=lambda x: x.get('Total norm count', 0), reverse=True)
         
         return data
 
@@ -4738,7 +4931,7 @@ class ExcelExporter:
 
         processed_refs = {}
         for ref_doi, ref_result in self.ref_results.items():
-            if ref_result.get('status') == 'success':
+            if isinstance(ref_result, dict) and ref_result.get('status') == 'success':
                 processed_refs[ref_doi] = ref_result
 
         for ref_doi, ref_result in processed_refs.items():
@@ -4749,7 +4942,10 @@ class ExcelExporter:
             topics_info = ref_result.get('topics_info', {})
 
             orcid_urls = ref_result.get('orcid_urls', [])
-            affiliations = list(set([aff for author in authors for aff in author.get('affiliation', []) if aff]))
+            affiliations = list(set([aff for author in authors 
+                                   if isinstance(author, dict) 
+                                   for aff in author.get('affiliation', []) 
+                                   if aff and isinstance(aff, str)]))
             countries = ref_result.get('countries', [])
 
             annual_cr = self._calculate_annual_citation_rate(
@@ -4764,12 +4960,13 @@ class ExcelExporter:
             row = {
                 'doi': ref_doi,
                 'publication_date': pub_info.get('publication_date', ''),
-                'Title': pub_info.get('title', '')[:200] + ('...' if len(pub_info.get('title', '')) > 200 else ''),
-                'authors': '; '.join([a['name'] for a in authors]),
-                'ORCID ID 1; ORCID ID 2... ORCID ID last': '; '.join(orcid_urls),
+                'Title': (pub_info.get('title', '')[:200] + ('...' if len(pub_info.get('title', '')) > 200 else '')) 
+                        if pub_info.get('title') else '',
+                'authors': '; '.join([a.get('name', '') for a in authors if isinstance(a, dict) and a.get('name')]),
+                'ORCID ID 1; ORCID ID 2... ORCID ID last': '; '.join(orcid_urls) if orcid_urls else '',
                 'author count': len(authors),
-                'affiliations {aff 1; aff 2... aff last}': '; '.join(affiliations),
-                'countries {country 1; ... country last}': '; '.join(countries),
+                'affiliations {aff 1; aff 2... aff last}': '; '.join(affiliations) if affiliations else '',
+                'countries {country 1; ... country last}': '; '.join(countries) if countries else '',
                 'Full journal Name': pub_info.get('journal', ''),
                 'year': pub_info.get('year', ''),
                 'Volume': pub_info.get('volume', ''),
@@ -4784,7 +4981,7 @@ class ExcelExporter:
                 'Subfield': topics_info.get('subfield', ''),
                 'Field': topics_info.get('field', ''),
                 'Domain': topics_info.get('domain', ''),
-                'Concepts': '; '.join(topics_info.get('concepts', []))
+                'Concepts': '; '.join(topics_info.get('concepts', [])) if topics_info.get('concepts') else ''
             }
 
             data.append(row)
@@ -4828,7 +5025,7 @@ class ExcelExporter:
 
         processed_cites = {}
         for cite_doi, cite_result in self.citing_results.items():
-            if cite_result.get('status') == 'success':
+            if isinstance(cite_result, dict) and cite_result.get('status') == 'success':
                 processed_cites[cite_doi] = cite_result
 
         for cite_doi, cite_result in processed_cites.items():
@@ -4839,7 +5036,10 @@ class ExcelExporter:
             topics_info = cite_result.get('topics_info', {})
 
             orcid_urls = cite_result.get('orcid_urls', [])
-            affiliations = list(set([aff for author in authors for aff in author.get('affiliation', []) if aff]))
+            affiliations = list(set([aff for author in authors 
+                                   if isinstance(author, dict) 
+                                   for aff in author.get('affiliation', []) 
+                                   if aff and isinstance(aff, str)]))
             countries = cite_result.get('countries', [])
 
             annual_cr = self._calculate_annual_citation_rate(
@@ -4854,12 +5054,13 @@ class ExcelExporter:
             row = {
                 'doi': cite_doi,
                 'publication_date': pub_info.get('publication_date', ''),
-                'Title': pub_info.get('title', '')[:200] + ('...' if len(pub_info.get('title', '')) > 200 else ''),
-                'authors': '; '.join([a['name'] for a in authors]),
-                'ORCID ID 1; ORCID ID 2... ORCID ID last': '; '.join(orcid_urls),
+                'Title': (pub_info.get('title', '')[:200] + ('...' if len(pub_info.get('title', '')) > 200 else '')) 
+                        if pub_info.get('title') else '',
+                'authors': '; '.join([a.get('name', '') for a in authors if isinstance(a, dict) and a.get('name')]),
+                'ORCID ID 1; ORCID ID 2... ORCID ID last': '; '.join(orcid_urls) if orcid_urls else '',
                 'author count': len(authors),
-                'affiliations {aff 1; aff 2... aff last}': '; '.join(affiliations),
-                'countries {country 1; ... country last}': '; '.join(countries),
+                'affiliations {aff 1; aff 2... aff last}': '; '.join(affiliations) if affiliations else '',
+                'countries {country 1; ... country last}': '; '.join(countries) if countries else '',
                 'Full journal Name': pub_info.get('journal', ''),
                 'year': pub_info.get('year', ''),
                 'Volume': pub_info.get('volume', ''),
@@ -4874,7 +5075,7 @@ class ExcelExporter:
                 'Subfield': topics_info.get('subfield', ''),
                 'Field': topics_info.get('field', ''),
                 'Domain': topics_info.get('domain', ''),
-                'Concepts': '; '.join(topics_info.get('concepts', []))
+                'Concepts': '; '.join(topics_info.get('concepts', [])) if topics_info.get('concepts') else ''
             }
 
             data.append(row)
@@ -4949,15 +5150,18 @@ class ExcelExporter:
         data = []
 
         for doi, result in results.items():
-            if result.get('status') != 'success':
+            if not isinstance(result, dict) or result.get('status') != 'success':
                 continue
 
-            pub_info = result['publication_info']
-            authors = result['authors']
-            topics_info = result['topics_info']
+            pub_info = result.get('publication_info', {})
+            authors = result.get('authors', [])
+            topics_info = result.get('topics_info', {})
 
             orcid_urls = result.get('orcid_urls', [])
-            affiliations = list(set([aff for author in authors for aff in author.get('affiliation', []) if aff]))
+            affiliations = list(set([aff for author in authors 
+                                   if isinstance(author, dict) 
+                                   for aff in author.get('affiliation', []) 
+                                   if aff and isinstance(aff, str)]))
             countries = result.get('countries', [])
 
             annual_cr = self._calculate_annual_citation_rate(
@@ -4972,12 +5176,13 @@ class ExcelExporter:
             row = {
                 'doi': doi,
                 'publication_date': pub_info.get('publication_date', ''),
-                'Title': pub_info.get('title', '')[:200] + ('...' if len(pub_info.get('title', '')) > 200 else ''),
-                'authors': '; '.join([a['name'] for a in authors]),
-                'ORCID ID 1; ORCID ID 2... ORCID ID last': '; '.join(orcid_urls),
+                'Title': (pub_info.get('title', '')[:200] + ('...' if len(pub_info.get('title', '')) > 200 else '')) 
+                        if pub_info.get('title') else '',
+                'authors': '; '.join([a.get('name', '') for a in authors if isinstance(a, dict) and a.get('name')]),
+                'ORCID ID 1; ORCID ID 2... ORCID ID last': '; '.join(orcid_urls) if orcid_urls else '',
                 'author count': len(authors),
-                'affiliations {aff 1; aff 2... aff last}': '; '.join(affiliations),
-                'countries {country 1; ... country last}': '; '.join(countries),
+                'affiliations {aff 1; aff 2... aff last}': '; '.join(affiliations) if affiliations else '',
+                'countries {country 1; ... country last}': '; '.join(countries) if countries else '',
                 'Full journal Name': pub_info.get('journal', ''),
                 'year': pub_info.get('year', ''),
                 'Volume': pub_info.get('volume', ''),
@@ -4991,7 +5196,7 @@ class ExcelExporter:
                 'Subfield': topics_info.get('subfield', ''),
                 'Field': topics_info.get('field', ''),
                 'Domain': topics_info.get('domain', ''),
-                'Concepts': '; '.join(topics_info.get('concepts', []))
+                'Concepts': '; '.join(topics_info.get('concepts', [])) if topics_info.get('concepts') else ''
             }
 
             data.append(row)
@@ -5003,11 +5208,18 @@ class ExcelExporter:
         author_details = {}
     
         for doi, result in results.items():
-            if result.get('status') != 'success':
+            if not isinstance(result, dict) or result.get('status') != 'success':
                 continue
     
-            for author in result['authors']:
-                full_name = author['name']
+            authors = result.get('authors', [])
+            if not isinstance(authors, list):
+                continue
+                
+            for author in authors:
+                if not isinstance(author, dict):
+                    continue
+                    
+                full_name = author.get('name', '')
                 normalized_name = self.processor.normalize_author_name(full_name)
     
                 # USE ONLY normalized_name as key
@@ -5016,7 +5228,12 @@ class ExcelExporter:
                 author_counter[key] += 1
     
                 if key not in author_details:
-                    affiliation = author['affiliation'][0] if author.get('affiliation') else ""
+                    affiliation = author.get('affiliation', [])
+                    if affiliation and isinstance(affiliation, list) and len(affiliation) > 0:
+                        affiliation = affiliation[0]
+                    else:
+                        affiliation = ""
+                        
                     orcid = author.get('orcid', '')
                     
                     # IMPORTANT FIX: Use author country, not article country
@@ -5033,7 +5250,9 @@ class ExcelExporter:
                     
                     # 3. Fallback: if cannot determine, take from article
                     if not country and result.get('countries'):
-                        country = result.get('countries', [''])[0]
+                        countries = result.get('countries', [])
+                        if countries and isinstance(countries, list) and len(countries) > 0:
+                            country = countries[0]
     
                     author_details[key] = {
                         'orcid': self.processor._format_orcid_id(orcid) if orcid else '',
@@ -5071,27 +5290,33 @@ class ExcelExporter:
     def _prepare_author_summary(self) -> List[Dict]:
         data = []
         
-        # CHANGE: Calculate total analyzed articles for normalization
-        total_analyzed_articles = len([r for r in self.analyzed_results.values() if r.get('status') == 'success'])
+        # Calculate total analyzed articles for normalization
+        total_analyzed_articles = len([r for r in self.analyzed_results.values() 
+                                     if isinstance(r, dict) and r.get('status') == 'success'])
     
         for key, stats in self.author_stats.items():
-            if stats['total_count'] == 0:
+            if not isinstance(stats, dict):
+                continue
+                
+            if stats.get('total_count', 0) == 0:
                 continue
     
-            # CHANGE: Calculate normalized_analyzed based on article_count_analyzed
+            # Calculate normalized_analyzed based on article_count_analyzed
             normalized_analyzed = stats.get('normalized_analyzed', 0)
             
-            # CHANGE: Total Count should be sum of normalized values, but normalized_analyzed already correct
-            total_count = normalized_analyzed + stats['normalized_reference'] + stats['normalized_citing']
+            # Total Count should be sum of normalized values, but normalized_analyzed already correct
+            total_count = normalized_analyzed + stats.get('normalized_reference', 0) + stats.get('normalized_citing', 0)
     
             # Convert ORCID set to string
-            orcid_str = '; '.join(sorted(stats['orcid'])) if stats['orcid'] else ''
+            orcid_set = stats.get('orcid', set())
+            orcid_str = '; '.join(sorted(orcid_set)) if orcid_set else ''
     
             # FIX: Use method from DataProcessor instead of non-existent one
             country = ""
-            if stats['affiliation']:
+            affiliation = stats.get('affiliation', '')
+            if affiliation:
                 # Use method from DataProcessor for country determination
-                country = self._get_country_from_affiliation(stats['affiliation'])
+                country = self._get_country_from_affiliation(affiliation)
             
             # Fallback: use saved country or additional correction
             if not country:
@@ -5100,46 +5325,52 @@ class ExcelExporter:
                     country = self._correct_country_for_author(key, self.affiliation_stats)
     
             row = {
-                'Surname + Initial_normalized': stats['normalized_name'],
+                'Surname + Initial_normalized': stats.get('normalized_name', ''),
                 'ORCID ID': orcid_str,
-                'Affiliation': stats['affiliation'],
+                'Affiliation': affiliation,
                 'Country': country,
                 'Total Count': round(total_count, 4),
                 'Normalized Analyzed': round(normalized_analyzed, 4),
-                'Normalized Reference': round(stats['normalized_reference'], 4),
-                'Normalized Citing': round(stats['normalized_citing'], 4)
+                'Normalized Reference': round(stats.get('normalized_reference', 0), 4),
+                'Normalized Citing': round(stats.get('normalized_citing', 0), 4)
             }
             data.append(row)
     
-        data.sort(key=lambda x: x['Total Count'], reverse=True)
+        data.sort(key=lambda x: x.get('Total Count', 0), reverse=True)
     
         return data
 
     def _prepare_affiliation_summary(self) -> List[Dict]:
         data = []
         
-        # CHANGE: Calculate total analyzed articles for normalization
-        total_analyzed_articles = len([r for r in self.analyzed_results.values() if r.get('status') == 'success'])
+        # Calculate total analyzed articles for normalization
+        total_analyzed_articles = len([r for r in self.analyzed_results.values() 
+                                     if isinstance(r, dict) and r.get('status') == 'success'])
     
         for affiliation, stats in self.affiliation_stats.items():
-            if stats['total_count'] == 0:
+            if not isinstance(stats, dict):
+                continue
+                
+            if stats.get('total_count', 0) == 0:
                 continue
     
             # Determine main country for affiliation
             main_country = ""
-            if stats['countries']:
-                country_counter = Counter(stats['countries'])
+            countries = stats.get('countries', [])
+            if countries and isinstance(countries, list):
+                country_counter = Counter(countries)
                 most_common = country_counter.most_common(1)
                 if most_common:
                     main_country = most_common[0][0]
     
-            # CHANGE: Calculate normalized_analyzed based on article_count_analyzed
+            # Calculate normalized_analyzed based on article_count_analyzed
             normalized_analyzed = 0
+            article_count_analyzed = stats.get('article_count_analyzed', 0)
             if total_analyzed_articles > 0:
-                normalized_analyzed = stats['article_count_analyzed'] / total_analyzed_articles
+                normalized_analyzed = article_count_analyzed / total_analyzed_articles
             
-            # CHANGE: Total Count should be sum of normalized values
-            total_count = normalized_analyzed + stats['normalized_reference'] + stats['normalized_citing']
+            # Total Count should be sum of normalized values
+            total_count = normalized_analyzed + stats.get('normalized_reference', 0) + stats.get('normalized_citing', 0)
 
             # Check and format ROR data
             colab_id = stats.get('colab_id', '')
@@ -5157,18 +5388,13 @@ class ExcelExporter:
                 'Main Country': main_country,
                 'total count': round(total_count, 4),
                 'Normalized analyzed': round(normalized_analyzed, 4),
-                'Normalized reference': round(stats['normalized_reference'], 4),
-                'Normalized citing': round(stats['normalized_citing'], 4)
+                'Normalized reference': round(stats.get('normalized_reference', 0), 4),
+                'Normalized citing': round(stats.get('normalized_citing', 0), 4)
             }
             data.append(row)
     
-        data.sort(key=lambda x: x['total count'], reverse=True)
+        data.sort(key=lambda x: x.get('total count', 0), reverse=True)
         
-        # Log result
-        ror_found = sum(1 for row in data if row['Colab ID'] and row['Colab ID'] != "ROR not found")
-        if self.enable_ror_analysis:
-            st.info(f"📊 In Affiliation_summary: {ror_found} records with ROR ID out of {len(data)} affiliations")
-    
         return data
 
     def _prepare_time_ref_analyzed_connections(self) -> List[Dict]:
@@ -5176,7 +5402,7 @@ class ExcelExporter:
 
         for ref_doi, analyzed_dois in self.ref_to_analyzed.items():
             ref_result = self.ref_results.get(ref_doi, {})
-            if ref_result.get('status') != 'success':
+            if not isinstance(ref_result, dict) or ref_result.get('status') != 'success':
                 continue
 
             ref_pub_info = ref_result.get('publication_info', {})
@@ -5186,7 +5412,7 @@ class ExcelExporter:
 
             for analyzed_doi in analyzed_dois:
                 analyzed_result = self.analyzed_results.get(analyzed_doi, {})
-                if analyzed_result.get('status') != 'success':
+                if not isinstance(analyzed_result, dict) or analyzed_result.get('status') != 'success':
                     continue
 
                 analyzed_pub_info = analyzed_result.get('publication_info', {})
@@ -5205,10 +5431,10 @@ class ExcelExporter:
                 }
                 data.append(row)
 
-        data_with_diff = [row for row in data if row['difference (days)'] not in ['', None]]
-        data_without_diff = [row for row in data if row['difference (days)'] in ['', None]]
+        data_with_diff = [row for row in data if row.get('difference (days)') not in ['', None]]
+        data_without_diff = [row for row in data if row.get('difference (days)') in ['', None]]
 
-        data_with_diff.sort(key=lambda x: x['difference (days)'])
+        data_with_diff.sort(key=lambda x: x.get('difference (days)', 0))
 
         return data_with_diff + data_without_diff
 
@@ -5217,7 +5443,7 @@ class ExcelExporter:
 
         for analyzed_doi, citing_dois in self.analyzed_to_citing.items():
             analyzed_result = self.analyzed_results.get(analyzed_doi, {})
-            if analyzed_result.get('status') != 'success':
+            if not isinstance(analyzed_result, dict) or analyzed_result.get('status') != 'success':
                 continue
 
             analyzed_pub_info = analyzed_result.get('publication_info', {})
@@ -5227,7 +5453,7 @@ class ExcelExporter:
 
             for citing_doi in citing_dois:
                 citing_result = self.citing_results.get(citing_doi, {})
-                if citing_result.get('status') != 'success':
+                if not isinstance(citing_result, dict) or citing_result.get('status') != 'success':
                     continue
 
                 citing_pub_info = citing_result.get('publication_info', {})
@@ -5246,15 +5472,15 @@ class ExcelExporter:
                 }
                 data.append(row)
 
-        data_with_diff = [row for row in data if row['difference (days)'] not in ['', None]]
-        data_without_diff = [row for row in data if row['difference (days)'] in ['', None]]
+        data_with_diff = [row for row in data if row.get('difference (days)') not in ['', None]]
+        data_without_diff = [row for row in data if row.get('difference (days)') in ['', None]]
 
-        data_with_diff.sort(key=lambda x: x['difference (days)'])
+        data_with_diff.sort(key=lambda x: x.get('difference (days)', 0))
 
         return data_with_diff + data_without_diff
 
     def _parse_date_string(self, date_str: str) -> Optional[datetime]:
-        if not date_str:
+        if not date_str or not isinstance(date_str, str):
             return None
 
         date_str = date_str.strip()
@@ -5357,15 +5583,15 @@ class ExcelExporter:
             source_data = results
 
         for doi, result in results.items():
-            if result.get('status') != 'success':
+            if not isinstance(result, dict) or result.get('status') != 'success':
                 continue
 
-            journal = result['publication_info'].get('journal', '')
+            journal = result.get('publication_info', {}).get('journal', '')
             if journal:
                 journal_counter[journal] += 1
                 
                 # Get citation data from corresponding source
-                if doi in source_data and source_data[doi].get('status') == 'success':
+                if doi in source_data and isinstance(source_data[doi], dict) and source_data[doi].get('status') == 'success':
                     source_result = source_data[doi]
                     pub_info = source_result.get('publication_info', {})
                     
@@ -5442,15 +5668,22 @@ class ExcelExporter:
         affiliation_counter = Counter()
 
         for doi, result in results.items():
-            if result.get('status') != 'success':
+            if not isinstance(result, dict) or result.get('status') != 'success':
                 continue
 
             unique_affiliations_in_article = set()
-            for author in result.get('authors', []):
-                for affiliation in author.get('affiliation', []):
-                    if affiliation and affiliation.strip():
-                        clean_aff = affiliation.strip()
-                        unique_affiliations_in_article.add(clean_aff)
+            authors = result.get('authors', [])
+            if isinstance(authors, list):
+                for author in authors:
+                    if not isinstance(author, dict):
+                        continue
+                        
+                    affs = author.get('affiliation', [])
+                    if isinstance(affs, list):
+                        for affiliation in affs:
+                            if affiliation and isinstance(affiliation, str):
+                                clean_aff = affiliation.strip()
+                                unique_affiliations_in_article.add(clean_aff)
 
             for aff in unique_affiliations_in_article:
                 affiliation_counter[aff] += 1
@@ -5466,7 +5699,7 @@ class ExcelExporter:
             }
             affiliation_data.append(row)
 
-        affiliation_data.sort(key=lambda x: x['Count'], reverse=True)
+        affiliation_data.sort(key=lambda x: x.get('Count', 0), reverse=True)
         return affiliation_data
 
     def _prepare_country_frequency(self, results: Dict[str, Dict], source_type: str) -> List[Dict]:
@@ -5474,19 +5707,19 @@ class ExcelExporter:
         country_combined_counter = Counter()
 
         for doi, result in results.items():
-            if result.get('status') != 'success':
+            if not isinstance(result, dict) or result.get('status') != 'success':
                 continue
 
             countries = result.get('countries', [])
-            if not countries:
+            if not isinstance(countries, list):
                 continue
 
             for country in countries:
-                if country:
+                if country and isinstance(country, str):
                     country_single_counter[country] += 1
 
             if len(countries) > 1:
-                sorted_countries = sorted(countries)
+                sorted_countries = sorted([c for c in countries if isinstance(c, str)])
                 combination = ';'.join(sorted_countries)
                 country_combined_counter[combination] += 1
 
@@ -5513,7 +5746,8 @@ class ExcelExporter:
                                citing_results: Dict[str, Dict]) -> List[Dict]:
         stats = []
 
-        analyzed_success = sum(1 for r in analyzed_results.values() if r.get('status') == 'success')
+        analyzed_success = sum(1 for r in analyzed_results.values() 
+                             if isinstance(r, dict) and r.get('status') == 'success')
         analyzed_failed = len(analyzed_results) - analyzed_success
 
         stats.append({
@@ -5525,7 +5759,8 @@ class ExcelExporter:
         })
 
         if ref_results:
-            ref_success = sum(1 for r in ref_results.values() if r.get('status') == 'success')
+            ref_success = sum(1 for r in ref_results.values() 
+                            if isinstance(r, dict) and r.get('status') == 'success')
             ref_failed = len(ref_results) - ref_success
 
             stats.append({
@@ -5537,7 +5772,8 @@ class ExcelExporter:
             })
 
         if citing_results:
-            cite_success = sum(1 for r in citing_results.values() if r.get('status') == 'success')
+            cite_success = sum(1 for r in citing_results.values() 
+                             if isinstance(r, dict) and r.get('status') == 'success')
             cite_failed = len(citing_results) - cite_success
 
             stats.append({
@@ -5576,11 +5812,11 @@ class ExcelExporter:
             counter_cite = self.citations_counter
 
         for ref in references:
-            if ref:
+            if ref and isinstance(ref, str):
                 counter_ref[ref] += 1
 
         for cite in citations:
-            if cite:
+            if cite and isinstance(cite, str):
                 counter_cite[cite] += 1
 
 # ============================================================================
@@ -5971,11 +6207,16 @@ class ArticleAnalyzerSystem:
         }
 
     def create_excel_report(self, progress_container=None):
-        """Create Excel report"""
+        """Create Excel report with proper error handling"""
+        if not hasattr(st.session_state, 'analyzed_results') or not st.session_state.analyzed_results:
+            if progress_container:
+                progress_container.error("❌ No analyzed results available")
+            return BytesIO()
+        
         # Update exporter with data
-        self.excel_exporter.analyzed_results = st.session_state.analyzed_results
-        self.excel_exporter.ref_results = st.session_state.ref_results
-        self.excel_exporter.citing_results = st.session_state.citing_results
+        self.excel_exporter.analyzed_results = st.session_state.analyzed_results or {}
+        self.excel_exporter.ref_results = st.session_state.ref_results or {}
+        self.excel_exporter.citing_results = st.session_state.citing_results or {}
         
         # Set ROR analysis flag
         self.excel_exporter.enable_ror_analysis = st.session_state.enable_ror_analysis
@@ -5987,15 +6228,31 @@ class ArticleAnalyzerSystem:
                 progress_container.info("ℹ️ ROR analysis disabled. Enable option to get ROR ID.")
     
         # Create report in memory
-        excel_file = self.excel_exporter.create_comprehensive_report(
-            st.session_state.analyzed_results,
-            st.session_state.ref_results,
-            st.session_state.citing_results,
-            progress_container=progress_container,
-            enable_ror=st.session_state.enable_ror_analysis
-        )
-    
-        return excel_file
+        try:
+            excel_file = self.excel_exporter.create_comprehensive_report(
+                self.excel_exporter.analyzed_results,
+                self.excel_exporter.ref_results,
+                self.excel_exporter.citing_results,
+                progress_container=progress_container,
+                enable_ror=st.session_state.enable_ror_analysis
+            )
+            
+            if progress_container:
+                progress_container.success("✅ Excel report created successfully!")
+                
+            return excel_file
+            
+        except Exception as e:
+            if progress_container:
+                progress_container.error(f"❌ Report creation error: {str(e)}")
+            
+            # Create minimal error report
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                error_df = pd.DataFrame([{'Error': f'Report generation failed: {str(e)}'}])
+                error_df.to_excel(writer, sheet_name='Error', index=False)
+            output.seek(0)
+            return output
 
     def clear_data(self):
         """Clear all data"""
@@ -6540,6 +6797,7 @@ if __name__ == "__main__":
 st.markdown("""
     You can use https://rca-title-keywords.streamlit.app/ for the Title Keywords analysis, https://rca-terms-concepts.streamlit.app/ for the Terms and Topics analysis, and https://rca-analysis.streamlit.app/ for the Article_Analyzed, Article_ref, and Article_citing data 
     """)
+
 
 
 
