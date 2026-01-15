@@ -856,7 +856,7 @@ def cached_fetch_article_data(doi: str, crossref_client,
     
     return crossref_data, openalex_data
 
-def cached_get_citing_works(doi: str, openalex_client: OpenAlexClient,
+def cached_get_citing_works(doi: str, openalex_client,
                           source_type: str = "analyzed",
                           state_manager: AnalysisStateManager = None) -> List[str]:
     """
@@ -6540,6 +6540,7 @@ if __name__ == "__main__":
 st.markdown("""
     You can use https://rca-title-keywords.streamlit.app/ for the Title Keywords analysis, https://rca-terms-concepts.streamlit.app/ for the Terms and Topics analysis, and https://rca-analysis.streamlit.app/ for the Article_Analyzed, Article_ref, and Article_citing data 
     """)
+
 
 
 
