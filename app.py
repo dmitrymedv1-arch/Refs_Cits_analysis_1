@@ -1443,8 +1443,8 @@ class OpenAlexClient(APIClient):
 
     def fetch_all_citations_for_analyzed_article(self, doi: str) -> List[str]:
         """
-        NEW LOGIC: Complete collection of ALL citations for analyzed articles
-        Uses cursor-based pagination and collects all pages
+        Complete collection of ALL citations for analyzed articles
+        Uses cursor-based pagination with timeout protection
         """
         clean_doi = self._clean_doi(doi)
         if not clean_doi:
@@ -1457,7 +1457,7 @@ class OpenAlexClient(APIClient):
             return cached_result
     
         try:
-            # First get work_id from DOI
+            # First get work_id from DOI with timeout
             article_data = self.fetch_article(clean_doi)
             
             # Check if article_data is valid
@@ -1474,17 +1474,19 @@ class OpenAlexClient(APIClient):
             if 'id' in article_data:
                 article_id = article_data.get('id', '').split('/')[-1]
             
-            # Try alternative structure
+            # Try alternative structure with timeout protection
             if not article_id and 'doi' in article_data:
-                # Try to get through OpenAlex API
                 url = f"https://api.openalex.org/works/https://doi.org/{clean_doi}"
                 try:
-                    response = self.session.get(url, timeout=10)
+                    response = self.session.get(url, timeout=15)
                     if response.status_code == 200:
                         data = response.json()
                         if 'id' in data:
                             article_id = data['id'].split('/')[-1]
-                except:
+                except requests.exceptions.Timeout:
+                    print(f"Timeout getting work ID for {clean_doi}")
+                    return []
+                except Exception:
                     pass
             
             if not article_id:
@@ -1493,9 +1495,10 @@ class OpenAlexClient(APIClient):
             all_citing_dois = []
             cursor = "*"
             page_num = 1
-            max_retries = 3
-            max_pages = 50  # Limit to 50 pages (10,000 citations)
+            max_retries = 2
+            max_pages = 30  # Reduced from 50 to prevent timeout (6000 citations max)
             total_collected = 0
+            consecutive_errors = 0
             
             # Use a new session for each article to avoid connection issues
             with requests.Session() as session:
@@ -1504,18 +1507,21 @@ class OpenAlexClient(APIClient):
                     'Accept': 'application/json',
                     'Accept-Encoding': 'gzip'
                 })
+                session.timeout = 25  # Overall timeout for session
                 
                 while cursor and page_num <= max_pages:
                     success = False
+                    page_cursor = cursor
+                    
                     for attempt in range(max_retries):
                         try:
-                            url = f"https://api.openalex.org/works?filter=cites:{article_id}&per-page=200&cursor={cursor}"
+                            url = f"https://api.openalex.org/works?filter=cites:{article_id}&per-page=200&cursor={page_cursor}"
                             
                             # Wait before request
                             self.delay.wait_if_needed()
                             
                             start_time = time.time()
-                            response = session.get(url, timeout=30)
+                            response = session.get(url, timeout=25)
                             response_time = time.time() - start_time
     
                             if response.status_code == 200:
@@ -1529,6 +1535,7 @@ class OpenAlexClient(APIClient):
                                 
                                 if not works:
                                     cursor = None
+                                    success = True
                                     break
     
                                 page_citing_dois = []
@@ -1540,25 +1547,29 @@ class OpenAlexClient(APIClient):
     
                                 all_citing_dois.extend(page_citing_dois)
                                 total_collected += len(page_citing_dois)
+                                
+                                # Reset consecutive errors on success
+                                consecutive_errors = 0
     
                                 # Get next cursor
                                 meta = data.get('meta', {})
                                 next_cursor = meta.get('next_cursor')
     
-                                if next_cursor and next_cursor != cursor:
+                                if next_cursor and next_cursor != page_cursor and page_num < max_pages:
                                     cursor = next_cursor
                                     page_num += 1
-                                    # Add delay between pages to avoid rate limits
-                                    time.sleep(0.5)
+                                    # Add delay between pages
+                                    time.sleep(0.3)
+                                    success = True
+                                    break
                                 else:
                                     cursor = None
-    
-                                success = True
-                                break  # Success, exit retry loop
+                                    success = True
+                                    break
     
                             elif response.status_code == 429:
                                 self.delay.update_delay(False, response_time)
-                                wait_time = min(2 ** attempt, 5)  # Exponential backoff capped at 5 seconds
+                                wait_time = min(2 ** attempt, 4)  # Exponential backoff capped at 4 seconds
                                 time.sleep(wait_time)
                                 continue
     
@@ -1570,28 +1581,38 @@ class OpenAlexClient(APIClient):
     
                             else:
                                 self.delay.update_delay(False, response_time)
+                                consecutive_errors += 1
                                 if attempt < max_retries - 1:
-                                    time.sleep(2)
+                                    time.sleep(1)
                                     continue
                                 else:
+                                    success = False
                                     break
     
                         except requests.exceptions.Timeout:
-                            if attempt < max_retries - 1:
-                                time.sleep(3)
-                                continue
-                            else:
-                                break
-                                
-                        except Exception as e:
+                            consecutive_errors += 1
                             if attempt < max_retries - 1:
                                 time.sleep(2)
                                 continue
                             else:
+                                success = False
+                                break
+                                
+                        except Exception as e:
+                            consecutive_errors += 1
+                            if attempt < max_retries - 1:
+                                time.sleep(1)
+                                continue
+                            else:
+                                success = False
                                 break
     
+                    # If too many consecutive errors, stop pagination
+                    if consecutive_errors >= 5:
+                        print(f"Too many consecutive errors for {clean_doi}, stopping")
+                        break
+                        
                     if not success:
-                        # If all retries failed, stop pagination
                         break
             
             # Remove duplicates and save to cache
@@ -1607,7 +1628,7 @@ class OpenAlexClient(APIClient):
             return unique_citing_dois
     
         except Exception as e:
-            # Log error but don't crash
+            # Log error but don't crash - return empty list
             print(f"Error collecting citations for {clean_doi}: {str(e)}")
             return []
 
@@ -2524,7 +2545,7 @@ class OptimizedDOIProcessor:
                                     original_doi: str = None, fetch_refs: bool = True,
                                     fetch_cites: bool = True, batch_size: int = Config.BATCH_SIZE,
                                     progress_container=None, resume: bool = False) -> Dict[str, Dict]:
-
+    
         # Set current stage in state manager
         self.state_manager.set_stage(source_type, len(dois))
         
@@ -2541,19 +2562,19 @@ class OptimizedDOIProcessor:
         else:
             # Normal start
             self.stage_progress[source_type] = {'processed': [], 'remaining': dois}
-
+    
         results = {}
         total_batches = (len(dois) + batch_size - 1) // batch_size
-
+    
         if progress_container:
             status_text = progress_container.text(f"🔧 Processing {len(dois)} DOI (source: {source_type})")
             progress_bar = progress_container.progress(0)
         else:
             status_text = None
             progress_bar = None
-
+    
         monitor = ProgressMonitor(len(dois), f"Processing {source_type}", progress_bar, status_text)
-
+    
         try:
             for batch_idx in range(0, len(dois), batch_size):
                 batch = dois[batch_idx:batch_idx + batch_size]
@@ -2585,7 +2606,7 @@ class OptimizedDOIProcessor:
                         batch_to_process, source_type, original_doi, True, True
                     )
                     results.update(batch_results)
-
+    
                 # Update progress
                 processed_batch = list(batch_to_process) + list(cached_results.keys())
                 self.stage_progress[source_type]['processed'].extend(processed_batch)
@@ -2598,15 +2619,18 @@ class OptimizedDOIProcessor:
                     self.stage_progress[source_type]['remaining']
                 )
                 
-                # Save progress to cache
+                # CRITICAL FIX: Save progress to cache after each batch
                 self.cache.save_progress(
                     source_type,
                     self.stage_progress[source_type]['processed'],
                     self.stage_progress[source_type]['remaining']
                 )
-
+                
+                # CRITICAL FIX: Save session state after each batch
+                self.state_manager.save_to_session()
+    
                 monitor.update(len(batch), 'processed')
-
+    
             # Clear saved progress after successful completion
             self.stage_progress[source_type] = {'processed': [], 'remaining': []}
             self.cache.clear_progress()
@@ -2614,18 +2638,18 @@ class OptimizedDOIProcessor:
             # Update state manager
             self.state_manager.current_stage = None
             self.state_manager.save_to_session()
-
+    
             monitor.complete()
-
+    
             successful = sum(1 for r in results.values() if r.get('status') == 'success')
             failed = len(dois) - successful
-
+    
             self.stats['total_processed'] += len(dois)
             self.stats['successful'] += successful
             self.stats['failed'] += failed
-
+    
             return results
-
+    
         except Exception as e:
             # Save progress on exception
             if progress_container:
@@ -2856,19 +2880,29 @@ class OptimizedDOIProcessor:
                 self.reference_relationships[doi] = references
         except Exception as e:
             st.warning(f"⚠️ Error fetching references for {doi}: {e}")
+            references = []
     
         citations = []
         try:
-            # Use cached citing works fetching
-            # IMPORTANT CHANGE: Different citation collection logic depending on article type
+            # Use cached citing works fetching with timeout protection
             if source_type == "analyzed":
-                # For analyzed articles: collect ALL citations through new logic
-                # Add timeout protection
+                # For analyzed articles: collect ALL citations
                 cites_openalex = []
                 try:
-                    cites_openalex = cached_get_citing_works(doi, self.openalex_client, source_type, self.state_manager)
-                    if not isinstance(cites_openalex, list):
-                        cites_openalex = []
+                    # Add timeout protection via threading
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                        future = executor.submit(
+                            cached_get_citing_works, 
+                            doi, self.openalex_client, source_type, self.state_manager
+                        )
+                        try:
+                            cites_openalex = future.result(timeout=45)  # 45 second timeout
+                            if not isinstance(cites_openalex, list):
+                                cites_openalex = []
+                        except concurrent.futures.TimeoutError:
+                            st.warning(f"⚠️ Timeout collecting citations for {doi}")
+                            cites_openalex = []
                 except Exception as e:
                     st.warning(f"⚠️ Error in OpenAlex citation collection for {doi}: {e}")
                     cites_openalex = []
@@ -2889,10 +2923,10 @@ class OptimizedDOIProcessor:
                     self.citation_relationships[doi] = citations
     
             else:
-                # For reference and citing articles: use old logic (only up to 2000)
+                # For reference and citing articles: use limited collection
                 cites_openalex = []
                 try:
-                    cites_openalex = cached_get_citing_works(doi, self.openalex_client, source_type, self.state_manager)
+                    cites_openalex = cached_get_citing_works(doi, self.openalex_client, "standard", self.state_manager)
                     if not isinstance(cites_openalex, list):
                         cites_openalex = []
                 except Exception as e:
@@ -2912,6 +2946,7 @@ class OptimizedDOIProcessor:
     
                 if citations:
                     self.citation_relationships[doi] = citations
+                    
         except Exception as e:
             st.warning(f"⚠️ General citation fetch error for {doi}: {e}")
             citations = []
@@ -2946,6 +2981,9 @@ class OptimizedDOIProcessor:
             # Cache at all levels
             self.cache.set("full_analysis", cache_key, result, category="full_analysis")
             self.state_manager.save_result(doi, result, source_type)
+            
+            # CRITICAL FIX: Save session state immediately after each successful DOI
+            self.state_manager.save_to_session()
     
             self.cache.update_popularity(doi)
         else:
@@ -5884,10 +5922,10 @@ class ExcelExporter:
         return results
 
     def _aggressive_retry_missing_dois(self, progress_container=None) -> Dict[str, Dict]:
-        """Агрессивная автоматическая повторная обработка всех пропущенных DOI"""
+        """Automatic retry of missing DOIs using existing processor"""
         retry_results = {}
         
-        # Определяем DOI, которые есть в связях, но нет в результатах
+        # Identify DOIs that are in relationships but missing from results
         missing_ref_dois = []
         for ref_doi in self.ref_to_analyzed.keys():
             if ref_doi not in self.ref_results:
@@ -5903,30 +5941,31 @@ class ExcelExporter:
                 elif isinstance(self.citing_results[cite_doi], dict) and self.citing_results[cite_doi].get('status') != 'success':
                     missing_cite_dois.append(cite_doi)
         
+        # Remove duplicates
         missing_ref_dois = list(set(missing_ref_dois))
         missing_cite_dois = list(set(missing_cite_dois))
         
         if not missing_ref_dois and not missing_cite_dois:
             if progress_container:
-                progress_container.text("✅ Все DOI уже обработаны")
+                progress_container.text("✅ All DOIs already processed")
             return retry_results
         
         total_missing = len(missing_ref_dois) + len(missing_cite_dois)
         
         if progress_container:
-            progress_container.text(f"🔄 Автоматическая повторная обработка {total_missing} пропущенных DOI...")
+            progress_container.text(f"🔄 Auto-retrying {total_missing} missing DOIs...")
         
-        # Объединяем все DOI
+        # Combine all DOIs
         all_missing_dois = missing_ref_dois + missing_cite_dois
         
-        # ИСПРАВЛЕНИЕ: Используем существующий doi_processor вместо создания новых клиентов
+        # CRITICAL FIX: Use existing doi_processor instead of creating new clients
         if not self.doi_processor:
             if progress_container:
                 progress_container.text("⚠️ DOI processor not available for retry")
             return retry_results
         
-        # Обрабатываем с улучшенными параметрами
-        batch_size = 30
+        # Process with improved parameters
+        batch_size = 25  # Smaller batch for stability
         total_batches = (len(all_missing_dois) + batch_size - 1) // batch_size
         
         for batch_num in range(total_batches):
@@ -5935,17 +5974,17 @@ class ExcelExporter:
             batch = all_missing_dois[start_idx:end_idx]
             
             if progress_container:
-                progress_container.text(f"  Пакет {batch_num + 1}/{total_batches}: {len(batch)} DOI")
+                progress_container.text(f"  Batch {batch_num + 1}/{total_batches}: {len(batch)} DOIs")
             
             try:
-                # Используем существующий doi_processor для обработки
+                # Use existing doi_processor for processing
                 batch_results = self.doi_processor._process_single_batch_with_retry(
                     batch, "retry_missing", None, True, True
                 )
                 
                 retry_results.update(batch_results)
                 
-                # Обновляем результаты
+                # Update results
                 for doi, result in batch_results.items():
                     if result.get('status') == 'success':
                         if doi in missing_ref_dois:
@@ -5955,12 +5994,12 @@ class ExcelExporter:
                             
             except Exception as e:
                 if progress_container:
-                    progress_container.text(f"    ❌ Ошибка в пакете {batch_num + 1}: {str(e)}")
+                    progress_container.text(f"    ❌ Error in batch {batch_num + 1}: {str(e)}")
                 continue
         
         if progress_container:
             success_count = sum(1 for r in retry_results.values() if r.get('status') == 'success')
-            progress_container.text(f"📊 Повторная обработка завершена: {success_count}/{total_missing} успешно")
+            progress_container.text(f"📊 Retry completed: {success_count}/{total_missing} successful")
         
         return retry_results
 
@@ -6192,7 +6231,7 @@ class ArticleAnalyzerSystem:
                 
                 # After completing analyzed, continue with reference
                 if progress_container:
-                    progress_container.text("📎 Собираем все ссылки из анализируемых статей...")
+                    progress_container.text("📎 Collecting all references from analyzed articles...")
                 
                 # Get all references
                 all_ref_lists = []
@@ -6203,13 +6242,13 @@ class ArticleAnalyzerSystem:
                             all_ref_lists.extend(refs)
                 
                 # Deduplicate references
-                unique_ref_dois = self.doi_processor.collect_and_deduplicate_dois(all_ref_lists, "ссылки")
+                unique_ref_dois = self.doi_processor.collect_and_deduplicate_dois(all_ref_lists, "references")
                 self.system_stats['total_ref_dois'] = len(unique_ref_dois)
                 
                 # Analyze only unique references
                 if unique_ref_dois:
                     if progress_container:
-                        progress_container.text(f"📎 Найдено {len(unique_ref_dois)} уникальных ссылок для анализа")
+                        progress_container.text(f"📎 Found {len(unique_ref_dois)} unique references to analyze")
                     
                     ref_dois_to_analyze = unique_ref_dois[:10000]
                     
@@ -6222,7 +6261,7 @@ class ArticleAnalyzerSystem:
                 
                 # After reference, continue with citing
                 if progress_container:
-                    progress_container.text("🔗 Собираем все цитирующие работы для анализируемых статей...")
+                    progress_container.text("🔗 Collecting all citing works for analyzed articles...")
     
                 # Get all citing works
                 all_cite_lists = []
@@ -6233,13 +6272,13 @@ class ArticleAnalyzerSystem:
                             all_cite_lists.extend(cites)
                 
                 # Deduplicate citing works
-                unique_cite_dois = self.doi_processor.collect_and_deduplicate_dois(all_cite_lists, "цитирующие работы")
+                unique_cite_dois = self.doi_processor.collect_and_deduplicate_dois(all_cite_lists, "citing works")
                 self.system_stats['total_cite_dois'] = len(unique_cite_dois)
                 
                 # Analyze only unique citing works
                 if unique_cite_dois:
                     if progress_container:
-                        progress_container.text(f"🔗 Найдено {len(unique_cite_dois)} уникальных цитирующих работ для анализа")
+                        progress_container.text(f"🔗 Found {len(unique_cite_dois)} unique citing works to analyze")
                     
                     cite_dois_to_analyze = unique_cite_dois[:10000]
                     
@@ -6259,7 +6298,7 @@ class ArticleAnalyzerSystem:
                 
                 # After completing reference, process citing
                 if progress_container:
-                    progress_container.text("🔗 Собираем все цитирующие работы для анализируемых статей...")
+                    progress_container.text("🔗 Collecting all citing works for analyzed articles...")
     
                 # Get all citing works
                 all_cite_lists = []
@@ -6270,13 +6309,13 @@ class ArticleAnalyzerSystem:
                             all_cite_lists.extend(cites)
                 
                 # Deduplicate citing works
-                unique_cite_dois = self.doi_processor.collect_and_deduplicate_dois(all_cite_lists, "цитирующие работы")
+                unique_cite_dois = self.doi_processor.collect_and_deduplicate_dois(all_cite_lists, "citing works")
                 self.system_stats['total_cite_dois'] = len(unique_cite_dois)
                 
                 # Analyze only unique citing works
                 if unique_cite_dois:
                     if progress_container:
-                        progress_container.text(f"🔗 Найдено {len(unique_cite_dois)} уникальных цитирующих работ для анализа")
+                        progress_container.text(f"🔗 Found {len(unique_cite_dois)} unique citing works to analyze")
                     
                     cite_dois_to_analyze = unique_cite_dois[:10000]
                     
@@ -6307,6 +6346,11 @@ class ArticleAnalyzerSystem:
                 dois, "analyzed", None, True, True, Config.BATCH_SIZE, progress_container, resume=False
             )
             
+            # SAVE STATE AFTER ANALYZED
+            self.state_manager.save_to_session()
+            if progress_container:
+                progress_container.text(f"✅ Analyzed articles saved: {len(st.session_state.analyzed_results)}")
+            
             # Update counters for analyzed articles
             for doi, result in st.session_state.analyzed_results.items():
                 if result.get('status') == 'success':
@@ -6318,7 +6362,7 @@ class ArticleAnalyzerSystem:
     
             # Step 2: Process references
             if progress_container:
-                progress_container.text("📎 Собираем все ссылки из анализируемых статей...")
+                progress_container.text("📎 Collecting all references from analyzed articles...")
     
             all_ref_lists = []
             for doi, result in st.session_state.analyzed_results.items():
@@ -6327,12 +6371,12 @@ class ArticleAnalyzerSystem:
                     if refs:
                         all_ref_lists.extend(refs)
             
-            unique_ref_dois = self.doi_processor.collect_and_deduplicate_dois(all_ref_lists, "ссылки")
+            unique_ref_dois = self.doi_processor.collect_and_deduplicate_dois(all_ref_lists, "references")
             self.system_stats['total_ref_dois'] = len(unique_ref_dois)
             
             if unique_ref_dois:
                 if progress_container:
-                    progress_container.text(f"📎 Найдено {len(unique_ref_dois)} уникальных ссылок для анализа")
+                    progress_container.text(f"📎 Found {len(unique_ref_dois)} unique references to analyze")
                 
                 ref_dois_to_analyze = unique_ref_dois[:10000]
                 
@@ -6340,6 +6384,11 @@ class ArticleAnalyzerSystem:
                     ref_dois_to_analyze, "ref", None, True, True, Config.BATCH_SIZE, 
                     progress_container, resume=False
                 )
+                
+                # SAVE STATE AFTER REFERENCES
+                self.state_manager.save_to_session()
+                if progress_container:
+                    progress_container.text(f"✅ Reference articles saved: {len(st.session_state.ref_results)}")
                 
                 # Update counters for reference articles
                 for doi, result in st.session_state.ref_results.items():
@@ -6351,49 +6400,53 @@ class ArticleAnalyzerSystem:
                         )
             else:
                 if progress_container:
-                    progress_container.text("📎 Ссылки не найдены")
+                    progress_container.text("📎 No references found")
                 st.session_state.ref_results = {}
-
-            # Step 3: Process citing works - с защитой от таймаутов
+    
+            # Step 3: Process citing works - WITH CRITICAL PROTECTION
             if progress_container:
-                progress_container.text("🔗 Собираем все цитирующие работы для анализируемых статей...")
-            
+                progress_container.text("🔗 Collecting all citing works for analyzed articles...")
+                progress_container.text("⚠️ This may take several minutes for articles with many citations...")
+    
             all_cite_lists = []
             for doi, result in st.session_state.analyzed_results.items():
                 if result.get('status') == 'success':
-                    # FIX: Use 'citations' key (plural)
                     cites = result.get('citations', [])
                     if cites and isinstance(cites, list):
                         all_cite_lists.extend(cites)
             
-            # ДОБАВИТЬ: Проверка на пустой список
+            # CHECK IF ANY CITING WORKS EXIST
             if not all_cite_lists:
                 if progress_container:
-                    progress_container.text("🔗 Цитирующие работы не найдены")
+                    progress_container.text("🔗 No citing works found")
                 st.session_state.citing_results = {}
             else:
-                unique_cite_dois = self.doi_processor.collect_and_deduplicate_dois(all_cite_lists, "цитирующие работы")
+                unique_cite_dois = self.doi_processor.collect_and_deduplicate_dois(all_cite_lists, "citing works")
                 self.system_stats['total_cite_dois'] = len(unique_cite_dois)
                 
                 if unique_cite_dois:
                     if progress_container:
-                        progress_container.text(f"🔗 Найдено {len(unique_cite_dois)} уникальных цитирующих работ для анализа")
-                        progress_container.text(f"🔗 Начинаем анализ цитирующих работ...")
+                        progress_container.text(f"🔗 Found {len(unique_cite_dois)} unique citing works to analyze")
+                        progress_container.text(f"🔗 Starting citing works analysis...")
                     
-                    # ДОБАВИТЬ: Ограничение на количество цитат для анализа (можно увеличить при необходимости)
                     cite_dois_to_analyze = unique_cite_dois[:10000]
                     
-                    # ДОБАВИТЬ: Защита от таймаутов с try-except
+                    # CRITICAL FIX: Wrap in try-except to prevent state loss
                     try:
-                        # Process citing works с увеличенным таймаутом
                         st.session_state.citing_results = self.doi_processor.process_doi_batch_with_resume(
                             cite_dois_to_analyze, "citing", None, True, True, Config.BATCH_SIZE, 
                             progress_container, resume=False
                         )
+                        
+                        # SAVE STATE AFTER CITING WORKS
+                        self.state_manager.save_to_session()
+                        if progress_container:
+                            progress_container.text(f"✅ Citing articles saved: {len(st.session_state.citing_results)}")
+                        
                     except Exception as e:
                         if progress_container:
-                            progress_container.error(f"❌ Ошибка при анализе цитирующих работ: {str(e)}")
-                            progress_container.text("⚠️ Продолжаем с имеющимися данными...")
+                            progress_container.error(f"❌ Error processing citing works: {str(e)}")
+                            progress_container.text("⚠️ Continuing with available data...")
                         st.session_state.citing_results = {}
                     
                     # Update counters for citing articles
@@ -6406,10 +6459,10 @@ class ArticleAnalyzerSystem:
                             )
                     
                     if progress_container:
-                        progress_container.success(f"✅ Анализ цитирующих работ завершен")
+                        progress_container.success(f"✅ Citing works analysis completed")
                 else:
                     if progress_container:
-                        progress_container.text("🔗 Цитирующие работы не найдены")
+                        progress_container.text("🔗 No unique citing works found")
                     st.session_state.citing_results = {}
     
         # Retry failed DOI
@@ -6436,11 +6489,16 @@ class ArticleAnalyzerSystem:
         successful = sum(1 for r in st.session_state.analyzed_results.values() if r.get('status') == 'success')
         failed = len(dois) - successful
     
+        # CRITICAL FIX: Mark completion WITHOUT immediate rerun
         st.session_state.processing_complete = True
         
-        # Force refresh to show results
-        st.rerun()
-    
+        # Save final state
+        self.state_manager.save_to_session()
+        
+        # CRITICAL FIX: Return results without calling st.rerun()
+        # The rerun will happen naturally when Streamlit detects state changes
+        # DO NOT call st.rerun() here
+        
         return {
             'processing_time': processing_time,
             'successful': successful,
