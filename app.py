@@ -6724,15 +6724,21 @@ def main():
     
     with col4:
         # Check multiple conditions for button activation
-        has_analyzed = hasattr(st.session_state, 'analyzed_results') and st.session_state.analyzed_results
-        has_ref = hasattr(st.session_state, 'ref_results') and st.session_state.ref_results
-        has_citing = hasattr(st.session_state, 'citing_results') and st.session_state.citing_results
-        has_any_data = has_analyzed or has_ref or has_citing
+        has_analyzed = hasattr(st.session_state, 'analyzed_results') and st.session_state.analyzed_results and len(st.session_state.analyzed_results) > 0
+        has_ref = hasattr(st.session_state, 'ref_results') and st.session_state.ref_results and len(st.session_state.ref_results) > 0
+        has_citing = hasattr(st.session_state, 'citing_results') and st.session_state.citing_results and len(st.session_state.citing_results) > 0
+        
+        # Также проверяем наличие успешных результатов
+        has_successful_analyzed = False
+        if has_analyzed:
+            has_successful_analyzed = any(r.get('status') == 'success' for r in st.session_state.analyzed_results.values())
+        
+        has_any_data = (has_analyzed and has_successful_analyzed) or has_ref or has_citing
         
         export_disabled = not has_any_data
         
         export_btn = st.button("💾 Export Excel", 
-                             type="secondary", 
+                             type="primary" if not export_disabled else "secondary", 
                              use_container_width=True,
                              disabled=export_disabled)
     
@@ -6920,45 +6926,53 @@ def main():
         st.success("✅ All data and caches cleared")
         st.rerun()
     
-    if export_btn and hasattr(st.session_state, 'analyzed_results') and st.session_state.analyzed_results:
-
-        with st.spinner("📊 Creating Excel report..."):
-            try:
-                # Create report
-                excel_file = system.create_excel_report()
-                
-                # Create filename
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"articles_analysis_{timestamp}.xlsx"
-                
-                # Show file info
-                st.success(f"✅ Excel report created: {filename}")
-                
-                # Provide file for download
-                st.download_button(
-                    label="⬇️ Download Excel file",
-                    data=excel_file,
-                    file_name=filename,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    type="primary"
-                )
-                
-                # Show report statistics
-                with st.expander("📋 Report Contents"):
-                    analyzed_count = len([r for r in st.session_state.analyzed_results.values() 
-                                         if r.get('status') == 'success'])
-                    ref_count = len([r for r in st.session_state.ref_results.values() 
-                                    if r.get('status') == 'success'])
-                    citing_count = len([r for r in st.session_state.citing_results.values() 
-                                       if r.get('status') == 'success'])
-                    
-                    st.write(f"• Analyzed articles: {analyzed_count}")
-                    st.write(f"• Reference articles: {ref_count}")
-                    st.write(f"• Citing articles: {citing_count}")
-                    st.write(f"• Total articles: {analyzed_count + ref_count + citing_count}")
-                    
-            except Exception as e:
-                st.error(f"❌ Report creation error: {str(e)}")
+    if export_btn:
+        # Дополнительная проверка наличия данных
+        if not hasattr(st.session_state, 'analyzed_results') or not st.session_state.analyzed_results:
+            st.warning("⚠️ No analyzed results available for export")
+        else:
+            # Проверяем наличие успешных результатов
+            has_successful = any(r.get('status') == 'success' for r in st.session_state.analyzed_results.values())
+            if not has_successful:
+                st.warning("⚠️ No successful results available for export")
+            else:
+                with st.spinner("📊 Creating Excel report..."):
+                    try:
+                        # Create report
+                        excel_file = system.create_excel_report()
+                        
+                        # Create filename
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        filename = f"articles_analysis_{timestamp}.xlsx"
+                        
+                        # Show file info
+                        st.success(f"✅ Excel report created: {filename}")
+                        
+                        # Provide file for download
+                        st.download_button(
+                            label="⬇️ Download Excel file",
+                            data=excel_file,
+                            file_name=filename,
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            type="primary"
+                        )
+                        
+                        # Show report statistics
+                        with st.expander("📋 Report Contents"):
+                            analyzed_count = len([r for r in st.session_state.analyzed_results.values() 
+                                                 if r.get('status') == 'success'])
+                            ref_count = len([r for r in st.session_state.ref_results.values() 
+                                            if r.get('status') == 'success'])
+                            citing_count = len([r for r in st.session_state.citing_results.values() 
+                                               if r.get('status') == 'success'])
+                            
+                            st.write(f"• Analyzed articles: {analyzed_count}")
+                            st.write(f"• Reference articles: {ref_count}")
+                            st.write(f"• Citing articles: {citing_count}")
+                            st.write(f"• Total articles: {analyzed_count + ref_count + citing_count}")
+                            
+                    except Exception as e:
+                        st.error(f"❌ Report creation error: {str(e)}")
     
     # Show statistics if there is processed data
     if st.session_state.processing_complete:
