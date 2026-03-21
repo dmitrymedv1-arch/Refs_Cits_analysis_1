@@ -6591,7 +6591,7 @@ class ArticleAnalyzerSystem:
 
 def main():
     # Application header
-    col1, col2, col3 = st.columns([1, 2, 4])
+    col1, col2, col3 = st.columns([1, 2, 6])
     with col2:
         st.image("logo.png", use_container_width=50)
     st.markdown("""
