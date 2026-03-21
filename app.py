@@ -1494,10 +1494,10 @@ class OpenAlexClient(APIClient):
             cursor = "*"
             page_num = 1
             max_retries = 3
-            max_pages = 50  # Limit to 50 pages (10,000 citations) to prevent infinite loops
+            max_pages = 50  # Limit to 50 pages (10,000 citations)
             total_collected = 0
             
-            # Create a new session for each article to avoid connection issues
+            # Use a new session for each article to avoid connection issues
             with requests.Session() as session:
                 session.headers.update({
                     'User-Agent': 'ArticleAnalyzer/3.0 (colab-user@example.com)',
@@ -1506,6 +1506,7 @@ class OpenAlexClient(APIClient):
                 })
                 
                 while cursor and page_num <= max_pages:
+                    success = False
                     for attempt in range(max_retries):
                         try:
                             url = f"https://api.openalex.org/works?filter=cites:{article_id}&per-page=200&cursor={cursor}"
@@ -1552,17 +1553,19 @@ class OpenAlexClient(APIClient):
                                 else:
                                     cursor = None
     
+                                success = True
                                 break  # Success, exit retry loop
     
                             elif response.status_code == 429:
                                 self.delay.update_delay(False, response_time)
-                                wait_time = 2 ** (attempt + 1)  # Exponential backoff
+                                wait_time = min(2 ** attempt, 5)  # Exponential backoff capped at 5 seconds
                                 time.sleep(wait_time)
                                 continue
     
                             elif response.status_code == 404:
                                 # Article not found
                                 cursor = None
+                                success = True
                                 break
     
                             else:
@@ -1587,7 +1590,8 @@ class OpenAlexClient(APIClient):
                             else:
                                 break
     
-                    else:  # All retries exhausted
+                    if not success:
+                        # If all retries failed, stop pagination
                         break
             
             # Remove duplicates and save to cache
@@ -5889,7 +5893,7 @@ class ExcelExporter:
             if ref_doi not in self.ref_results:
                 missing_ref_dois.append(ref_doi)
             elif isinstance(self.ref_results[ref_doi], dict) and self.ref_results[ref_doi].get('status') != 'success':
-                missing_ref_dois.append(ref_doi)  # Добавляем также неудачно обработанные
+                missing_ref_dois.append(ref_doi)
         
         missing_cite_dois = []
         for analyzed_list in self.analyzed_to_citing.values():
@@ -5897,9 +5901,8 @@ class ExcelExporter:
                 if cite_doi not in self.citing_results:
                     missing_cite_dois.append(cite_doi)
                 elif isinstance(self.citing_results[cite_doi], dict) and self.citing_results[cite_doi].get('status') != 'success':
-                    missing_cite_dois.append(cite_doi)  # Добавляем также неудачно обработанные
+                    missing_cite_dois.append(cite_doi)
         
-        # Убираем дубликаты
         missing_ref_dois = list(set(missing_ref_dois))
         missing_cite_dois = list(set(missing_cite_dois))
         
@@ -5916,11 +5919,14 @@ class ExcelExporter:
         # Объединяем все DOI
         all_missing_dois = missing_ref_dois + missing_cite_dois
         
-        # Обрабатываем с улучшенными параметрами
-        batch_size = 30  # Меньший размер пакета для стабильности
-        max_retries_per_doi = 2  # Количество попыток на каждый DOI
-        base_delay = 0.5  # Увеличенная базовая задержка для стабильности API
+        # ИСПРАВЛЕНИЕ: Используем существующий doi_processor вместо создания новых клиентов
+        if not self.doi_processor:
+            if progress_container:
+                progress_container.text("⚠️ DOI processor not available for retry")
+            return retry_results
         
+        # Обрабатываем с улучшенными параметрами
+        batch_size = 30
         total_batches = (len(all_missing_dois) + batch_size - 1) // batch_size
         
         for batch_num in range(total_batches):
@@ -5931,100 +5937,30 @@ class ExcelExporter:
             if progress_container:
                 progress_container.text(f"  Пакет {batch_num + 1}/{total_batches}: {len(batch)} DOI")
             
-            # Пробуем обработать каждый DOI в пакете
-            for doi in batch:
-                result = None
+            try:
+                # Используем существующий doi_processor для обработки
+                batch_results = self.doi_processor._process_single_batch_with_retry(
+                    batch, "retry_missing", None, True, True
+                )
                 
-                # Делаем несколько попыток для каждого DOI
-                for attempt in range(max_retries_per_doi):
-                    try:
-                        # Импортируем здесь, чтобы избежать циклических зависимостей
-                        from your_module import CrossrefClient, OpenAlexClient, DataProcessor, SmartCacheManager, AdaptiveDelayManager
-                        
-                        # Создаем отдельный кэш-менеджер для повторной обработки
-                        retry_cache = SmartCacheManager(cache_dir=os.path.join(Config.CACHE_DIR, "retry_cache"))
-                        retry_delay = AdaptiveDelayManager(initial_delay=base_delay)
-                        
-                        # Ограничиваем максимальную задержку, чтобы не было экспоненциального роста
-                        retry_delay.max_delay = 1.5  # Максимум 1.5 секунды
-                        retry_delay.min_delay = 0.3  # Минимум 0.3 секунды
-                        
-                        # Создаем клиенты с увеличенным таймаутом
-                        crossref_client = CrossrefClient(retry_cache, retry_delay)
-                        openalex_client = OpenAlexClient(retry_cache, retry_delay)
-                        
-                        # Увеличиваем таймауты для повторных попыток
-                        crossref_client.session.timeout = 15
-                        openalex_client.session.timeout = 15
-                        
-                        data_processor = DataProcessor(retry_cache)
-                        
-                        # Ждем перед запросом (но не экспоненциально)
-                        time.sleep(retry_delay.get_delay())
-                        
-                        # Получаем данные
-                        crossref_data = crossref_client.fetch_article(doi)
-                        openalex_data = openalex_client.fetch_article(doi)
-                        
-                        # Проверяем на ошибки
-                        if isinstance(crossref_data, dict) and 'error' in crossref_data:
-                            error_msg = crossref_data.get('error', 'Unknown Crossref error')
-                            if '429' in error_msg or 'Rate limit' in error_msg:
-                                time.sleep(2)  # Большая пауза при лимите запросов
-                                continue
-                        
-                        if isinstance(openalex_data, dict) and 'error' in openalex_data:
-                            error_msg = openalex_data.get('error', 'Unknown OpenAlex error')
-                            if '429' in error_msg or 'Rate limit' in error_msg:
-                                time.sleep(2)  # Большая пауза при лимите запросов
-                                continue
-                        
-                        # Извлекаем информацию
-                        refs = []
-                        cites = []
-                        
-                        if isinstance(crossref_data, dict) and 'message' in crossref_data:
-                            try:
-                                refs = crossref_client.fetch_references(doi)
-                            except:
-                                refs = []
-                        
-                        if isinstance(openalex_data, dict):
-                            try:
-                                # Для ссылок используем ограниченную выборку
-                                cites = openalex_client.fetch_citations(doi, max_pages=1)
-                            except:
-                                cites = []
-                        
-                        # Обрабатываем данные
-                        result = data_processor.extract_article_info(
-                            crossref_data, openalex_data, doi, refs, cites
-                        )
-                        
-                        if result.get('status') == 'success':
-                            retry_results[doi] = result
-                            break  # Успех, выходим из попыток
-                        else:
-                            # Неудача, ждем немного и пробуем снова
-                            time.sleep(0.5)
+                retry_results.update(batch_results)
+                
+                # Обновляем результаты
+                for doi, result in batch_results.items():
+                    if result.get('status') == 'success':
+                        if doi in missing_ref_dois:
+                            self.ref_results[doi] = result
+                        if doi in missing_cite_dois:
+                            self.citing_results[doi] = result
                             
-                    except Exception as e:
-                        # Логируем ошибку, но продолжаем
-                        if attempt < max_retries_per_doi - 1:
-                            time.sleep(1)  # Ждем перед следующей попыткой
-                        continue
-                
-                # Если обработали успешно, добавляем в соответствующие результаты
-                if result and result.get('status') == 'success':
-                    if doi in missing_ref_dois:
-                        self.ref_results[doi] = result
-                    if doi in missing_cite_dois:
-                        self.citing_results[doi] = result
+            except Exception as e:
+                if progress_container:
+                    progress_container.text(f"    ❌ Ошибка в пакете {batch_num + 1}: {str(e)}")
+                continue
         
-        # Статистика
         if progress_container:
             success_count = sum(1 for r in retry_results.values() if r.get('status') == 'success')
-            progress_container.text(f"📊 Агрессивная повторная обработка завершена: {success_count}/{total_missing} успешно")
+            progress_container.text(f"📊 Повторная обработка завершена: {success_count}/{total_missing} успешно")
         
         return retry_results
 
@@ -6417,50 +6353,64 @@ class ArticleAnalyzerSystem:
                 if progress_container:
                     progress_container.text("📎 Ссылки не найдены")
                 st.session_state.ref_results = {}
-    
-            # Step 3: Process citing works - IMPORTANT: Always execute this step
+
+            # Step 3: Process citing works - с защитой от таймаутов
             if progress_container:
                 progress_container.text("🔗 Собираем все цитирующие работы для анализируемых статей...")
-    
+            
             all_cite_lists = []
             for doi, result in st.session_state.analyzed_results.items():
                 if result.get('status') == 'success':
                     # FIX: Use 'citations' key (plural)
                     cites = result.get('citations', [])
-                    if cites:
+                    if cites and isinstance(cites, list):
                         all_cite_lists.extend(cites)
             
-            unique_cite_dois = self.doi_processor.collect_and_deduplicate_dois(all_cite_lists, "цитирующие работы")
-            self.system_stats['total_cite_dois'] = len(unique_cite_dois)
-            
-            if unique_cite_dois:
-                if progress_container:
-                    progress_container.text(f"🔗 Найдено {len(unique_cite_dois)} уникальных цитирующих работ для анализа")
-                    progress_container.text(f"🔗 Начинаем анализ цитирующих работ...")
-                
-                cite_dois_to_analyze = unique_cite_dois[:10000]
-                
-                # Process citing works
-                st.session_state.citing_results = self.doi_processor.process_doi_batch_with_resume(
-                    cite_dois_to_analyze, "citing", None, True, True, Config.BATCH_SIZE, 
-                    progress_container, resume=False
-                )
-                
-                # Update counters for citing articles
-                for doi, result in st.session_state.citing_results.items():
-                    if result.get('status') == 'success':
-                        self.excel_exporter.update_counters(
-                            result.get('references', []),
-                            result.get('citations', []),
-                            "citing"
-                        )
-                
-                if progress_container:
-                    progress_container.success(f"✅ Анализ цитирующих работ завершен")
-            else:
+            # ДОБАВИТЬ: Проверка на пустой список
+            if not all_cite_lists:
                 if progress_container:
                     progress_container.text("🔗 Цитирующие работы не найдены")
                 st.session_state.citing_results = {}
+            else:
+                unique_cite_dois = self.doi_processor.collect_and_deduplicate_dois(all_cite_lists, "цитирующие работы")
+                self.system_stats['total_cite_dois'] = len(unique_cite_dois)
+                
+                if unique_cite_dois:
+                    if progress_container:
+                        progress_container.text(f"🔗 Найдено {len(unique_cite_dois)} уникальных цитирующих работ для анализа")
+                        progress_container.text(f"🔗 Начинаем анализ цитирующих работ...")
+                    
+                    # ДОБАВИТЬ: Ограничение на количество цитат для анализа (можно увеличить при необходимости)
+                    cite_dois_to_analyze = unique_cite_dois[:10000]
+                    
+                    # ДОБАВИТЬ: Защита от таймаутов с try-except
+                    try:
+                        # Process citing works с увеличенным таймаутом
+                        st.session_state.citing_results = self.doi_processor.process_doi_batch_with_resume(
+                            cite_dois_to_analyze, "citing", None, True, True, Config.BATCH_SIZE, 
+                            progress_container, resume=False
+                        )
+                    except Exception as e:
+                        if progress_container:
+                            progress_container.error(f"❌ Ошибка при анализе цитирующих работ: {str(e)}")
+                            progress_container.text("⚠️ Продолжаем с имеющимися данными...")
+                        st.session_state.citing_results = {}
+                    
+                    # Update counters for citing articles
+                    for doi, result in st.session_state.citing_results.items():
+                        if result.get('status') == 'success':
+                            self.excel_exporter.update_counters(
+                                result.get('references', []),
+                                result.get('citations', []),
+                                "citing"
+                            )
+                    
+                    if progress_container:
+                        progress_container.success(f"✅ Анализ цитирующих работ завершен")
+                else:
+                    if progress_container:
+                        progress_container.text("🔗 Цитирующие работы не найдены")
+                    st.session_state.citing_results = {}
     
         # Retry failed DOI
         failed_stats = self.failed_tracker.get_stats()
