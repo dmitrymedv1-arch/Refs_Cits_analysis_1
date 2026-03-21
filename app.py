@@ -6169,7 +6169,7 @@ class ArticleAnalyzerSystem:
         
         # Helper function to safely process batch with error handling
         def safe_process_batch(dois_to_process: List[str], source_type: str, 
-                              progress_container, resume_mode: bool = False) -> Dict[str, Dict]:
+                              progress_container) -> Dict[str, Dict]:
             """Safely process a batch of DOI with error handling"""
             if not dois_to_process:
                 return {}
@@ -6178,9 +6178,10 @@ class ArticleAnalyzerSystem:
                 if progress_container:
                     progress_container.text(f"🔄 Processing {len(dois_to_process)} {source_type} articles...")
                 
+                # Передаем resume=False для обычной обработки, resume=True будет обрабатываться отдельно
                 results = self.doi_processor.process_doi_batch_with_resume(
                     dois_to_process, source_type, None, True, True, Config.BATCH_SIZE,
-                    progress_container, resume=resume_mode
+                    progress_container, resume=False
                 )
                 
                 # Validate results
@@ -6233,7 +6234,7 @@ class ArticleAnalyzerSystem:
             if stage == "analyzed":
                 # Continue processing analyzed articles
                 st.session_state.analyzed_results = safe_process_batch(
-                    remaining_dois, "analyzed", progress_container, resume=True
+                    remaining_dois, "analyzed", progress_container
                 )
                 
                 # After analyzed, process references
@@ -6245,7 +6246,7 @@ class ArticleAnalyzerSystem:
                 if unique_ref_dois:
                     ref_dois_to_analyze = unique_ref_dois[:10000]
                     st.session_state.ref_results = safe_process_batch(
-                        ref_dois_to_analyze, "ref", progress_container, resume=False
+                        ref_dois_to_analyze, "ref", progress_container
                     )
                 
                 # Process citations
@@ -6257,7 +6258,7 @@ class ArticleAnalyzerSystem:
                 if unique_cite_dois:
                     cite_dois_to_analyze = unique_cite_dois[:10000]
                     st.session_state.citing_results = safe_process_batch(
-                        cite_dois_to_analyze, "citing", progress_container, resume=False
+                        cite_dois_to_analyze, "citing", progress_container
                     )
                     
             elif stage == "ref":
