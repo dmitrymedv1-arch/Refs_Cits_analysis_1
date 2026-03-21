@@ -6281,16 +6281,17 @@ class ArticleAnalyzerSystem:
                         ref_dois_to_analyze, "ref", None, True, True, Config.BATCH_SIZE,
                         progress_container, resume=False
                     )
+                else:
+                    st.session_state.ref_results = {}
                 
-                # Continue with citing - FIXED VERSION
+                # After reference, continue with citing
                 if progress_container:
                     progress_container.text("🔗 Собираем все цитирующие работы для анализируемых статей...")
     
-                # Get all citing works - FIXED: use 'citations' (plural) not 'citation'
+                # Get all citing works
                 all_cite_lists = []
                 for doi, result in st.session_state.analyzed_results.items():
                     if result.get('status') == 'success':
-                        # FIX: correct key is 'citations' (plural)
                         cites = result.get('citations', [])
                         if cites:
                             all_cite_lists.extend(cites)
@@ -6310,6 +6311,8 @@ class ArticleAnalyzerSystem:
                         cite_dois_to_analyze, "citing", None, True, True, Config.BATCH_SIZE,
                         progress_container, resume=False
                     )
+                else:
+                    st.session_state.citing_results = {}
                     
             elif stage == "ref":
                 # Continue processing reference articles
@@ -6318,15 +6321,14 @@ class ArticleAnalyzerSystem:
                     progress_container, resume=True
                 )
                 
-                # After completing reference, process citing - FIXED VERSION
+                # After completing reference, process citing
                 if progress_container:
                     progress_container.text("🔗 Собираем все цитирующие работы для анализируемых статей...")
     
-                # Get all citing works - FIXED: use 'citations' (plural) not 'citation'
+                # Get all citing works
                 all_cite_lists = []
                 for doi, result in st.session_state.analyzed_results.items():
                     if result.get('status') == 'success':
-                        # FIX: correct key is 'citations' (plural)
                         cites = result.get('citations', [])
                         if cites:
                             all_cite_lists.extend(cites)
@@ -6346,6 +6348,8 @@ class ArticleAnalyzerSystem:
                         cite_dois_to_analyze, "citing", None, True, True, Config.BATCH_SIZE,
                         progress_container, resume=False
                     )
+                else:
+                    st.session_state.citing_results = {}
                     
             elif stage == "citing":
                 # Continue processing citing articles
@@ -6362,12 +6366,12 @@ class ArticleAnalyzerSystem:
             if progress_container:
                 progress_container.text("📚 Processing original DOI...")
     
-            # Process original DOI
+            # Step 1: Process original DOI
             st.session_state.analyzed_results = self.doi_processor.process_doi_batch_with_resume(
                 dois, "analyzed", None, True, True, Config.BATCH_SIZE, progress_container, resume=False
             )
-    
-            # Update counters
+            
+            # Update counters for analyzed articles
             for doi, result in st.session_state.analyzed_results.items():
                 if result.get('status') == 'success':
                     self.excel_exporter.update_counters(
@@ -6376,7 +6380,7 @@ class ArticleAnalyzerSystem:
                         "analyzed"
                     )
     
-            # Get all references
+            # Step 2: Process references
             if progress_container:
                 progress_container.text("📎 Собираем все ссылки из анализируемых статей...")
     
@@ -6387,11 +6391,9 @@ class ArticleAnalyzerSystem:
                     if refs:
                         all_ref_lists.extend(refs)
             
-            # Deduplicate references
             unique_ref_dois = self.doi_processor.collect_and_deduplicate_dois(all_ref_lists, "ссылки")
             self.system_stats['total_ref_dois'] = len(unique_ref_dois)
             
-            # Analyze only unique references
             if unique_ref_dois:
                 if progress_container:
                     progress_container.text(f"📎 Найдено {len(unique_ref_dois)} уникальных ссылок для анализа")
@@ -6399,9 +6401,11 @@ class ArticleAnalyzerSystem:
                 ref_dois_to_analyze = unique_ref_dois[:10000]
                 
                 st.session_state.ref_results = self.doi_processor.process_doi_batch_with_resume(
-                    ref_dois_to_analyze, "ref", None, True, True, Config.BATCH_SIZE, progress_container, resume=False
+                    ref_dois_to_analyze, "ref", None, True, True, Config.BATCH_SIZE, 
+                    progress_container, resume=False
                 )
                 
+                # Update counters for reference articles
                 for doi, result in st.session_state.ref_results.items():
                     if result.get('status') == 'success':
                         self.excel_exporter.update_counters(
@@ -6409,35 +6413,40 @@ class ArticleAnalyzerSystem:
                             result.get('citations', []),
                             "ref"
                         )
+            else:
+                if progress_container:
+                    progress_container.text("📎 Ссылки не найдены")
+                st.session_state.ref_results = {}
     
-            # Get all citing works - FIXED VERSION
+            # Step 3: Process citing works - IMPORTANT: Always execute this step
             if progress_container:
                 progress_container.text("🔗 Собираем все цитирующие работы для анализируемых статей...")
     
-            # FIX: collect citing works correctly
             all_cite_lists = []
             for doi, result in st.session_state.analyzed_results.items():
                 if result.get('status') == 'success':
-                    # FIX: correct key is 'citations' (plural)
+                    # FIX: Use 'citations' key (plural)
                     cites = result.get('citations', [])
                     if cites:
                         all_cite_lists.extend(cites)
             
-            # Deduplicate citing works
             unique_cite_dois = self.doi_processor.collect_and_deduplicate_dois(all_cite_lists, "цитирующие работы")
             self.system_stats['total_cite_dois'] = len(unique_cite_dois)
             
-            # Analyze only unique citing works
             if unique_cite_dois:
                 if progress_container:
                     progress_container.text(f"🔗 Найдено {len(unique_cite_dois)} уникальных цитирующих работ для анализа")
+                    progress_container.text(f"🔗 Начинаем анализ цитирующих работ...")
                 
                 cite_dois_to_analyze = unique_cite_dois[:10000]
                 
+                # Process citing works
                 st.session_state.citing_results = self.doi_processor.process_doi_batch_with_resume(
-                    cite_dois_to_analyze, "citing", None, True, True, Config.BATCH_SIZE, progress_container, resume=False
+                    cite_dois_to_analyze, "citing", None, True, True, Config.BATCH_SIZE, 
+                    progress_container, resume=False
                 )
                 
+                # Update counters for citing articles
                 for doi, result in st.session_state.citing_results.items():
                     if result.get('status') == 'success':
                         self.excel_exporter.update_counters(
@@ -6445,6 +6454,13 @@ class ArticleAnalyzerSystem:
                             result.get('citations', []),
                             "citing"
                         )
+                
+                if progress_container:
+                    progress_container.success(f"✅ Анализ цитирующих работ завершен")
+            else:
+                if progress_container:
+                    progress_container.text("🔗 Цитирующие работы не найдены")
+                st.session_state.citing_results = {}
     
         # Retry failed DOI
         failed_stats = self.failed_tracker.get_stats()
@@ -6471,6 +6487,8 @@ class ArticleAnalyzerSystem:
         failed = len(dois) - successful
     
         st.session_state.processing_complete = True
+        
+        # Force refresh to show results
         st.rerun()
     
         return {
