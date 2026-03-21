@@ -1449,113 +1449,162 @@ class OpenAlexClient(APIClient):
         clean_doi = self._clean_doi(doi)
         if not clean_doi:
             return []
-
+    
         # Check cache for full citations
         cache_key = f"full_citations:{clean_doi}"
         cached_result = self.cache.get("full_citations", cache_key)
         if cached_result is not None:
             return cached_result
-
+    
         try:
             # First get work_id from DOI
             article_data = self.fetch_article(clean_doi)
+            
+            # Check if article_data is valid
+            if not isinstance(article_data, dict):
+                return []
+                
             if 'error' in article_data:
                 return []
-
-            article_id = article_data.get('id', '').split('/')[-1]
+            
+            # Try to get work ID from different possible structures
+            article_id = None
+            
+            # Try direct id field
+            if 'id' in article_data:
+                article_id = article_data.get('id', '').split('/')[-1]
+            
+            # Try alternative structure
+            if not article_id and 'doi' in article_data:
+                # Try to get through OpenAlex API
+                url = f"https://api.openalex.org/works/https://doi.org/{clean_doi}"
+                try:
+                    response = self.session.get(url, timeout=10)
+                    if response.status_code == 200:
+                        data = response.json()
+                        if 'id' in data:
+                            article_id = data['id'].split('/')[-1]
+                except:
+                    pass
+            
             if not article_id:
                 return []
-
+    
             all_citing_dois = []
             cursor = "*"
             page_num = 1
             max_retries = 3
+            max_pages = 50  # Limit to 50 pages (10,000 citations) to prevent infinite loops
             total_collected = 0
-
-            while cursor:
-                for attempt in range(max_retries):
-                    try:
-                        url = f"{self.works_url}?filter=cites:{article_id}&per-page=200&cursor={cursor}"
-                        self.delay.wait_if_needed()
-
-                        start_time = time.time()
-                        response = self.session.get(url, timeout=45)
-                        response_time = time.time() - start_time
-
-                        if response.status_code == 200:
-                            self.delay.update_delay(True, response_time)
-                            data = response.json()
-
-                            if not isinstance(data, dict):
-                                st.warning(f"⚠️ Invalid response format on page {page_num} for {clean_doi}")
-                                break
-
-                            works = data.get('results', [])
-
-                            if not works:
+            
+            # Create a new session for each article to avoid connection issues
+            with requests.Session() as session:
+                session.headers.update({
+                    'User-Agent': 'ArticleAnalyzer/3.0 (colab-user@example.com)',
+                    'Accept': 'application/json',
+                    'Accept-Encoding': 'gzip'
+                })
+                
+                while cursor and page_num <= max_pages:
+                    for attempt in range(max_retries):
+                        try:
+                            url = f"https://api.openalex.org/works?filter=cites:{article_id}&per-page=200&cursor={cursor}"
+                            
+                            # Wait before request
+                            self.delay.wait_if_needed()
+                            
+                            start_time = time.time()
+                            response = session.get(url, timeout=30)
+                            response_time = time.time() - start_time
+    
+                            if response.status_code == 200:
+                                self.delay.update_delay(True, response_time)
+                                data = response.json()
+    
+                                if not isinstance(data, dict):
+                                    break
+    
+                                works = data.get('results', [])
+                                
+                                if not works:
+                                    cursor = None
+                                    break
+    
+                                page_citing_dois = []
+                                for work in works:
+                                    if isinstance(work, dict) and work.get('doi'):
+                                        citing_doi = self._clean_doi(work['doi'])
+                                        if citing_doi:
+                                            page_citing_dois.append(citing_doi)
+    
+                                all_citing_dois.extend(page_citing_dois)
+                                total_collected += len(page_citing_dois)
+    
+                                # Get next cursor
+                                meta = data.get('meta', {})
+                                next_cursor = meta.get('next_cursor')
+    
+                                if next_cursor and next_cursor != cursor:
+                                    cursor = next_cursor
+                                    page_num += 1
+                                    # Add delay between pages to avoid rate limits
+                                    time.sleep(0.5)
+                                else:
+                                    cursor = None
+    
+                                break  # Success, exit retry loop
+    
+                            elif response.status_code == 429:
+                                self.delay.update_delay(False, response_time)
+                                wait_time = 2 ** (attempt + 1)  # Exponential backoff
+                                time.sleep(wait_time)
+                                continue
+    
+                            elif response.status_code == 404:
+                                # Article not found
                                 cursor = None
                                 break
-
-                            page_citing_dois = []
-                            for work in works:
-                                if isinstance(work, dict) and work.get('doi'):
-                                    citing_doi = self._clean_doi(work['doi'])
-                                    if citing_doi:
-                                        page_citing_dois.append(citing_doi)
-
-                            all_citing_dois.extend(page_citing_dois)
-                            total_collected += len(page_citing_dois)
-
-                            # Get next cursor
-                            meta = data.get('meta', {})
-                            next_cursor = meta.get('next_cursor')
-
-                            if next_cursor:
-                                cursor = next_cursor
-                                page_num += 1
-                                time.sleep(0.5)  # Pause between pages for rate limits
+    
                             else:
-                                cursor = None
-
-                            break  # Success, exit retry loop
-
-                        elif response.status_code == 429:
-                            self.delay.update_delay(False, response_time)
-                            wait_time = 2 ** (attempt + 1)  # Exponential backoff
-                            time.sleep(wait_time)
-                            continue
-
-                        elif response.status_code == 404:
-                            st.warning(f"⚠️ Article {clean_doi} not found in OpenAlex")
-                            cursor = None
-                            break
-
-                        else:
-                            self.delay.update_delay(False, response_time)
-                            time.sleep(5)
-                            continue
-
-                    except requests.exceptions.Timeout:
-                        time.sleep(5)
-                        continue
-
-                    except Exception as e:
-                        time.sleep(5)
-                        continue
-
-                else:  # All retries exhausted
-                    break
-
+                                self.delay.update_delay(False, response_time)
+                                if attempt < max_retries - 1:
+                                    time.sleep(2)
+                                    continue
+                                else:
+                                    break
+    
+                        except requests.exceptions.Timeout:
+                            if attempt < max_retries - 1:
+                                time.sleep(3)
+                                continue
+                            else:
+                                break
+                                
+                        except Exception as e:
+                            if attempt < max_retries - 1:
+                                time.sleep(2)
+                                continue
+                            else:
+                                break
+    
+                    else:  # All retries exhausted
+                        break
+            
             # Remove duplicates and save to cache
             unique_citing_dois = list(set(all_citing_dois))
-
+            
+            # Log for debugging
+            if len(unique_citing_dois) > 0:
+                print(f"Collected {len(unique_citing_dois)} citations for {clean_doi}")
+    
             # Save to cache with separate category for full citations
             self.cache.set("full_citations", cache_key, unique_citing_dois, category="full_citations_analyzed")
-
+            
             return unique_citing_dois
-
+    
         except Exception as e:
-            st.error(f"❌ Critical error collecting citations for {clean_doi}: {str(e)}")
+            # Log error but don't crash
+            print(f"Error collecting citations for {clean_doi}: {str(e)}")
             return []
 
     def _safe_get(self, data, *keys, default=''):
@@ -2739,7 +2788,7 @@ class OptimizedDOIProcessor:
 
     def _process_single_doi_optimized(self, doi: str, source_type: str,
                                      original_doi: str, fetch_refs: bool, fetch_cites: bool) -> Dict:
-
+    
         # Check if already processed in this session
         if source_type == 'analyzed' and doi in self.state_manager.analyzed_results:
             self.stats['session_state_hits'] += 1
@@ -2750,29 +2799,37 @@ class OptimizedDOIProcessor:
         elif source_type == 'citing' and doi in self.state_manager.citing_results:
             self.stats['session_state_hits'] += 1
             return self.state_manager.citing_results[doi]
-
+    
         cache_key = f"full_result:{doi}"
         cached_result = self.cache.get("full_analysis", cache_key)
-
+    
         if cached_result is not None:
             self.stats['cached_hits'] += 1
-            # Also save to session state for faster access
             self.state_manager.save_result(doi, cached_result, source_type)
             return cached_result
-
+    
         # Use cached API fetching
-        crossref_data, openalex_data = cached_fetch_article_data(
-            doi, self.crossref_client, self.openalex_client, self.state_manager
-        )
-
+        try:
+            crossref_data, openalex_data = cached_fetch_article_data(
+                doi, self.crossref_client, self.openalex_client, self.state_manager
+            )
+        except Exception as e:
+            error_msg = f"Failed to fetch article data: {str(e)}"
+            self._handle_processing_error(doi, error_msg, source_type, original_doi)
+            return {
+                'doi': doi,
+                'status': 'failed',
+                'error': error_msg
+            }
+    
         crossref_error = None
         openalex_error = None
-
+    
         if isinstance(crossref_data, dict):
             crossref_error = crossref_data.get('error')
         if isinstance(openalex_data, dict):
             openalex_error = openalex_data.get('error')
-
+    
         if crossref_error and openalex_error:
             error_msg = f"API errors: Crossref - {crossref_error}, OpenAlex - {openalex_error}"
             self._handle_processing_error(doi, error_msg, source_type, original_doi)
@@ -2781,72 +2838,94 @@ class OptimizedDOIProcessor:
                 'status': 'failed',
                 'error': error_msg
             }
-
+    
         crossref_data = crossref_data if isinstance(crossref_data, dict) else {}
         openalex_data = openalex_data if isinstance(openalex_data, dict) else {}
-
+    
         references = []
         try:
             # Use cached references fetching
             refs = cached_get_references(doi, self.crossref_client, self.state_manager)
             references = refs if isinstance(refs, list) else []
-
+    
             if references:
                 self.reference_relationships[doi] = references
         except Exception as e:
             st.warning(f"⚠️ Error fetching references for {doi}: {e}")
-
+    
         citations = []
         try:
             # Use cached citing works fetching
             # IMPORTANT CHANGE: Different citation collection logic depending on article type
             if source_type == "analyzed":
                 # For analyzed articles: collect ALL citations through new logic
-                cites_openalex = cached_get_citing_works(doi, self.openalex_client, source_type, self.state_manager)
-
+                # Add timeout protection
+                cites_openalex = []
+                try:
+                    cites_openalex = cached_get_citing_works(doi, self.openalex_client, source_type, self.state_manager)
+                    if not isinstance(cites_openalex, list):
+                        cites_openalex = []
+                except Exception as e:
+                    st.warning(f"⚠️ Error in OpenAlex citation collection for {doi}: {e}")
+                    cites_openalex = []
+    
                 # Also get citations from Crossref for data completeness
-                cites_crossref = self.crossref_client.fetch_citations(doi)
-                cites_crossref = cites_crossref if isinstance(cites_crossref, list) else []
-
+                cites_crossref = []
+                try:
+                    cites_crossref = self.crossref_client.fetch_citations(doi)
+                    if not isinstance(cites_crossref, list):
+                        cites_crossref = []
+                except Exception as e:
+                    st.warning(f"⚠️ Error in Crossref citation collection for {doi}: {e}")
+                    cites_crossref = []
+    
                 citations = list(set(cites_openalex + cites_crossref))
-
+    
                 if citations:
                     self.citation_relationships[doi] = citations
-
+    
             else:
                 # For reference and citing articles: use old logic (only up to 2000)
-                cites_openalex = cached_get_citing_works(doi, self.openalex_client, source_type, self.state_manager)
-                cites_crossref = self.crossref_client.fetch_citations(doi)
-
-                cites_openalex = cites_openalex if isinstance(cites_openalex, list) else []
-                cites_crossref = cites_crossref if isinstance(cites_crossref, list) else []
-
+                cites_openalex = []
+                try:
+                    cites_openalex = cached_get_citing_works(doi, self.openalex_client, source_type, self.state_manager)
+                    if not isinstance(cites_openalex, list):
+                        cites_openalex = []
+                except Exception as e:
+                    st.warning(f"⚠️ Error in OpenAlex citation collection for {doi}: {e}")
+                    cites_openalex = []
+                    
+                cites_crossref = []
+                try:
+                    cites_crossref = self.crossref_client.fetch_citations(doi)
+                    if not isinstance(cites_crossref, list):
+                        cites_crossref = []
+                except Exception as e:
+                    st.warning(f"⚠️ Error in Crossref citation collection for {doi}: {e}")
+                    cites_crossref = []
+    
                 citations = list(set(cites_openalex + cites_crossref))
-
+    
                 if citations:
                     self.citation_relationships[doi] = citations
         except Exception as e:
-            st.warning(f"⚠️ Error fetching citations for {doi}: {e}")
-            # If error collecting citations for analyzed article,
-            # try to use old logic as fallback
-            if source_type == "analyzed":
-                try:
-                    cites_openalex = cached_get_citing_works(doi, self.openalex_client, "general", self.state_manager)
-                    cites_crossref = self.crossref_client.fetch_citations(doi)
-                    cites_openalex = cites_openalex if isinstance(cites_openalex, list) else []
-                    cites_crossref = cites_crossref if isinstance(cites_crossref, list) else []
-                    citations = list(set(cites_openalex + cites_crossref))
-
-                    if citations:
-                        self.citation_relationships[doi] = citations
-                except Exception as e2:
-                    st.warning(f"❌ Fallback also failed for {doi}: {e2}")
-
+            st.warning(f"⚠️ General citation fetch error for {doi}: {e}")
+            citations = []
+    
         # Use cached article data extraction
-        result = cached_extract_article_data(
-            crossref_data, openalex_data, doi, references, citations, self.data_processor
-        )
-
+        try:
+            result = cached_extract_article_data(
+                crossref_data, openalex_data, doi, references, citations, self.data_processor
+            )
+        except Exception as e:
+            error_msg = f"Failed to extract article data: {str(e)}"
+            self._handle_processing_error(doi, error_msg, source_type, original_doi)
+            return {
+                'doi': doi,
+                'status': 'failed',
+                'error': error_msg
+            }
+    
         if result.get('status') == 'success':
             for author in result.get('authors', []):
                 author_name = author.get('name', '')
@@ -2856,20 +2935,20 @@ class OptimizedDOIProcessor:
                         if affiliation:
                             self.author_affiliation_map[author_name].add(affiliation)
                             self.doi_affiliation_map[doi].add(affiliation)
-
+    
         if result.get('status') == 'success':
             self.stats['successful'] += 1
-
+    
             # Cache at all levels
             self.cache.set("full_analysis", cache_key, result, category="full_analysis")
             self.state_manager.save_result(doi, result, source_type)
-
+    
             self.cache.update_popularity(doi)
         else:
             self.stats['failed'] += 1
-
+    
         self.stats['api_calls'] += 2
-
+    
         return result
 
     def _handle_processing_error(self, doi: str, error: str, source_type: str, original_doi: str):
