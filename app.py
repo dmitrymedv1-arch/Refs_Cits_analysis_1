@@ -6722,12 +6722,12 @@ def main():
     
     with col4:
         # Check multiple conditions for button activation
-        export_disabled = not (
-            hasattr(st.session_state, 'processing_complete') and 
-            st.session_state.processing_complete and
-            hasattr(st.session_state, 'analyzed_results') and 
-            st.session_state.analyzed_results
-        )
+        has_analyzed = hasattr(st.session_state, 'analyzed_results') and st.session_state.analyzed_results
+        has_ref = hasattr(st.session_state, 'ref_results') and st.session_state.ref_results
+        has_citing = hasattr(st.session_state, 'citing_results') and st.session_state.citing_results
+        has_any_data = has_analyzed or has_ref or has_citing
+        
+        export_disabled = not has_any_data
         
         export_btn = st.button("💾 Export Excel", 
                              type="secondary", 
@@ -6918,7 +6918,8 @@ def main():
         st.success("✅ All data and caches cleared")
         st.rerun()
     
-    if export_btn and st.session_state.processing_complete:
+    if export_btn and hasattr(st.session_state, 'analyzed_results') and st.session_state.analyzed_results:
+
         with st.spinner("📊 Creating Excel report..."):
             try:
                 # Create report
