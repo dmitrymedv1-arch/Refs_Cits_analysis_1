@@ -6591,7 +6591,9 @@ class ArticleAnalyzerSystem:
 
 def main():
     # Application header
-    st.title("📚 Scientific Article Analyzer by DOI")
+    col1, col2, col3 = st.columns([1, 6, 1])
+    with col2:
+        st.image("logo.png", use_container_width=True)
     st.markdown("""
     Analyze scientific articles by DOI with smart caching, link and citation analysis.
     Multi-level caching system ensures fast recovery from interruptions.
