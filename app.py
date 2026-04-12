@@ -6733,7 +6733,8 @@ def main():
         if has_analyzed:
             has_successful_analyzed = any(r.get('status') == 'success' for r in st.session_state.analyzed_results.values())
         
-        has_any_data = (has_analyzed and has_successful_analyzed) or has_ref or has_citing
+        # FIX: Also check processing_complete flag and ensure at least one successful result exists
+        has_any_data = st.session_state.get('processing_complete', False) and (has_successful_analyzed or has_ref or has_citing)
         
         export_disabled = not has_any_data
         
