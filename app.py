@@ -6489,15 +6489,14 @@ class ArticleAnalyzerSystem:
         successful = sum(1 for r in st.session_state.analyzed_results.values() if r.get('status') == 'success')
         failed = len(dois) - successful
     
-        # CRITICAL FIX: Mark completion WITHOUT immediate rerun
+        # Mark completion
         st.session_state.processing_complete = True
         
         # Save final state
         self.state_manager.save_to_session()
         
-        # CRITICAL FIX: Return results without calling st.rerun()
-        # The rerun will happen naturally when Streamlit detects state changes
-        # DO NOT call st.rerun() here
+        # Force UI update to enable Export button
+        st.rerun()
         
         return {
             'processing_time': processing_time,
@@ -6602,8 +6601,14 @@ def main():
     # System initialization
     if 'system' not in st.session_state:
         st.session_state.system = ArticleAnalyzerSystem()
-
+    
     system = st.session_state.system
+    
+    # Если уже есть данные при загрузке страницы, устанавливаем флаг
+    if hasattr(st.session_state, 'analyzed_results') and st.session_state.analyzed_results:
+        has_successful = any(r.get('status') == 'success' for r in st.session_state.analyzed_results.values())
+        if has_successful and not st.session_state.get('processing_complete', False):
+            st.session_state.processing_complete = True
 
     # Sidebar for settings
     with st.sidebar:
@@ -6734,7 +6739,7 @@ def main():
             has_successful_analyzed = any(r.get('status') == 'success' for r in st.session_state.analyzed_results.values())
         
         # FIX: Also check processing_complete flag and ensure at least one successful result exists
-        has_any_data = st.session_state.get('processing_complete', False) and (has_successful_analyzed or has_ref or has_citing)
+        has_any_data = (has_successful_analyzed or has_ref or has_citing)
         
         export_disabled = not has_any_data
         
@@ -6895,6 +6900,10 @@ def main():
                 )
                 
                 st.success(f"✅ Processing resumed and completed")
+                
+                # Устанавливаем флаг завершения
+                st.session_state.processing_complete = True
+                system.state_manager.save_to_session()
                 
                 # Show metrics
                 col1, col2, col3, col4 = st.columns(4)
