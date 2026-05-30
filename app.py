@@ -896,7 +896,7 @@ def cached_get_citing_works(doi: str, openalex_client,
 def cached_get_references(doi: str, crossref_client,
                         state_manager: AnalysisStateManager = None) -> List[str]:
     """
-    Cached fetching of references with automatic deduplication
+    Cached fetching of references
     """
     # Check in-memory cache
     if doi in _reference_works_cache:
@@ -913,26 +913,16 @@ def cached_get_references(doi: str, crossref_client,
     # Fetch references
     references = crossref_client.fetch_references(doi)
     
-    # ========== ИСПРАВЛЕНИЕ 3: Дедупликация при получении ==========
-    unique_references = []
-    if references:
-        seen = set()
-        for ref in references:
-            if ref and ref not in seen:
-                seen.add(ref)
-                unique_references.append(ref)
-    # ====================================================================
-    
     # Cache in memory
-    _reference_works_cache[doi] = unique_references
+    _reference_works_cache[doi] = references
     _cache_stats['saves'] += 1
     
     # Cache in session state
     if state_manager:
-        state_manager.reference_cache[doi] = unique_references
+        state_manager.reference_cache[doi] = references
         state_manager.save_to_session()
     
-    return unique_references
+    return references
 
 def get_cache_stats() -> Dict:
     """Get cache statistics"""
@@ -964,7 +954,6 @@ class AdaptiveDelayManager:
         self.failure_count = 0
         self.last_request_time = 0
         self.response_times = []
-        self.consecutive_errors = 0
 
         self.stats = {
             'total_requests': 0,
@@ -975,18 +964,13 @@ class AdaptiveDelayManager:
         }
 
     def wait_if_needed(self):
-        """OPTIMIZED: Only wait when we've had recent failures"""
         current_time = time.time()
         elapsed = current_time - self.last_request_time
 
-        # Only add delay if we've had consecutive errors
-        if self.consecutive_errors > 0:
-            wait_time = min(0.5, self.consecutive_errors * 0.1)
-            if elapsed < wait_time:
-                time.sleep(wait_time - elapsed)
-        elif self.current_delay > 0.05 and elapsed < 0.02:
-            # Minimal delay only
-            time.sleep(0.01)
+        if elapsed < self.current_delay:
+            wait_time = self.current_delay - elapsed
+            time.sleep(wait_time)
+            self.stats['total_wait_time'] += wait_time
 
         self.last_request_time = time.time()
         return self.current_delay
@@ -1004,25 +988,19 @@ class AdaptiveDelayManager:
             self.success_count += 1
             self.failure_count = max(0, self.failure_count - 1)
             self.stats['successful_requests'] += 1
-            self.consecutive_errors = max(0, self.consecutive_errors - 1)
 
-            # Gradually reduce delay on success
-            if self.success_count >= 3:
-                self.current_delay = max(0.01, self.current_delay * 0.8)
+            if self.success_count >= 2:
+                self.current_delay = max(self.min_delay, self.current_delay * 0.7)
                 self.success_count = 0
 
         else:
             self.failure_count += 1
             self.success_count = 0
             self.stats['failed_requests'] += 1
-            self.consecutive_errors += 1
 
-            # Only increase delay on consecutive errors
-            if self.consecutive_errors >= 2:
-                self.current_delay = min(self.max_delay, self.current_delay * 1.2)
+            self.current_delay = min(self.max_delay, self.current_delay * 1.3)
 
-        # Keep delay very low
-        self.current_delay = min(self.max_delay, max(0.01, self.current_delay))
+        self.current_delay = min(self.max_delay, self.current_delay)
 
     def get_delay(self) -> float:
         return self.current_delay
@@ -1036,8 +1014,7 @@ class AdaptiveDelayManager:
             'total_requests': total_requests,
             'success_rate': round(success_rate, 1),
             'avg_response_time': round(self.stats['avg_response_time'], 3) if self.stats['avg_response_time'] > 0 else 0,
-            'total_wait_time': round(self.stats['total_wait_time'], 2),
-            'consecutive_errors': self.consecutive_errors
+            'total_wait_time': round(self.stats['total_wait_time'], 2)
         }
 
 # ============================================================================
@@ -1357,17 +1334,13 @@ class CrossrefClient(APIClient):
         clean_doi = self._clean_doi(doi)
         if not clean_doi:
             return []
-    
+
         citing_dois = []
         try:
-            # Direct API call with specific fields only
             url = f"{self.base_url}{clean_doi}"
-            params = {
-                'filter': 'has-references:1',
-                'select': 'DOI,reference'
-            }
+            params = {'filter': 'has-reference:1'}
             data = self.make_request(url, f"crossref_citations:{clean_doi}", params=params)
-    
+
             if 'message' in data and 'is-referenced-by' in data['message']:
                 references = data['message']['is-referenced-by']
                 for ref in references:
@@ -1375,14 +1348,10 @@ class CrossrefClient(APIClient):
                         citing_doi = self._clean_doi(ref['DOI'])
                         if citing_doi:
                             citing_dois.append(citing_doi)
-                    elif isinstance(ref, str):
-                        citing_doi = self._clean_doi(ref)
-                        if citing_doi:
-                            citing_dois.append(citing_doi)
-    
-        except Exception:
-            pass
-    
+
+        except Exception as e:
+            st.warning(f"Crossref citations error for {doi}: {e}")
+
         return citing_dois
 
     def _clean_doi(self, doi: str) -> str:
@@ -1475,7 +1444,7 @@ class OpenAlexClient(APIClient):
     def fetch_all_citations_for_analyzed_article(self, doi: str) -> List[str]:
         """
         Complete collection of ALL citations for analyzed articles
-        OPTIMIZED: No delays between pages, faster timeout
+        Uses cursor-based pagination with timeout protection
         """
         clean_doi = self._clean_doi(doi)
         if not clean_doi:
@@ -1488,168 +1457,180 @@ class OpenAlexClient(APIClient):
             return cached_result
     
         try:
-            # Fast lookup: try to get work_id without full fetch
+            # First get work_id from DOI with timeout
+            article_data = self.fetch_article(clean_doi)
+            
+            # Check if article_data is valid
+            if not isinstance(article_data, dict):
+                return []
+                
+            if 'error' in article_data:
+                return []
+            
+            # Try to get work ID from different possible structures
             article_id = None
             
-            # First attempt: direct DOI-to-works lookup (faster)
-            try:
+            # Try direct id field
+            if 'id' in article_data:
+                article_id = article_data.get('id', '').split('/')[-1]
+            
+            # Try alternative structure with timeout protection
+            if not article_id and 'doi' in article_data:
                 url = f"https://api.openalex.org/works/https://doi.org/{clean_doi}"
-                response = self.session.get(url, timeout=8)
-                if response.status_code == 200:
-                    data = response.json()
-                    if 'id' in data:
-                        article_id = data['id'].split('/')[-1]
-            except:
-                pass
-    
-            if not article_id:
-                # Fallback: use fetch_article (cached)
-                article_data = self.fetch_article(clean_doi)
-                if isinstance(article_data, dict) and 'id' in article_data:
-                    article_id = article_data.get('id', '').split('/')[-1]
-                elif isinstance(article_data, dict) and 'doi' in article_data:
-                    # Try again with direct URL
-                    try:
-                        url = f"https://api.openalex.org/works/https://doi.org/{clean_doi}"
-                        response = self.session.get(url, timeout=8)
-                        if response.status_code == 200:
-                            data = response.json()
-                            if 'id' in data:
-                                article_id = data['id'].split('/')[-1]
-                    except:
-                        pass
-    
+                try:
+                    response = self.session.get(url, timeout=15)
+                    if response.status_code == 200:
+                        data = response.json()
+                        if 'id' in data:
+                            article_id = data['id'].split('/')[-1]
+                except requests.exceptions.Timeout:
+                    print(f"Timeout getting work ID for {clean_doi}")
+                    return []
+                except Exception:
+                    pass
+            
             if not article_id:
                 return []
     
             all_citing_dois = []
             cursor = "*"
             page_num = 1
-            max_pages = 30  # Reduced from 30 to 25 for speed
+            max_retries = 2
+            max_pages = 30  # Reduced from 50 to prevent timeout (6000 citations max)
             total_collected = 0
+            consecutive_errors = 0
             
             # Use a new session for each article to avoid connection issues
             with requests.Session() as session:
                 session.headers.update({
-                    'User-Agent': 'ArticleAnalyzer/4.0 (Optimized)',
+                    'User-Agent': 'ArticleAnalyzer/3.0 (colab-user@example.com)',
                     'Accept': 'application/json',
                     'Accept-Encoding': 'gzip'
                 })
+                session.timeout = 25  # Overall timeout for session
                 
                 while cursor and page_num <= max_pages:
-                    try:
-                        url = f"https://api.openalex.org/works?filter=cites:{article_id}&per-page=200&cursor={cursor}"
-                        
-                        # CRITICAL: NO delay between requests - OpenAlex can handle it
-                        response = session.get(url, timeout=15)
-    
-                        if response.status_code == 200:
-                            data = response.json()
-                            works = data.get('results', [])
+                    success = False
+                    page_cursor = cursor
+                    
+                    for attempt in range(max_retries):
+                        try:
+                            url = f"https://api.openalex.org/works?filter=cites:{article_id}&per-page=200&cursor={page_cursor}"
                             
-                            if not works:
+                            # Wait before request
+                            self.delay.wait_if_needed()
+                            
+                            start_time = time.time()
+                            response = session.get(url, timeout=25)
+                            response_time = time.time() - start_time
+    
+                            if response.status_code == 200:
+                                self.delay.update_delay(True, response_time)
+                                data = response.json()
+    
+                                if not isinstance(data, dict):
+                                    break
+    
+                                works = data.get('results', [])
+                                
+                                if not works:
+                                    cursor = None
+                                    success = True
+                                    break
+    
+                                page_citing_dois = []
+                                for work in works:
+                                    if isinstance(work, dict) and work.get('doi'):
+                                        citing_doi = self._clean_doi(work['doi'])
+                                        if citing_doi:
+                                            page_citing_dois.append(citing_doi)
+    
+                                all_citing_dois.extend(page_citing_dois)
+                                total_collected += len(page_citing_dois)
+                                
+                                # Reset consecutive errors on success
+                                consecutive_errors = 0
+    
+                                # Get next cursor
+                                meta = data.get('meta', {})
+                                next_cursor = meta.get('next_cursor')
+    
+                                if next_cursor and next_cursor != page_cursor and page_num < max_pages:
+                                    cursor = next_cursor
+                                    page_num += 1
+                                    # Add delay between pages
+                                    time.sleep(0.3)
+                                    success = True
+                                    break
+                                else:
+                                    cursor = None
+                                    success = True
+                                    break
+    
+                            elif response.status_code == 429:
+                                self.delay.update_delay(False, response_time)
+                                wait_time = min(2 ** attempt, 4)  # Exponential backoff capped at 4 seconds
+                                time.sleep(wait_time)
+                                continue
+    
+                            elif response.status_code == 404:
+                                # Article not found
+                                cursor = None
+                                success = True
                                 break
     
-                            for work in works:
-                                if isinstance(work, dict) and work.get('doi'):
-                                    citing_doi = self._clean_doi(work['doi'])
-                                    if citing_doi:
-                                        all_citing_dois.append(citing_doi)
-    
-                            total_collected += len(works)
-                            
-                            # Get next cursor
-                            meta = data.get('meta', {})
-                            next_cursor = meta.get('next_cursor')
-    
-                            if next_cursor and next_cursor != cursor and page_num < max_pages:
-                                cursor = next_cursor
-                                page_num += 1
-                                # MINIMAL delay - just enough to not trigger rate limits
-                                if page_num % 5 == 0:
-                                    time.sleep(0.05)
                             else:
+                                self.delay.update_delay(False, response_time)
+                                consecutive_errors += 1
+                                if attempt < max_retries - 1:
+                                    time.sleep(1)
+                                    continue
+                                else:
+                                    success = False
+                                    break
+    
+                        except requests.exceptions.Timeout:
+                            consecutive_errors += 1
+                            if attempt < max_retries - 1:
+                                time.sleep(2)
+                                continue
+                            else:
+                                success = False
+                                break
+                                
+                        except Exception as e:
+                            consecutive_errors += 1
+                            if attempt < max_retries - 1:
+                                time.sleep(1)
+                                continue
+                            else:
+                                success = False
                                 break
     
-                        elif response.status_code == 429:
-                            # Rate limit - wait briefly then continue
-                            time.sleep(0.5)
-                            continue
-                        else:
-                            break
-                            
-                    except requests.exceptions.Timeout:
-                        # Timeout on one page - return what we have
+                    # If too many consecutive errors, stop pagination
+                    if consecutive_errors >= 5:
+                        print(f"Too many consecutive errors for {clean_doi}, stopping")
                         break
-                    except Exception:
+                        
+                    if not success:
                         break
-    
-            # Remove duplicates
+            
+            # Remove duplicates and save to cache
             unique_citing_dois = list(set(all_citing_dois))
+            
+            # Log for debugging
+            if len(unique_citing_dois) > 0:
+                print(f"Collected {len(unique_citing_dois)} citations for {clean_doi}")
     
-            # Save to cache
+            # Save to cache with separate category for full citations
             self.cache.set("full_citations", cache_key, unique_citing_dois, category="full_citations_analyzed")
             
             return unique_citing_dois
     
         except Exception as e:
+            # Log error but don't crash - return empty list
+            print(f"Error collecting citations for {clean_doi}: {str(e)}")
             return []
-
-    def get_openalex_references_count(self, doi: str) -> Tuple[int, List[str]]:
-        """
-        Получает из OpenAlex точное количество ссылок и список уникальных DOI
-        Возвращает: (count, unique_references_list)
-        """
-        clean_doi = self._clean_doi(doi)
-        if not clean_doi:
-            return 0, []
-        
-        cache_key = f"openalex_refs:{clean_doi}"
-        cached = self.cache.get("openalex_references", cache_key)
-        if cached is not None:
-            return cached.get('count', 0), cached.get('references', [])
-        
-        try:
-            url = f"https://api.openalex.org/works/https://doi.org/{clean_doi}"
-            response = self.session.get(url, timeout=15)
-            
-            if response.status_code == 200:
-                data = response.json()
-                
-                # Получаем точное количество из OpenAlex
-                references_count = data.get('referenced_works_count', 0)
-                
-                # Получаем список ссылок
-                referenced_works = data.get('referenced_works', [])
-                references = []
-                
-                for ref_url in referenced_works:
-                    # Извлекаем DOI из URL OpenAlex
-                    # URL имеет формат: https://openalex.org/W123456789
-                    # Для получения DOI нужен отдельный запрос
-                    # Пока используем URL как идентификатор
-                    references.append(ref_url)
-                
-                # Дедупликация
-                unique_references = []
-                seen = set()
-                for ref in references:
-                    if ref not in seen:
-                        seen.add(ref)
-                        unique_references.append(ref)
-                
-                result = {
-                    'count': len(unique_references),  # Используем уникальное количество
-                    'references': unique_references
-                }
-                
-                self.cache.set("openalex_references", cache_key, result)
-                return result['count'], result['references']
-                
-            return 0, []
-            
-        except Exception as e:
-            return 0, []
 
     def _safe_get(self, data, *keys, default=''):
         """Safe value extraction from dictionary (helper function)"""
@@ -1935,18 +1916,6 @@ class DataProcessor:
         self.cache = cache_manager
         self.country_codes = Config.COUNTRY_CODES
 
-    def get_unique_references_count(self, references: List[str]) -> int:
-        """Возвращает количество уникальных ссылок"""
-        if not references:
-            return 0
-        return len(set(references))
-    
-    def get_unique_citations_count(self, citations: List[str]) -> int:
-        """Возвращает количество уникальных цитирований"""
-        if not citations:
-            return 0
-        return len(set(citations))
-        
     def extract_article_info(self, crossref_data: Dict, openalex_data: Dict,
                            doi: str, references: List[str], citations: List[str]) -> Dict:
     
@@ -1958,6 +1927,7 @@ class DataProcessor:
         country_codes = list(set(filter(None, country_codes)))
     
         orcid_urls = []
+        # NEW: collect author countries
         author_countries = []
         for author in authors:
             if author.get('orcid'):
@@ -1965,6 +1935,7 @@ class DataProcessor:
                 if orcid_url:
                     orcid_urls.append(orcid_url)
             
+            # Add author country if defined
             if author.get('author_country'):
                 author_countries.append(author['author_country'])
     
@@ -1972,36 +1943,16 @@ class DataProcessor:
         if not pages_field and pub_info['article_number']:
             pages_field = f"Article {pub_info['article_number']}"
     
+        # Extract topic information from OpenAlex
         topics_info = self._extract_topics_info(openalex_data)
     
-        # ========== ИСПРАВЛЕНИЕ 1: Удаляем дубликаты из references ==========
-        unique_references = []
-        if references:
-            # Используем set для удаления дубликатов, но сохраняем порядок
-            seen = set()
-            for ref in references:
-                if ref and ref not in seen:
-                    seen.add(ref)
-                    unique_references.append(ref)
-        # ====================================================================
-    
         # Check reference count via OpenAlex if Crossref shows 0
-        references_count = len(unique_references)
+        references_count = len(references)
         if references_count == 0 and openalex_data and 'referenced_works_count' in openalex_data:
             references_count = openalex_data.get('referenced_works_count', 0)
     
-        # ========== ИСПРАВЛЕНИЕ 2: Аналогично для citations ==========
-        unique_citations = []
-        if citations:
-            seen = set()
-            for cite in citations:
-                if cite and cite not in seen:
-                    seen.add(cite)
-                    unique_citations.append(cite)
-        # ====================================================================
-    
         quick_insights = self._extract_quick_insights(
-            authors, countries, unique_references, unique_citations, pub_info
+            authors, countries, references, citations, pub_info
         )
     
         return {
@@ -2010,10 +1961,10 @@ class DataProcessor:
             'topics_info': topics_info,
             'authors': authors,
             'countries': country_codes,
-            'author_countries': list(set(author_countries)),
+            'author_countries': list(set(author_countries)),  # NEW: author countries
             'orcid_urls': orcid_urls,
-            'references': unique_references,  # Исправлено: уникальные ссылки
-            'citations': unique_citations,     # Исправлено: уникальные цитирования
+            'references': references,
+            'citations': citations,
             'references_count': references_count,
             'pages_formatted': pages_field,
             'status': 'success',
@@ -2557,7 +2508,6 @@ class OptimizedDOIProcessor:
         unique_dois = []
         seen_dois = set()
         duplicate_count = 0
-        total_count = len(clean_dois)
         
         for doi in clean_dois:
             clean_doi = self._clean_doi_for_deduplication(doi)
@@ -2568,9 +2518,9 @@ class OptimizedDOIProcessor:
                 duplicate_count += 1
         
         if duplicate_count > 0:
-            st.info(f"📊 В {source_type} найдено {duplicate_count} дубликатов DOI из {total_count} (удалено {duplicate_count})")
+            st.info(f"📊 В {source_type} найдено {duplicate_count} дубликатов DOI")
         
-        st.info(f"📊 Всего DOI в {source_type}: {total_count}, уникальных: {len(unique_dois)}")
+        st.info(f"📊 Всего DOI в {source_type}: {len(clean_dois)}, уникальных: {len(unique_dois)}")
         
         return unique_dois
 
@@ -2593,25 +2543,24 @@ class OptimizedDOIProcessor:
 
     def process_doi_batch_with_resume(self, dois: List[str], source_type: str = "analyzed",
                                     original_doi: str = None, fetch_refs: bool = True,
-                                    fetch_cites: bool = True, batch_size: int = None,
+                                    fetch_cites: bool = True, batch_size: int = Config.BATCH_SIZE,
                                     progress_container=None, resume: bool = False) -> Dict[str, Dict]:
-        
-        # Use larger batch size for speed
-        if batch_size is None:
-            batch_size = 100  # Increased from 50 to 100 for faster processing
-        
+    
         # Set current stage in state manager
         self.state_manager.set_stage(source_type, len(dois))
         
         # Check if can resume from interrupted point
         if resume and source_type in self.stage_progress:
             if self.stage_progress[source_type]['remaining']:
+                # Continue from interrupted point
                 dois = self.stage_progress[source_type]['remaining']
                 if progress_container:
                     progress_container.info(f"🔄 Resuming {source_type} processing with {len(dois)} remaining DOI")
             else:
+                # No saved progress, start from beginning
                 self.stage_progress[source_type] = {'processed': [], 'remaining': dois}
         else:
+            # Normal start
             self.stage_progress[source_type] = {'processed': [], 'remaining': dois}
     
         results = {}
@@ -2635,6 +2584,7 @@ class OptimizedDOIProcessor:
                 cached_results = {}
                 
                 for doi in batch:
+                    # Check session state cache
                     if source_type == 'analyzed' and doi in self.state_manager.analyzed_results:
                         cached_results[doi] = self.state_manager.analyzed_results[doi]
                         self.stats['session_state_hits'] += 1
@@ -2647,12 +2597,13 @@ class OptimizedDOIProcessor:
                     else:
                         batch_to_process.append(doi)
                 
+                # Add cached results
                 results.update(cached_results)
                 
-                # Process only non-cached DOI - use optimized batch processing
+                # Process only non-cached DOI
                 if batch_to_process:
                     batch_results = self._process_single_batch_with_retry(
-                        batch_to_process, source_type, original_doi, fetch_refs, fetch_cites
+                        batch_to_process, source_type, original_doi, True, True
                     )
                     results.update(batch_results)
     
@@ -2661,25 +2612,30 @@ class OptimizedDOIProcessor:
                 self.stage_progress[source_type]['processed'].extend(processed_batch)
                 self.stage_progress[source_type]['remaining'] = dois[batch_idx + batch_size:]
                 
+                # Update state manager
                 self.state_manager.update_progress(
                     batch_idx // batch_size + 1,
                     self.stage_progress[source_type]['processed'],
                     self.stage_progress[source_type]['remaining']
                 )
                 
+                # CRITICAL FIX: Save progress to cache after each batch
                 self.cache.save_progress(
                     source_type,
                     self.stage_progress[source_type]['processed'],
                     self.stage_progress[source_type]['remaining']
                 )
                 
+                # CRITICAL FIX: Save session state after each batch
                 self.state_manager.save_to_session()
     
                 monitor.update(len(batch), 'processed')
     
+            # Clear saved progress after successful completion
             self.stage_progress[source_type] = {'processed': [], 'remaining': []}
             self.cache.clear_progress()
             
+            # Update state manager
             self.state_manager.current_stage = None
             self.state_manager.save_to_session()
     
@@ -2695,38 +2651,43 @@ class OptimizedDOIProcessor:
             return results
     
         except Exception as e:
+            # Save progress on exception
             if progress_container:
                 progress_container.warning(f"⚠️ {source_type} processing interrupted: {e}")
                 progress_container.info(f"📊 Progress saved. Can resume from interruption point.")
             
+            # Ensure state is saved
             self.state_manager.save_to_session()
             return results
 
     def _process_single_batch_with_retry(self, batch: List[str], source_type: str,
                                        original_doi: str, fetch_refs: bool, fetch_cites: bool) -> Dict[str, Dict]:
-        """Process DOI batch with parallel execution - OPTIMIZED"""
+        """Process DOI batch with retries for empty results"""
         results = {}
-        
-        if not batch:
-            return results
-    
-        # Use ThreadPoolExecutor for maximum parallelism
-        # No delays between requests in the same batch
-        with ThreadPoolExecutor(max_workers=min(Config.MAX_WORKERS * 2, len(batch), 20)) as executor:
+
+        with ThreadPoolExecutor(max_workers=min(Config.MAX_WORKERS, len(batch))) as executor:
             future_to_doi = {}
-    
+
             for doi in batch:
                 future = executor.submit(
-                    self._process_single_doi_optimized,
-                    doi, source_type, original_doi, fetch_refs, fetch_cites
+                    self._process_single_doi_with_validation,
+                    doi, source_type, original_doi, True, True
                 )
                 future_to_doi[future] = doi
-    
+
             for future in as_completed(future_to_doi):
                 doi = future_to_doi[future]
                 try:
-                    result = future.result(timeout=45)  # Increased timeout for large batches
+                    result = future.result(timeout=60)
+                    
+                    # Check result for emptiness and retry if needed
+                    if self._is_empty_result(result):
+                        st.warning(f"⚠️ Empty result for {doi}, retrying...")
+                        # Retry without exponential delays
+                        result = self._retry_process_single_doi(doi, source_type, original_doi)
+                    
                     results[doi] = result
+                    
                 except Exception as e:
                     self._handle_processing_error(doi, str(e), source_type, original_doi)
                     results[doi] = {
@@ -2734,7 +2695,7 @@ class OptimizedDOIProcessor:
                         'status': 'failed',
                         'error': f"Processing timeout: {str(e)}"
                     }
-    
+
         return results
 
     def _is_empty_result(self, result: Dict) -> bool:
@@ -2875,33 +2836,19 @@ class OptimizedDOIProcessor:
             self.state_manager.save_result(doi, cached_result, source_type)
             return cached_result
     
-        # OPTIMIZED: Fetch both APIs in parallel using threading
-        crossref_data = {}
-        openalex_data = {}
-        
-        def fetch_crossref_parallel():
-            nonlocal crossref_data
-            try:
-                crossref_data = self.crossref_client.fetch_article(doi)
-            except Exception:
-                crossref_data = {}
-    
-        def fetch_openalex_parallel():
-            nonlocal openalex_data
-            try:
-                openalex_data = self.openalex_client.fetch_article(doi)
-            except Exception:
-                openalex_data = {}
-    
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            future_crossref = executor.submit(fetch_crossref_parallel)
-            future_openalex = executor.submit(fetch_openalex_parallel)
-            
-            try:
-                future_crossref.result(timeout=15)
-                future_openalex.result(timeout=15)
-            except:
-                pass
+        # Use cached API fetching
+        try:
+            crossref_data, openalex_data = cached_fetch_article_data(
+                doi, self.crossref_client, self.openalex_client, self.state_manager
+            )
+        except Exception as e:
+            error_msg = f"Failed to fetch article data: {str(e)}"
+            self._handle_processing_error(doi, error_msg, source_type, original_doi)
+            return {
+                'doi': doi,
+                'status': 'failed',
+                'error': error_msg
+            }
     
         crossref_error = None
         openalex_error = None
@@ -2923,58 +2870,67 @@ class OptimizedDOIProcessor:
         crossref_data = crossref_data if isinstance(crossref_data, dict) else {}
         openalex_data = openalex_data if isinstance(openalex_data, dict) else {}
     
-        # Fetch references - with deduplication
         references = []
         try:
+            # Use cached references fetching
             refs = cached_get_references(doi, self.crossref_client, self.state_manager)
             references = refs if isinstance(refs, list) else []
+    
             if references:
                 self.reference_relationships[doi] = references
-        except Exception:
+        except Exception as e:
+            st.warning(f"⚠️ Error fetching references for {doi}: {e}")
             references = []
     
-        # Fetch citations - with deduplication
         citations = []
         try:
+            # Use cached citing works fetching with timeout protection
             if source_type == "analyzed":
+                # For analyzed articles: collect ALL citations
                 cites_openalex = []
                 try:
+                    # Add timeout protection via threading
+                    import concurrent.futures
                     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                         future = executor.submit(
                             cached_get_citing_works, 
                             doi, self.openalex_client, source_type, self.state_manager
                         )
                         try:
-                            cites_openalex = future.result(timeout=30)
+                            cites_openalex = future.result(timeout=45)  # 45 second timeout
                             if not isinstance(cites_openalex, list):
                                 cites_openalex = []
                         except concurrent.futures.TimeoutError:
+                            st.warning(f"⚠️ Timeout collecting citations for {doi}")
                             cites_openalex = []
-                except Exception:
+                except Exception as e:
+                    st.warning(f"⚠️ Error in OpenAlex citation collection for {doi}: {e}")
                     cites_openalex = []
     
+                # Also get citations from Crossref for data completeness
                 cites_crossref = []
                 try:
                     cites_crossref = self.crossref_client.fetch_citations(doi)
                     if not isinstance(cites_crossref, list):
                         cites_crossref = []
-                except Exception:
+                except Exception as e:
+                    st.warning(f"⚠️ Error in Crossref citation collection for {doi}: {e}")
                     cites_crossref = []
     
-                # Дедупликация citations
-                all_cites = list(set(cites_openalex + cites_crossref))
-                citations = all_cites
+                citations = list(set(cites_openalex + cites_crossref))
     
                 if citations:
                     self.citation_relationships[doi] = citations
     
             else:
+                # For reference and citing articles: use limited collection
                 cites_openalex = []
                 try:
                     cites_openalex = cached_get_citing_works(doi, self.openalex_client, "standard", self.state_manager)
                     if not isinstance(cites_openalex, list):
                         cites_openalex = []
-                except Exception:
+                except Exception as e:
+                    st.warning(f"⚠️ Error in OpenAlex citation collection for {doi}: {e}")
                     cites_openalex = []
                     
                 cites_crossref = []
@@ -2982,17 +2938,17 @@ class OptimizedDOIProcessor:
                     cites_crossref = self.crossref_client.fetch_citations(doi)
                     if not isinstance(cites_crossref, list):
                         cites_crossref = []
-                except Exception:
+                except Exception as e:
+                    st.warning(f"⚠️ Error in Crossref citation collection for {doi}: {e}")
                     cites_crossref = []
     
-                # Дедупликация citations
-                all_cites = list(set(cites_openalex + cites_crossref))
-                citations = all_cites
+                citations = list(set(cites_openalex + cites_crossref))
     
                 if citations:
                     self.citation_relationships[doi] = citations
-                        
-        except Exception:
+                    
+        except Exception as e:
+            st.warning(f"⚠️ General citation fetch error for {doi}: {e}")
             citations = []
     
         # Use cached article data extraction
@@ -3022,9 +2978,11 @@ class OptimizedDOIProcessor:
         if result.get('status') == 'success':
             self.stats['successful'] += 1
     
+            # Cache at all levels
             self.cache.set("full_analysis", cache_key, result, category="full_analysis")
             self.state_manager.save_result(doi, result, source_type)
             
+            # CRITICAL FIX: Save session state immediately after each successful DOI
             self.state_manager.save_to_session()
     
             self.cache.update_popularity(doi)
@@ -4454,63 +4412,46 @@ class ExcelExporter:
                 error_df.to_excel(writer, sheet_name=f"Error_{idx}"[:31], index=False)
 
     def _prepare_summary_data(self):
-        """Prepare summary data with error handling and deduplication"""
+        """Prepare summary data with error handling"""
         total_analyzed_articles = len([r for r in self.analyzed_results.values() 
                                      if isinstance(r, dict) and r.get('status') == 'success'])
         total_ref_articles = len([r for r in self.ref_results.values() 
                                 if isinstance(r, dict) and r.get('status') == 'success'])
         total_citing_articles = len([r for r in self.citing_results.values() 
                                    if isinstance(r, dict) and r.get('status') == 'success'])
-    
-        # ========== ДЕДУПЛИКАЦИЯ ПРИ СБОРЕ ССЫЛОК ==========
-        # Собираем ВСЕ ссылки с дедупликацией
-        all_references = set()
-        all_citations = set()
-        
-        for doi, result in self.analyzed_results.items():
-            if isinstance(result, dict) and result.get('status') == 'success':
-                refs = result.get('references', [])
-                if isinstance(refs, list):
-                    all_references.update(refs)
-                
-                cites = result.get('citations', [])
-                if isinstance(cites, list):
-                    all_citations.update(cites)
-        # ====================================================
-    
+
         # Temporary counters for correct normalization
         author_analyzed_counts = Counter()
         affiliation_analyzed_counts = Counter()
-    
+
         # Process analyzed articles
         for doi, result in self.analyzed_results.items():
             if not isinstance(result, dict) or result.get('status') != 'success':
                 continue
-    
+
             self.source_dois['analyzed'].add(doi)
-    
+
+            # Update Terms and Topics statistics for analyzed articles
             self._update_terms_topics_stats(doi, result, 'analyzed')
-    
-            # Update reference relationships with deduplication
+
+            # Update reference relationships
             refs = result.get('references', [])
             if isinstance(refs, list):
-                unique_refs = list(set(refs))  # Дедупликация на уровне статьи
-                for ref_doi in unique_refs:
+                for ref_doi in refs:
                     if ref_doi:
                         self.ref_to_analyzed[ref_doi].append(doi)
                         self.doi_to_source_counts[ref_doi]['ref'] += 1
                         self.source_dois['ref'].add(ref_doi)
-    
-            # Update citation relationships with deduplication
+
+            # Update citation relationships
             cites = result.get('citations', [])
             if isinstance(cites, list):
-                unique_cites = list(set(cites))  # Дедупликация на уровне статьи
-                for cite_doi in unique_cites:
+                for cite_doi in cites:
                     if cite_doi:
                         self.analyzed_to_citing[doi].append(cite_doi)
                         self.doi_to_source_counts[cite_doi]['citing'] += 1
                         self.source_dois['citing'].add(cite_doi)
-    
+
             # Count authors in analyzed articles
             authors = result.get('authors', [])
             if isinstance(authors, list):
@@ -4525,8 +4466,10 @@ class ExcelExporter:
                     normalized_name = self.processor.normalize_author_name(full_name)
                     key = normalized_name
                     
+                    # Increase article counter for this author in analyzed
                     author_analyzed_counts[key] += 1
                 
+                    # Initialize author record if not exists
                     if key not in self.author_stats:
                         self.author_stats[key] = {
                             'normalized_name': normalized_name,
@@ -4540,6 +4483,7 @@ class ExcelExporter:
                             'normalized_citing': 0
                         }
                 
+                    # Update ORCID as set
                     if author.get('orcid'):
                         try:
                             orcid_url = self.processor._format_orcid_id(author.get('orcid', ''))
@@ -4548,25 +4492,30 @@ class ExcelExporter:
                         except:
                             pass
                 
+                    # Determine affiliation
                     if not self.author_stats[key]['affiliation']:
                         affs = author.get('affiliation', [])
                         if affs and isinstance(affs, list) and len(affs) > 0:
                             self.author_stats[key]['affiliation'] = affs[0]
                 
+                    # Determine author country
                     if not self.author_stats[key]['country']:
+                        # Try to take from author_country
                         if 'author_country' in author and author['author_country']:
                             self.author_stats[key]['country'] = author['author_country']
+                        # If not, determine from affiliation
                         elif self.author_stats[key]['affiliation']:
                             country_from_aff = self._get_country_from_affiliation(self.author_stats[key]['affiliation'])
                             if country_from_aff:
                                 self.author_stats[key]['country'] = country_from_aff
+                        # Fallback: from article
                         elif result.get('countries'):
                             countries = result.get('countries', [])
                             if countries and isinstance(countries, list) and len(countries) > 0:
                                 self.author_stats[key]['country'] = countries[0]
                 
                     self.author_stats[key]['normalized_name'] = normalized_name
-    
+
             # Update affiliation statistics FOR ANALYZED
             unique_affiliations_in_article = set()
             for author in result.get('authors', []):
@@ -4578,10 +4527,12 @@ class ExcelExporter:
                     for affiliation in affs:
                         if affiliation and isinstance(affiliation, str):
                             unique_affiliations_in_article.add(affiliation)
-    
+
+            # Count absolute article number for each affiliation in analyzed
             for affiliation in unique_affiliations_in_article:
                 affiliation_analyzed_counts[affiliation] += 1
                 
+                # Initialize affiliation record if not exists
                 if affiliation not in self.affiliation_stats:
                     self.affiliation_stats[affiliation] = {
                         'colab_id': '',
@@ -4600,31 +4551,33 @@ class ExcelExporter:
                         for country in countries:
                             if country and isinstance(country, str):
                                 self.affiliation_stats[affiliation]['countries'].append(country)
-    
+
         # After counting all analyzed articles, calculate normalized values FOR AUTHORS
         for author_key, count in author_analyzed_counts.items():
             if total_analyzed_articles > 0:
                 normalized_value = count / total_analyzed_articles
                 self.author_stats[author_key]['normalized_analyzed'] = normalized_value
                 self.author_stats[author_key]['article_count_analyzed'] = count
+                # Update total_count for author
                 self.author_stats[author_key]['total_count'] += normalized_value
-    
+
         # After counting all analyzed articles, calculate normalized values FOR AFFILIATIONS
         for affiliation, count in affiliation_analyzed_counts.items():
             if total_analyzed_articles > 0:
                 normalized_value = count / total_analyzed_articles
                 self.affiliation_stats[affiliation]['normalized_analyzed'] = normalized_value
                 self.affiliation_stats[affiliation]['article_count_analyzed'] = count
+                # Update total_count for affiliation
                 self.affiliation_stats[affiliation]['total_count'] += normalized_value
-    
+
         # Process ref results
         for doi, result in self.ref_results.items():
             if not isinstance(result, dict) or result.get('status') != 'success':
                 continue
-    
+
             # Update Terms and Topics statistics for reference articles
             self._update_terms_topics_stats(doi, result, 'reference')
-    
+
             # Update author stats for ref articles - ONLY normalized values
             authors = result.get('authors', [])
             if isinstance(authors, list):
@@ -4635,16 +4588,16 @@ class ExcelExporter:
                     full_name = author.get('name', '')
                     if not full_name:
                         continue
-    
+
                     normalized_name = self.processor.normalize_author_name(full_name)
                     key = normalized_name
-    
+
                     # Calculate normalized value for ref articles
                     if total_ref_articles > 0:
                         normalized_value = 1 / total_ref_articles
                         self.author_stats[key]['normalized_reference'] += normalized_value
                         self.author_stats[key]['total_count'] += normalized_value
-    
+
                     # Update ORCID as set
                     if author.get('orcid'):
                         try:
@@ -4653,19 +4606,19 @@ class ExcelExporter:
                                 self.author_stats[key]['orcid'].add(orcid_url)
                         except:
                             pass
-    
+
                     if not self.author_stats[key]['affiliation']:
                         affs = author.get('affiliation', [])
                         if affs and isinstance(affs, list) and len(affs) > 0:
                             self.author_stats[key]['affiliation'] = affs[0]
-    
+
                     if not self.author_stats[key]['country']:
                         countries = result.get('countries', [])
                         if countries and isinstance(countries, list) and len(countries) > 0:
                             self.author_stats[key]['country'] = countries[0]
-    
+
                     self.author_stats[key]['normalized_name'] = normalized_name
-    
+
             # Update affiliation stats for ref articles - ONLY normalized values
             unique_affiliations_in_article = set()
             for author in result.get('authors', []):
@@ -4677,21 +4630,21 @@ class ExcelExporter:
                     for affiliation in affs:
                         if affiliation and isinstance(affiliation, str):
                             unique_affiliations_in_article.add(affiliation)
-    
+
             if total_ref_articles > 0:
                 normalized_aff_value = 1 / total_ref_articles
                 for affiliation in unique_affiliations_in_article:
                     self.affiliation_stats[affiliation]['normalized_reference'] += normalized_aff_value
                     self.affiliation_stats[affiliation]['total_count'] += normalized_aff_value
-    
+
         # Process citing results
         for doi, result in self.citing_results.items():
             if not isinstance(result, dict) or result.get('status') != 'success':
                 continue
-    
+
             # Update Terms and Topics statistics for citing articles
             self._update_terms_topics_stats(doi, result, 'citing')
-    
+
             # Update author stats for citing articles - ONLY normalized values
             authors = result.get('authors', [])
             if isinstance(authors, list):
@@ -4702,16 +4655,16 @@ class ExcelExporter:
                     full_name = author.get('name', '')
                     if not full_name:
                         continue
-    
+
                     normalized_name = self.processor.normalize_author_name(full_name)
                     key = normalized_name
-    
+
                     # Calculate normalized value for citing articles
                     if total_citing_articles > 0:
                         normalized_value = 1 / total_citing_articles
                         self.author_stats[key]['normalized_citing'] += normalized_value
                         self.author_stats[key]['total_count'] += normalized_value
-    
+
                     # Update ORCID as set
                     if author.get('orcid'):
                         try:
@@ -4720,19 +4673,19 @@ class ExcelExporter:
                                 self.author_stats[key]['orcid'].add(orcid_url)
                         except:
                             pass
-    
+
                     if not self.author_stats[key]['affiliation']:
                         affs = author.get('affiliation', [])
                         if affs and isinstance(affs, list) and len(affs) > 0:
                             self.author_stats[key]['affiliation'] = affs[0]
-    
+
                     if not self.author_stats[key]['country']:
                         countries = result.get('countries', [])
                         if countries and isinstance(countries, list) and len(countries) > 0:
                             self.author_stats[key]['country'] = countries[0]
-    
+
                     self.author_stats[key]['normalized_name'] = normalized_name
-    
+
             # Update affiliation stats for citing articles - ONLY normalized values
             unique_affiliations_in_article = set()
             for author in result.get('authors', []):
@@ -4744,21 +4697,12 @@ class ExcelExporter:
                     for affiliation in affs:
                         if affiliation and isinstance(affiliation, str):
                             unique_affiliations_in_article.add(affiliation)
-    
+
             if total_citing_articles > 0:
                 normalized_aff_value = 1 / total_citing_articles
                 for affiliation in unique_affiliations_in_article:
                     self.affiliation_stats[affiliation]['normalized_citing'] += normalized_aff_value
                     self.affiliation_stats[affiliation]['total_count'] += normalized_aff_value
-    
-        # ========== ЛОГИРОВАНИЕ СТАТИСТИКИ ССЫЛОК ==========
-        # Логируем правильную статистику
-        if hasattr(st, 'info'):
-            st.info(f"📊 СТАТИСТИКА ССЫЛОК:")
-            st.info(f"   - Всего уникальных ссылок из анализируемых статей: {len(all_references):,}")
-            st.info(f"   - Всего уникальных цитирований из анализируемых статей: {len(all_citations):,}")
-            st.info(f"   - Анализируемых статей: {total_analyzed_articles:,}")
-        # ====================================================
 
     def _update_terms_topics_stats(self, doi: str, result: Dict, source_type: str):
         """Update terms and topics statistics with error handling"""
