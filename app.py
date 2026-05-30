@@ -1632,94 +1632,6 @@ class OpenAlexClient(APIClient):
             print(f"Error collecting citations for {clean_doi}: {str(e)}")
             return []
 
-    def fetch_all_references_from_openalex(self, doi: str) -> Tuple[int, List[str]]:
-        """
-        Fetch ALL references from OpenAlex for a given DOI
-        Returns: (total_count, list_of_reference_dois)
-        """
-        clean_doi = self._clean_doi(doi)
-        if not clean_doi:
-            return 0, []
-        
-        # Check cache
-        cache_key = f"full_references:{clean_doi}"
-        cached_result = self.cache.get("full_references", cache_key)
-        if cached_result is not None:
-            if isinstance(cached_result, dict):
-                return cached_result.get('count', 0), cached_result.get('refs', [])
-            return 0, []
-        
-        try:
-            # Fetch article data from OpenAlex
-            article_data = self.fetch_article(clean_doi)
-            if not isinstance(article_data, dict) or 'error' in article_data:
-                return 0, []
-            
-            # Get referenced works count
-            references_count = article_data.get('referenced_works_count', 0)
-            
-            # Get list of referenced works (these are OpenAlex IDs)
-            referenced_works = article_data.get('referenced_works', [])
-            
-            if not referenced_works:
-                return references_count, []
-            
-            # Convert OpenAlex IDs to DOIs
-            reference_dois = []
-            
-            # Method 1: Try to extract DOI from the referenced_works (some may be DOIs directly)
-            for ref in referenced_works:
-                if isinstance(ref, str):
-                    # Check if it's already a DOI
-                    if ref.startswith('10.'):
-                        reference_dois.append(ref)
-                    # Check if it's an OpenAlex URL with DOI
-                    elif 'doi.org' in ref:
-                        doi_match = re.search(r'10\.\d{4,9}/[-._;()/:A-Z0-9]+', ref, re.IGNORECASE)
-                        if doi_match:
-                            reference_dois.append(doi_match.group(0))
-            
-            # Method 2: Batch fetch DOIs for OpenAlex IDs
-            openalex_ids = [ref for ref in referenced_works if ref.startswith('https://openalex.org/W')]
-            if openalex_ids:
-                batch_size = 50
-                for i in range(0, len(openalex_ids), batch_size):
-                    batch = openalex_ids[i:i+batch_size]
-                    try:
-                        # Extract IDs from URLs
-                        work_ids = [oid.split('/')[-1] for oid in batch]
-                        works_query = "|".join(work_ids)
-                        url = f"https://api.openalex.org/works?filter=openalex_id:{works_query}&select=doi"
-                        
-                        response = self.session.get(url, timeout=15)
-                        if response.status_code == 200:
-                            data = response.json()
-                            for work in data.get('results', []):
-                                if work.get('doi'):
-                                    ref_doi = self._clean_doi(work['doi'])
-                                    if ref_doi and ref_doi not in reference_dois:
-                                        reference_dois.append(ref_doi)
-                    except Exception as e:
-                        st.warning(f"⚠️ Batch fetch error for {doi}: {e}")
-                        continue
-            
-            # Remove duplicates
-            unique_refs = list(set(reference_dois))
-            
-            # Cache the result
-            cache_result = {
-                'count': references_count,
-                'refs': unique_refs,
-                'timestamp': time.time()
-            }
-            self.cache.set("full_references", cache_key, cache_result, category="full_references")
-            
-            return references_count, unique_refs
-            
-        except Exception as e:
-            st.warning(f"⚠️ OpenAlex references fetch error for {doi}: {e}")
-            return 0, []
-
     def _safe_get(self, data, *keys, default=''):
         """Safe value extraction from dictionary (helper function)"""
         if not isinstance(data, dict):
@@ -2576,56 +2488,39 @@ class OptimizedDOIProcessor:
 
     def collect_and_deduplicate_dois(self, dois_list: List[str], source_type: str = "general") -> List[str]:
         """
-        Collects and deduplicates DOI from a list
+        Собирает и удаляет дубликаты из списка DOI
         Args:
-            dois_list: List of DOI
-            source_type: Source type for logging
+            dois_list: Список DOI
+            source_type: Тип источников для логирования
         Returns:
-            List of unique DOI
+            Список уникальных DOI
         """
         if not dois_list:
             return []
         
-        # Remove empty values
-        clean_dois = []
-        for doi in dois_list:
-            if doi and isinstance(doi, str) and len(doi.strip()) > 5:
-                clean_doi = self._clean_doi_for_deduplication(doi)
-                if clean_doi:
-                    clean_dois.append(clean_doi)
+        # Удаляем пустые значения
+        clean_dois = [doi for doi in dois_list if doi and isinstance(doi, str) and len(doi.strip()) > 5]
         
         if not clean_dois:
             return []
         
-        # Collect unique DOI with improved deduplication
+        # Собираем уникальные DOI
         unique_dois = []
         seen_dois = set()
         duplicate_count = 0
-        source_counts = Counter()
         
         for doi in clean_dois:
-            source_counts[doi] += 1
-            if doi not in seen_dois:
-                seen_dois.add(doi)
-                unique_dois.append(doi)
-            else:
+            clean_doi = self._clean_doi_for_deduplication(doi)
+            if clean_doi and clean_doi not in seen_dois:
+                seen_dois.add(clean_doi)
+                unique_dois.append(clean_doi)
+            elif clean_doi in seen_dois:
                 duplicate_count += 1
         
-        # Log detailed statistics
-        st.info(f"📊 DOI deduplication for {source_type}:")
-        st.info(f"   - Raw DOI count: {len(clean_dois):,}")
-        st.info(f"   - Unique DOI: {len(unique_dois):,}")
-        st.info(f"   - Duplicates removed: {duplicate_count:,}")
-        
-        # Show top duplicates if any
         if duplicate_count > 0:
-            duplicate_dois = [(doi, count) for doi, count in source_counts.items() if count > 1]
-            duplicate_dois.sort(key=lambda x: x[1], reverse=True)
-            
-            if duplicate_dois:
-                st.info(f"   - Top duplicates:")
-                for doi, count in duplicate_dois[:5]:
-                    st.info(f"       • {doi[:50]}... appears {count} times")
+            st.info(f"📊 В {source_type} найдено {duplicate_count} дубликатов DOI")
+        
+        st.info(f"📊 Всего DOI в {source_type}: {len(clean_dois)}, уникальных: {len(unique_dois)}")
         
         return unique_dois
 
@@ -2921,7 +2816,7 @@ class OptimizedDOIProcessor:
 
     def _process_single_doi_optimized(self, doi: str, source_type: str,
                                      original_doi: str, fetch_refs: bool, fetch_cites: bool) -> Dict:
-        
+    
         # Check if already processed in this session
         if source_type == 'analyzed' and doi in self.state_manager.analyzed_results:
             self.stats['session_state_hits'] += 1
@@ -2941,35 +2836,19 @@ class OptimizedDOIProcessor:
             self.state_manager.save_result(doi, cached_result, source_type)
             return cached_result
     
-        # OPTIMIZED: Fetch both APIs in parallel using threading
-        crossref_data = {}
-        openalex_data = {}
-        
-        def fetch_crossref_parallel():
-            nonlocal crossref_data
-            try:
-                crossref_data = self.crossref_client.fetch_article(doi)
-            except Exception:
-                crossref_data = {}
-    
-        def fetch_openalex_parallel():
-            nonlocal openalex_data
-            try:
-                openalex_data = self.openalex_client.fetch_article(doi)
-            except Exception:
-                openalex_data = {}
-    
-        # Parallel execution of both API calls
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            future_crossref = executor.submit(fetch_crossref_parallel)
-            future_openalex = executor.submit(fetch_openalex_parallel)
-            
-            # Wait with timeout
-            try:
-                future_crossref.result(timeout=15)
-                future_openalex.result(timeout=15)
-            except:
-                pass
+        # Use cached API fetching
+        try:
+            crossref_data, openalex_data = cached_fetch_article_data(
+                doi, self.crossref_client, self.openalex_client, self.state_manager
+            )
+        except Exception as e:
+            error_msg = f"Failed to fetch article data: {str(e)}"
+            self._handle_processing_error(doi, error_msg, source_type, original_doi)
+            return {
+                'doi': doi,
+                'status': 'failed',
+                'error': error_msg
+            }
     
         crossref_error = None
         openalex_error = None
@@ -2991,173 +2870,92 @@ class OptimizedDOIProcessor:
         crossref_data = crossref_data if isinstance(crossref_data, dict) else {}
         openalex_data = openalex_data if isinstance(openalex_data, dict) else {}
     
-        # ========== IMPROVED REFERENCES COLLECTION ==========
-        # Collect references from BOTH sources for maximum completeness
         references = []
-        references_count_from_crossref = 0
-        references_count_from_openalex = 0
-        
-        # Method 1: Get references from Crossref
         try:
-            crossref_refs = self.crossref_client.fetch_references(doi)
-            if isinstance(crossref_refs, list):
-                references.extend(crossref_refs)
-                references_count_from_crossref = len(crossref_refs)
-        except Exception as e:
-            st.warning(f"⚠️ Crossref references error for {doi}: {e}")
-        
-        # Method 2: Get references from OpenAlex (CRITICAL FIX)
-        try:
-            # OpenAlex has two ways to get references:
-            # 1. 'referenced_works_count' - total count
-            # 2. 'referenced_works' - list of referenced work IDs
-            
-            if isinstance(openalex_data, dict) and openalex_data:
-                # Get count from OpenAlex
-                references_count_from_openalex = openalex_data.get('referenced_works_count', 0)
-                
-                # Get actual referenced works (these are OpenAlex IDs, not DOIs)
-                referenced_works = openalex_data.get('referenced_works', [])
-                
-                # For each referenced work, we need to get its DOI
-                # But to avoid too many API calls, we can do batch processing
-                if referenced_works:
-                    # Option A: If we have the work IDs, we can try to extract DOIs from them
-                    # But OpenAlex IDs are like "W123456789" - we need separate API calls
-                    # Instead, we can make a batch request to OpenAlex to get DOIs
-                    batch_size = 50
-                    for i in range(0, len(referenced_works), batch_size):
-                        batch = referenced_works[i:i+batch_size]
-                        try:
-                            # Build query for multiple works
-                            works_query = "|".join(batch)
-                            url = f"https://api.openalex.org/works?filter=openalex_id:{works_query}&select=doi"
-                            response = self.session.get(url, timeout=10)
-                            if response.status_code == 200:
-                                data = response.json()
-                                for work in data.get('results', []):
-                                    if work.get('doi'):
-                                        ref_doi = self._clean_doi(work['doi'])
-                                        if ref_doi and ref_doi not in references:
-                                            references.append(ref_doi)
-                        except Exception as e:
-                            continue
-                    
-                    # If the batch approach fails, at least we have the count
-                    if not references and references_count_from_openalex > 0:
-                        # We couldn't get DOIs, but we know the count
-                        # We'll use the count for statistics
-                        pass
-                        
-        except Exception as e:
-            st.warning(f"⚠️ OpenAlex references error for {doi}: {e}")
-        
-        # Combine reference counts - use the maximum from both sources
-        # Because one source might have incomplete data
-        total_references_count = max(references_count_from_crossref, references_count_from_openalex)
-        
-        # If we have no references from either source, try alternative OpenAlex approach
-        if total_references_count == 0 and isinstance(openalex_data, dict):
-            # Try to get references via the OpenAlex works endpoint with cites filter
-            try:
-                openalex_id = openalex_data.get('id', '')
-                if openalex_id:
-                    # Extract the OpenAlex ID from the URL
-                    work_id = openalex_id.split('/')[-1]
-                    url = f"https://api.openalex.org/works?filter=cited_by:{work_id}&select=doi,referenced_works"
-                    response = self.session.get(url, timeout=10)
-                    if response.status_code == 200:
-                        data = response.json()
-                        # This gives us articles that cite this work, not references
-                        # But we can get referenced works from each result
-                        for result in data.get('results', []):
-                            ref_works = result.get('referenced_works', [])
-                            if ref_works:
-                                references_count_from_openalex = max(references_count_from_openalex, len(ref_works))
-                                total_references_count = max(total_references_count, len(ref_works))
-            except Exception:
-                pass
-        
-        # Remove duplicates from references list
-        if references:
-            # Deduplicate while preserving order
-            seen = set()
-            unique_references = []
-            for ref in references:
-                if ref and ref not in seen:
-                    seen.add(ref)
-                    unique_references.append(ref)
-            references = unique_references
-            total_references_count = max(total_references_count, len(references))
+            # Use cached references fetching
+            refs = cached_get_references(doi, self.crossref_client, self.state_manager)
+            references = refs if isinstance(refs, list) else []
     
-        # ========== IMPROVED CITATIONS COLLECTION ==========
+            if references:
+                self.reference_relationships[doi] = references
+        except Exception as e:
+            st.warning(f"⚠️ Error fetching references for {doi}: {e}")
+            references = []
+    
         citations = []
-        citations_count_from_crossref = 0
-        citations_count_from_openalex = 0
-        
         try:
-            # Get citations from Crossref
-            cites_crossref = self.crossref_client.fetch_citations(doi)
-            if isinstance(cites_crossref, list):
-                citations.extend(cites_crossref)
-                citations_count_from_crossref = len(cites_crossref)
-        except Exception:
-            pass
-        
-        try:
-            # Get citations from OpenAlex (citing works)
+            # Use cached citing works fetching with timeout protection
             if source_type == "analyzed":
-                # For analyzed articles: collect all citations
-                cites_openalex = cached_get_citing_works(doi, self.openalex_client, source_type, self.state_manager)
-                if isinstance(cites_openalex, list):
-                    citations.extend(cites_openalex)
-                    citations_count_from_openalex = len(cites_openalex)
+                # For analyzed articles: collect ALL citations
+                cites_openalex = []
+                try:
+                    # Add timeout protection via threading
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                        future = executor.submit(
+                            cached_get_citing_works, 
+                            doi, self.openalex_client, source_type, self.state_manager
+                        )
+                        try:
+                            cites_openalex = future.result(timeout=45)  # 45 second timeout
+                            if not isinstance(cites_openalex, list):
+                                cites_openalex = []
+                        except concurrent.futures.TimeoutError:
+                            st.warning(f"⚠️ Timeout collecting citations for {doi}")
+                            cites_openalex = []
+                except Exception as e:
+                    st.warning(f"⚠️ Error in OpenAlex citation collection for {doi}: {e}")
+                    cites_openalex = []
+    
+                # Also get citations from Crossref for data completeness
+                cites_crossref = []
+                try:
+                    cites_crossref = self.crossref_client.fetch_citations(doi)
+                    if not isinstance(cites_crossref, list):
+                        cites_crossref = []
+                except Exception as e:
+                    st.warning(f"⚠️ Error in Crossref citation collection for {doi}: {e}")
+                    cites_crossref = []
+    
+                citations = list(set(cites_openalex + cites_crossref))
+    
+                if citations:
+                    self.citation_relationships[doi] = citations
+    
             else:
-                # For reference and citing articles: use faster limited collection
-                cites_openalex = cached_get_citing_works(doi, self.openalex_client, "standard", self.state_manager)
-                if isinstance(cites_openalex, list):
-                    citations.extend(cites_openalex)
-                    citations_count_from_openalex = len(cites_openalex)
-        except Exception:
-            pass
-        
-        # Also try to get citation count directly from OpenAlex data
-        if isinstance(openalex_data, dict) and openalex_data:
-            oa_citation_count = openalex_data.get('cited_by_count', 0)
-            if oa_citation_count > citations_count_from_openalex:
-                citations_count_from_openalex = oa_citation_count
-        
-        # Remove duplicates from citations
-        if citations:
-            seen = set()
-            unique_citations = []
-            for cite in citations:
-                if cite and cite not in seen:
-                    seen.add(cite)
-                    unique_citations.append(cite)
-            citations = unique_citations
-        
-        total_citations_count = max(citations_count_from_crossref, citations_count_from_openalex, len(citations))
-        
+                # For reference and citing articles: use limited collection
+                cites_openalex = []
+                try:
+                    cites_openalex = cached_get_citing_works(doi, self.openalex_client, "standard", self.state_manager)
+                    if not isinstance(cites_openalex, list):
+                        cites_openalex = []
+                except Exception as e:
+                    st.warning(f"⚠️ Error in OpenAlex citation collection for {doi}: {e}")
+                    cites_openalex = []
+                    
+                cites_crossref = []
+                try:
+                    cites_crossref = self.crossref_client.fetch_citations(doi)
+                    if not isinstance(cites_crossref, list):
+                        cites_crossref = []
+                except Exception as e:
+                    st.warning(f"⚠️ Error in Crossref citation collection for {doi}: {e}")
+                    cites_crossref = []
+    
+                citations = list(set(cites_openalex + cites_crossref))
+    
+                if citations:
+                    self.citation_relationships[doi] = citations
+                    
+        except Exception as e:
+            st.warning(f"⚠️ General citation fetch error for {doi}: {e}")
+            citations = []
+    
         # Use cached article data extraction
         try:
             result = cached_extract_article_data(
                 crossref_data, openalex_data, doi, references, citations, self.data_processor
             )
-            
-            # Add reference and citation counts that we computed
-            if result.get('status') == 'success':
-                # Ensure the counts are correct in the result
-                if 'publication_info' in result:
-                    result['publication_info']['references_count_crossref'] = references_count_from_crossref
-                    result['publication_info']['references_count_openalex'] = references_count_from_openalex
-                    result['publication_info']['citations_count_crossref'] = citations_count_from_crossref
-                    result['publication_info']['citations_count_openalex'] = citations_count_from_openalex
-                
-                # Store the actual counts
-                result['references_count_total'] = total_references_count
-                result['citations_count_total'] = total_citations_count
-                
         except Exception as e:
             error_msg = f"Failed to extract article data: {str(e)}"
             self._handle_processing_error(doi, error_msg, source_type, original_doi)
@@ -3177,12 +2975,16 @@ class OptimizedDOIProcessor:
                             self.author_affiliation_map[author_name].add(affiliation)
                             self.doi_affiliation_map[doi].add(affiliation)
     
+        if result.get('status') == 'success':
             self.stats['successful'] += 1
     
             # Cache at all levels
             self.cache.set("full_analysis", cache_key, result, category="full_analysis")
             self.state_manager.save_result(doi, result, source_type)
+            
+            # CRITICAL FIX: Save session state immediately after each successful DOI
             self.state_manager.save_to_session()
+    
             self.cache.update_popularity(doi)
         else:
             self.stats['failed'] += 1
@@ -3208,110 +3010,26 @@ class OptimizedDOIProcessor:
         self.cache.mark_as_failed("full_analysis", doi, error)
 
     def collect_all_references(self, results: Dict[str, Dict]) -> List[str]:
-        """
-        Collects ALL references from all articles with proper deduplication
-        Uses both Crossref and OpenAlex data for maximum completeness
-        """
+        """Собирает ВСЕ ссылки из всех статей, возвращает только уникальные DOI"""
         all_refs = []
-        ref_source_info = defaultdict(lambda: {'crossref': False, 'openalex': False, 'count': 0})
         
-        # First pass: collect all references from analyzed results
         for doi, result in results.items():
-            if result.get('status') != 'success':
-                continue
-            
-            # Get references from the result (already extracted)
-            refs = result.get('references', [])
-            if refs and isinstance(refs, list):
-                for ref_doi in refs:
-                    if ref_doi and isinstance(ref_doi, str) and len(ref_doi.strip()) > 5:
-                        all_refs.append(ref_doi)
-                        ref_source_info[ref_doi]['count'] += 1
-            
-            # Also check if we have reference counts from the publication_info
-            pub_info = result.get('publication_info', {})
-            if pub_info:
-                crossref_ref_count = pub_info.get('references_count_crossref', 0)
-                openalex_ref_count = pub_info.get('references_count_openalex', 0)
-                
-                # If we have counts but no actual references, note that we have incomplete data
-                if crossref_ref_count > 0 and (not refs or len(refs) < crossref_ref_count):
-                    st.info(f"⚠️ Incomplete references for {doi}: Crossref shows {crossref_ref_count}, but only {len(refs)} extracted")
+            if result.get('status') == 'success':
+                refs = result.get('references', [])
+                if refs:
+                    all_refs.extend(refs)
         
-        # Second pass: try to get references directly from OpenAlex for any missing ones
-        # But only if we have the OpenAlex data cached
-        for doi, result in results.items():
-            if result.get('status') != 'success':
-                continue
-            
-            # Check if we already have enough references
-            current_refs = result.get('references', [])
-            pub_info = result.get('publication_info', {})
-            expected_count = max(
-                pub_info.get('references_count_crossref', 0),
-                pub_info.get('references_count_openalex', 0)
-            )
-            
-            # If we have significantly fewer references than expected, try to get more
-            if expected_count > 0 and len(current_refs) < expected_count * 0.8:
-                st.info(f"🔍 Attempting to get additional references for {doi} from OpenAlex...")
-                
-                try:
-                    # Fetch fresh OpenAlex data
-                    openalex_data = self.openalex_client.fetch_article(doi)
-                    if isinstance(openalex_data, dict) and openalex_data:
-                        referenced_works = openalex_data.get('referenced_works', [])
-                        if referenced_works:
-                            # Try to get DOIs for these works
-                            batch_size = 50
-                            for i in range(0, len(referenced_works), batch_size):
-                                batch = referenced_works[i:i+batch_size]
-                                try:
-                                    works_query = "|".join(batch)
-                                    url = f"https://api.openalex.org/works?filter=openalex_id:{works_query}&select=doi"
-                                    response = self.session.get(url, timeout=10)
-                                    if response.status_code == 200:
-                                        data = response.json()
-                                        for work in data.get('results', []):
-                                            if work.get('doi'):
-                                                ref_doi = self._clean_doi(work['doi'])
-                                                if ref_doi and ref_doi not in all_refs:
-                                                    all_refs.append(ref_doi)
-                                                    ref_source_info[ref_doi]['openalex'] = True
-                                except Exception:
-                                    continue
-                except Exception as e:
-                    st.warning(f"⚠️ Could not fetch additional references for {doi}: {e}")
-        
-        # Remove duplicates and empty values
+        # Удаляем дубликаты и пустые значения
         unique_refs = []
         seen_refs = set()
-        duplicate_count = 0
-        
         for ref in all_refs:
             if ref and ref not in seen_refs:
                 seen_refs.add(ref)
                 unique_refs.append(ref)
-            elif ref and ref in seen_refs:
-                duplicate_count += 1
         
-        # Log statistics
-        st.info(f"📊 References collection complete:")
-        st.info(f"   - Total raw references collected: {len(all_refs):,}")
-        st.info(f"   - Duplicates removed: {duplicate_count:,}")
-        st.info(f"   - Unique references: {len(unique_refs):,}")
+        st.info(f"📊 Собрано {len(all_refs)} ссылок, из них {len(unique_refs)} уникальных")
         
-        # Show breakdown by source if available
-        crossref_only = sum(1 for info in ref_source_info.values() if info['crossref'] and not info['openalex'])
-        openalex_only = sum(1 for info in ref_source_info.values() if info['openalex'] and not info['crossref'])
-        both_sources = sum(1 for info in ref_source_info.values() if info['crossref'] and info['openalex'])
-        
-        if crossref_only > 0 or openalex_only > 0:
-            st.info(f"   - References from Crossref only: {crossref_only:,}")
-            st.info(f"   - References from OpenAlex only: {openalex_only:,}")
-            st.info(f"   - References from both sources: {both_sources:,}")
-        
-        # Save reference relationships for each found DOI
+        # Сохраняем связи для каждого найденного DOI ссылки
         for doi, result in results.items():
             if result.get('status') == 'success':
                 refs = result.get('references', [])
@@ -3322,73 +3040,6 @@ class OptimizedDOIProcessor:
                                 self.reference_relationships[ref_doi].append(doi)
         
         return unique_refs
-
-    def validate_and_fix_reference_counts(self, results: Dict[str, Dict]) -> Dict[str, Dict]:
-        """
-        Validate and fix reference counts by comparing Crossref and OpenAlex data
-        """
-        fixed_results = results.copy()
-        
-        for doi, result in results.items():
-            if result.get('status') != 'success':
-                continue
-            
-            pub_info = result.get('publication_info', {})
-            current_refs = result.get('references', [])
-            
-            crossref_count = pub_info.get('references_count_crossref', 0)
-            openalex_count = pub_info.get('references_count_openalex', 0)
-            
-            # Determine if we need to fix
-            if crossref_count == 0 and openalex_count == 0:
-                continue
-                
-            # If we have significantly fewer references than either source indicates
-            expected_max = max(crossref_count, openalex_count)
-            
-            if expected_max > 0 and len(current_refs) < expected_max * 0.5:
-                st.info(f"🔧 Fixing incomplete references for {doi}: have {len(current_refs)}, expected {expected_max}")
-                
-                # Try to fetch fresh data
-                try:
-                    # Get OpenAlex data directly
-                    openalex_data = self.openalex_client.fetch_article(doi)
-                    if isinstance(openalex_data, dict) and openalex_data:
-                        referenced_works = openalex_data.get('referenced_works', [])
-                        openalex_ref_count = openalex_data.get('referenced_works_count', 0)
-                        
-                        if referenced_works and openalex_ref_count > len(current_refs):
-                            # Try to get DOIs for these works
-                            new_refs = []
-                            batch_size = 50
-                            for i in range(0, len(referenced_works), batch_size):
-                                batch = referenced_works[i:i+batch_size]
-                                try:
-                                    works_query = "|".join(batch)
-                                    url = f"https://api.openalex.org/works?filter=openalex_id:{works_query}&select=doi"
-                                    response = self.session.get(url, timeout=10)
-                                    if response.status_code == 200:
-                                        data = response.json()
-                                        for work in data.get('results', []):
-                                            if work.get('doi'):
-                                                ref_doi = self._clean_doi(work['doi'])
-                                                if ref_doi and ref_doi not in new_refs:
-                                                    new_refs.append(ref_doi)
-                                except Exception:
-                                    continue
-                            
-                            if new_refs:
-                                # Update the result
-                                fixed_results[doi]['references'] = new_refs
-                                fixed_results[doi]['references_count_total'] = len(new_refs)
-                                if 'publication_info' in fixed_results[doi]:
-                                    fixed_results[doi]['publication_info']['references_count_openalex'] = len(new_refs)
-                                
-                                st.success(f"✅ Fixed {doi}: now has {len(new_refs)} references")
-                except Exception as e:
-                    st.warning(f"⚠️ Could not fix references for {doi}: {e}")
-        
-        return fixed_results
 
     def collect_all_citations(self, results: Dict[str, Dict]) -> List[str]:
         """Собирает ВСЕ цитирующие работы для всех статей, возвращает только уникальные DOI"""
@@ -5530,24 +5181,23 @@ class ExcelExporter:
         return sorted(data, key=sort_key)
 
     def _prepare_article_sheet(self, results: Dict[str, Dict], source_type: str) -> List[Dict]:
-        """Prepare article sheet with correct reference counts"""
         data = []
-    
+
         for doi, result in results.items():
             if not isinstance(result, dict) or result.get('status') != 'success':
                 continue
-    
+
             pub_info = result.get('publication_info', {})
             authors = result.get('authors', [])
             topics_info = result.get('topics_info', {})
-    
+
             orcid_urls = result.get('orcid_urls', [])
             affiliations = list(set([aff for author in authors 
                                    if isinstance(author, dict) 
                                    for aff in author.get('affiliation', []) 
                                    if aff and isinstance(aff, str)]))
             countries = result.get('countries', [])
-    
+
             annual_cr = self._calculate_annual_citation_rate(
                 pub_info.get('citation_count_crossref', 0),
                 pub_info.get('year', '')
@@ -5556,26 +5206,7 @@ class ExcelExporter:
                 pub_info.get('citation_count_openalex', 0),
                 pub_info.get('year', '')
             )
-    
-            # Get the correct reference count - use the total we computed
-            references_count = result.get('references_count_total', 0)
-            if references_count == 0:
-                # Fallback to individual source counts
-                references_count = max(
-                    pub_info.get('references_count_crossref', 0),
-                    pub_info.get('references_count_openalex', 0),
-                    len(result.get('references', []))
-                )
-            
-            # Get citations count
-            citations_count = result.get('citations_count_total', 0)
-            if citations_count == 0:
-                citations_count = max(
-                    pub_info.get('citations_count_crossref', 0),
-                    pub_info.get('citations_count_openalex', 0),
-                    len(result.get('citations', []))
-                )
-    
+
             row = {
                 'doi': doi,
                 'publication_date': pub_info.get('publication_date', ''),
@@ -5594,20 +5225,16 @@ class ExcelExporter:
                 'Citation counts (OA)': pub_info.get('citation_count_openalex', 0),
                 'Annual cit counts (CR)': round(annual_cr, 2),
                 'Annual cit counts (OA)': round(annual_oa, 2),
-                'references_count (CR)': pub_info.get('references_count_crossref', 0),
-                'references_count (OA)': pub_info.get('references_count_openalex', 0),
-                'references_count (TOTAL)': references_count,  # This is the key fix!
-                'citations_count (TOTAL)': citations_count,    # Also fix citations
-                'actual_references_listed': len(result.get('references', [])),
+                'references_count': result.get('references_count', 0),
                 'Topic': topics_info.get('topic', ''),
                 'Subfield': topics_info.get('subfield', ''),
                 'Field': topics_info.get('field', ''),
                 'Domain': topics_info.get('domain', ''),
                 'Concepts': '; '.join(topics_info.get('concepts', [])) if topics_info.get('concepts') else ''
             }
-    
+
             data.append(row)
-    
+
         return data
     
     def _prepare_author_frequency(self, results: Dict[str, Dict], source_type: str) -> List[Dict]:
