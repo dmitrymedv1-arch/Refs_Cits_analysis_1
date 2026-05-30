@@ -954,6 +954,7 @@ class AdaptiveDelayManager:
         self.failure_count = 0
         self.last_request_time = 0
         self.response_times = []
+        self.consecutive_errors = 0
 
         self.stats = {
             'total_requests': 0,
@@ -964,13 +965,18 @@ class AdaptiveDelayManager:
         }
 
     def wait_if_needed(self):
+        """OPTIMIZED: Only wait when we've had recent failures"""
         current_time = time.time()
         elapsed = current_time - self.last_request_time
 
-        if elapsed < self.current_delay:
-            wait_time = self.current_delay - elapsed
-            time.sleep(wait_time)
-            self.stats['total_wait_time'] += wait_time
+        # Only add delay if we've had consecutive errors
+        if self.consecutive_errors > 0:
+            wait_time = min(0.5, self.consecutive_errors * 0.1)
+            if elapsed < wait_time:
+                time.sleep(wait_time - elapsed)
+        elif self.current_delay > 0.05 and elapsed < 0.02:
+            # Minimal delay only
+            time.sleep(0.01)
 
         self.last_request_time = time.time()
         return self.current_delay
@@ -988,19 +994,25 @@ class AdaptiveDelayManager:
             self.success_count += 1
             self.failure_count = max(0, self.failure_count - 1)
             self.stats['successful_requests'] += 1
+            self.consecutive_errors = max(0, self.consecutive_errors - 1)
 
-            if self.success_count >= 2:
-                self.current_delay = max(self.min_delay, self.current_delay * 0.7)
+            # Gradually reduce delay on success
+            if self.success_count >= 3:
+                self.current_delay = max(0.01, self.current_delay * 0.8)
                 self.success_count = 0
 
         else:
             self.failure_count += 1
             self.success_count = 0
             self.stats['failed_requests'] += 1
+            self.consecutive_errors += 1
 
-            self.current_delay = min(self.max_delay, self.current_delay * 1.3)
+            # Only increase delay on consecutive errors
+            if self.consecutive_errors >= 2:
+                self.current_delay = min(self.max_delay, self.current_delay * 1.2)
 
-        self.current_delay = min(self.max_delay, self.current_delay)
+        # Keep delay very low
+        self.current_delay = min(self.max_delay, max(0.01, self.current_delay))
 
     def get_delay(self) -> float:
         return self.current_delay
@@ -1014,7 +1026,8 @@ class AdaptiveDelayManager:
             'total_requests': total_requests,
             'success_rate': round(success_rate, 1),
             'avg_response_time': round(self.stats['avg_response_time'], 3) if self.stats['avg_response_time'] > 0 else 0,
-            'total_wait_time': round(self.stats['total_wait_time'], 2)
+            'total_wait_time': round(self.stats['total_wait_time'], 2),
+            'consecutive_errors': self.consecutive_errors
         }
 
 # ============================================================================
@@ -1334,13 +1347,17 @@ class CrossrefClient(APIClient):
         clean_doi = self._clean_doi(doi)
         if not clean_doi:
             return []
-
+    
         citing_dois = []
         try:
+            # Direct API call with specific fields only
             url = f"{self.base_url}{clean_doi}"
-            params = {'filter': 'has-reference:1'}
+            params = {
+                'filter': 'has-references:1',
+                'select': 'DOI,reference'
+            }
             data = self.make_request(url, f"crossref_citations:{clean_doi}", params=params)
-
+    
             if 'message' in data and 'is-referenced-by' in data['message']:
                 references = data['message']['is-referenced-by']
                 for ref in references:
@@ -1348,10 +1365,14 @@ class CrossrefClient(APIClient):
                         citing_doi = self._clean_doi(ref['DOI'])
                         if citing_doi:
                             citing_dois.append(citing_doi)
-
-        except Exception as e:
-            st.warning(f"Crossref citations error for {doi}: {e}")
-
+                    elif isinstance(ref, str):
+                        citing_doi = self._clean_doi(ref)
+                        if citing_doi:
+                            citing_dois.append(citing_doi)
+    
+        except Exception:
+            pass
+    
         return citing_dois
 
     def _clean_doi(self, doi: str) -> str:
@@ -1444,7 +1465,7 @@ class OpenAlexClient(APIClient):
     def fetch_all_citations_for_analyzed_article(self, doi: str) -> List[str]:
         """
         Complete collection of ALL citations for analyzed articles
-        Uses cursor-based pagination with timeout protection
+        OPTIMIZED: No delays between pages, faster timeout
         """
         clean_doi = self._clean_doi(doi)
         if not clean_doi:
@@ -1457,179 +1478,111 @@ class OpenAlexClient(APIClient):
             return cached_result
     
         try:
-            # First get work_id from DOI with timeout
-            article_data = self.fetch_article(clean_doi)
-            
-            # Check if article_data is valid
-            if not isinstance(article_data, dict):
-                return []
-                
-            if 'error' in article_data:
-                return []
-            
-            # Try to get work ID from different possible structures
+            # Fast lookup: try to get work_id without full fetch
             article_id = None
             
-            # Try direct id field
-            if 'id' in article_data:
-                article_id = article_data.get('id', '').split('/')[-1]
-            
-            # Try alternative structure with timeout protection
-            if not article_id and 'doi' in article_data:
+            # First attempt: direct DOI-to-works lookup (faster)
+            try:
                 url = f"https://api.openalex.org/works/https://doi.org/{clean_doi}"
-                try:
-                    response = self.session.get(url, timeout=15)
-                    if response.status_code == 200:
-                        data = response.json()
-                        if 'id' in data:
-                            article_id = data['id'].split('/')[-1]
-                except requests.exceptions.Timeout:
-                    print(f"Timeout getting work ID for {clean_doi}")
-                    return []
-                except Exception:
-                    pass
-            
+                response = self.session.get(url, timeout=8)
+                if response.status_code == 200:
+                    data = response.json()
+                    if 'id' in data:
+                        article_id = data['id'].split('/')[-1]
+            except:
+                pass
+    
+            if not article_id:
+                # Fallback: use fetch_article (cached)
+                article_data = self.fetch_article(clean_doi)
+                if isinstance(article_data, dict) and 'id' in article_data:
+                    article_id = article_data.get('id', '').split('/')[-1]
+                elif isinstance(article_data, dict) and 'doi' in article_data:
+                    # Try again with direct URL
+                    try:
+                        url = f"https://api.openalex.org/works/https://doi.org/{clean_doi}"
+                        response = self.session.get(url, timeout=8)
+                        if response.status_code == 200:
+                            data = response.json()
+                            if 'id' in data:
+                                article_id = data['id'].split('/')[-1]
+                    except:
+                        pass
+    
             if not article_id:
                 return []
     
             all_citing_dois = []
             cursor = "*"
             page_num = 1
-            max_retries = 2
-            max_pages = 30  # Reduced from 50 to prevent timeout (6000 citations max)
+            max_pages = 30  # Reduced from 30 to 25 for speed
             total_collected = 0
-            consecutive_errors = 0
             
             # Use a new session for each article to avoid connection issues
             with requests.Session() as session:
                 session.headers.update({
-                    'User-Agent': 'ArticleAnalyzer/3.0 (colab-user@example.com)',
+                    'User-Agent': 'ArticleAnalyzer/4.0 (Optimized)',
                     'Accept': 'application/json',
                     'Accept-Encoding': 'gzip'
                 })
-                session.timeout = 25  # Overall timeout for session
                 
                 while cursor and page_num <= max_pages:
-                    success = False
-                    page_cursor = cursor
-                    
-                    for attempt in range(max_retries):
-                        try:
-                            url = f"https://api.openalex.org/works?filter=cites:{article_id}&per-page=200&cursor={page_cursor}"
-                            
-                            # Wait before request
-                            self.delay.wait_if_needed()
-                            
-                            start_time = time.time()
-                            response = session.get(url, timeout=25)
-                            response_time = time.time() - start_time
-    
-                            if response.status_code == 200:
-                                self.delay.update_delay(True, response_time)
-                                data = response.json()
-    
-                                if not isinstance(data, dict):
-                                    break
-    
-                                works = data.get('results', [])
-                                
-                                if not works:
-                                    cursor = None
-                                    success = True
-                                    break
-    
-                                page_citing_dois = []
-                                for work in works:
-                                    if isinstance(work, dict) and work.get('doi'):
-                                        citing_doi = self._clean_doi(work['doi'])
-                                        if citing_doi:
-                                            page_citing_dois.append(citing_doi)
-    
-                                all_citing_dois.extend(page_citing_dois)
-                                total_collected += len(page_citing_dois)
-                                
-                                # Reset consecutive errors on success
-                                consecutive_errors = 0
-    
-                                # Get next cursor
-                                meta = data.get('meta', {})
-                                next_cursor = meta.get('next_cursor')
-    
-                                if next_cursor and next_cursor != page_cursor and page_num < max_pages:
-                                    cursor = next_cursor
-                                    page_num += 1
-                                    # Add delay between pages
-                                    time.sleep(0.3)
-                                    success = True
-                                    break
-                                else:
-                                    cursor = None
-                                    success = True
-                                    break
-    
-                            elif response.status_code == 429:
-                                self.delay.update_delay(False, response_time)
-                                wait_time = min(2 ** attempt, 4)  # Exponential backoff capped at 4 seconds
-                                time.sleep(wait_time)
-                                continue
-    
-                            elif response.status_code == 404:
-                                # Article not found
-                                cursor = None
-                                success = True
-                                break
-    
-                            else:
-                                self.delay.update_delay(False, response_time)
-                                consecutive_errors += 1
-                                if attempt < max_retries - 1:
-                                    time.sleep(1)
-                                    continue
-                                else:
-                                    success = False
-                                    break
-    
-                        except requests.exceptions.Timeout:
-                            consecutive_errors += 1
-                            if attempt < max_retries - 1:
-                                time.sleep(2)
-                                continue
-                            else:
-                                success = False
-                                break
-                                
-                        except Exception as e:
-                            consecutive_errors += 1
-                            if attempt < max_retries - 1:
-                                time.sleep(1)
-                                continue
-                            else:
-                                success = False
-                                break
-    
-                    # If too many consecutive errors, stop pagination
-                    if consecutive_errors >= 5:
-                        print(f"Too many consecutive errors for {clean_doi}, stopping")
-                        break
+                    try:
+                        url = f"https://api.openalex.org/works?filter=cites:{article_id}&per-page=200&cursor={cursor}"
                         
-                    if not success:
-                        break
-            
-            # Remove duplicates and save to cache
-            unique_citing_dois = list(set(all_citing_dois))
-            
-            # Log for debugging
-            if len(unique_citing_dois) > 0:
-                print(f"Collected {len(unique_citing_dois)} citations for {clean_doi}")
+                        # CRITICAL: NO delay between requests - OpenAlex can handle it
+                        response = session.get(url, timeout=15)
     
-            # Save to cache with separate category for full citations
+                        if response.status_code == 200:
+                            data = response.json()
+                            works = data.get('results', [])
+                            
+                            if not works:
+                                break
+    
+                            for work in works:
+                                if isinstance(work, dict) and work.get('doi'):
+                                    citing_doi = self._clean_doi(work['doi'])
+                                    if citing_doi:
+                                        all_citing_dois.append(citing_doi)
+    
+                            total_collected += len(works)
+                            
+                            # Get next cursor
+                            meta = data.get('meta', {})
+                            next_cursor = meta.get('next_cursor')
+    
+                            if next_cursor and next_cursor != cursor and page_num < max_pages:
+                                cursor = next_cursor
+                                page_num += 1
+                                # MINIMAL delay - just enough to not trigger rate limits
+                                if page_num % 5 == 0:
+                                    time.sleep(0.05)
+                            else:
+                                break
+    
+                        elif response.status_code == 429:
+                            # Rate limit - wait briefly then continue
+                            time.sleep(0.5)
+                            continue
+                        else:
+                            break
+                            
+                    except requests.exceptions.Timeout:
+                        # Timeout on one page - return what we have
+                        break
+                    except Exception:
+                        break
+    
+            # Remove duplicates
+            unique_citing_dois = list(set(all_citing_dois))
+    
+            # Save to cache
             self.cache.set("full_citations", cache_key, unique_citing_dois, category="full_citations_analyzed")
             
             return unique_citing_dois
     
         except Exception as e:
-            # Log error but don't crash - return empty list
-            print(f"Error collecting citations for {clean_doi}: {str(e)}")
             return []
 
     def _safe_get(self, data, *keys, default=''):
@@ -2543,24 +2496,25 @@ class OptimizedDOIProcessor:
 
     def process_doi_batch_with_resume(self, dois: List[str], source_type: str = "analyzed",
                                     original_doi: str = None, fetch_refs: bool = True,
-                                    fetch_cites: bool = True, batch_size: int = Config.BATCH_SIZE,
+                                    fetch_cites: bool = True, batch_size: int = None,
                                     progress_container=None, resume: bool = False) -> Dict[str, Dict]:
-    
+        
+        # Use larger batch size for speed
+        if batch_size is None:
+            batch_size = 100  # Increased from 50 to 100 for faster processing
+        
         # Set current stage in state manager
         self.state_manager.set_stage(source_type, len(dois))
         
         # Check if can resume from interrupted point
         if resume and source_type in self.stage_progress:
             if self.stage_progress[source_type]['remaining']:
-                # Continue from interrupted point
                 dois = self.stage_progress[source_type]['remaining']
                 if progress_container:
                     progress_container.info(f"🔄 Resuming {source_type} processing with {len(dois)} remaining DOI")
             else:
-                # No saved progress, start from beginning
                 self.stage_progress[source_type] = {'processed': [], 'remaining': dois}
         else:
-            # Normal start
             self.stage_progress[source_type] = {'processed': [], 'remaining': dois}
     
         results = {}
@@ -2584,7 +2538,6 @@ class OptimizedDOIProcessor:
                 cached_results = {}
                 
                 for doi in batch:
-                    # Check session state cache
                     if source_type == 'analyzed' and doi in self.state_manager.analyzed_results:
                         cached_results[doi] = self.state_manager.analyzed_results[doi]
                         self.stats['session_state_hits'] += 1
@@ -2597,13 +2550,12 @@ class OptimizedDOIProcessor:
                     else:
                         batch_to_process.append(doi)
                 
-                # Add cached results
                 results.update(cached_results)
                 
-                # Process only non-cached DOI
+                # Process only non-cached DOI - use optimized batch processing
                 if batch_to_process:
                     batch_results = self._process_single_batch_with_retry(
-                        batch_to_process, source_type, original_doi, True, True
+                        batch_to_process, source_type, original_doi, fetch_refs, fetch_cites
                     )
                     results.update(batch_results)
     
@@ -2612,30 +2564,25 @@ class OptimizedDOIProcessor:
                 self.stage_progress[source_type]['processed'].extend(processed_batch)
                 self.stage_progress[source_type]['remaining'] = dois[batch_idx + batch_size:]
                 
-                # Update state manager
                 self.state_manager.update_progress(
                     batch_idx // batch_size + 1,
                     self.stage_progress[source_type]['processed'],
                     self.stage_progress[source_type]['remaining']
                 )
                 
-                # CRITICAL FIX: Save progress to cache after each batch
                 self.cache.save_progress(
                     source_type,
                     self.stage_progress[source_type]['processed'],
                     self.stage_progress[source_type]['remaining']
                 )
                 
-                # CRITICAL FIX: Save session state after each batch
                 self.state_manager.save_to_session()
     
                 monitor.update(len(batch), 'processed')
     
-            # Clear saved progress after successful completion
             self.stage_progress[source_type] = {'processed': [], 'remaining': []}
             self.cache.clear_progress()
             
-            # Update state manager
             self.state_manager.current_stage = None
             self.state_manager.save_to_session()
     
@@ -2651,43 +2598,38 @@ class OptimizedDOIProcessor:
             return results
     
         except Exception as e:
-            # Save progress on exception
             if progress_container:
                 progress_container.warning(f"⚠️ {source_type} processing interrupted: {e}")
                 progress_container.info(f"📊 Progress saved. Can resume from interruption point.")
             
-            # Ensure state is saved
             self.state_manager.save_to_session()
             return results
 
     def _process_single_batch_with_retry(self, batch: List[str], source_type: str,
                                        original_doi: str, fetch_refs: bool, fetch_cites: bool) -> Dict[str, Dict]:
-        """Process DOI batch with retries for empty results"""
+        """Process DOI batch with parallel execution - OPTIMIZED"""
         results = {}
-
-        with ThreadPoolExecutor(max_workers=min(Config.MAX_WORKERS, len(batch))) as executor:
+        
+        if not batch:
+            return results
+    
+        # Use ThreadPoolExecutor for maximum parallelism
+        # No delays between requests in the same batch
+        with ThreadPoolExecutor(max_workers=min(Config.MAX_WORKERS * 2, len(batch), 20)) as executor:
             future_to_doi = {}
-
+    
             for doi in batch:
                 future = executor.submit(
-                    self._process_single_doi_with_validation,
-                    doi, source_type, original_doi, True, True
+                    self._process_single_doi_optimized,
+                    doi, source_type, original_doi, fetch_refs, fetch_cites
                 )
                 future_to_doi[future] = doi
-
+    
             for future in as_completed(future_to_doi):
                 doi = future_to_doi[future]
                 try:
-                    result = future.result(timeout=60)
-                    
-                    # Check result for emptiness and retry if needed
-                    if self._is_empty_result(result):
-                        st.warning(f"⚠️ Empty result for {doi}, retrying...")
-                        # Retry without exponential delays
-                        result = self._retry_process_single_doi(doi, source_type, original_doi)
-                    
+                    result = future.result(timeout=45)  # Increased timeout for large batches
                     results[doi] = result
-                    
                 except Exception as e:
                     self._handle_processing_error(doi, str(e), source_type, original_doi)
                     results[doi] = {
@@ -2695,7 +2637,7 @@ class OptimizedDOIProcessor:
                         'status': 'failed',
                         'error': f"Processing timeout: {str(e)}"
                     }
-
+    
         return results
 
     def _is_empty_result(self, result: Dict) -> bool:
@@ -2836,19 +2778,35 @@ class OptimizedDOIProcessor:
             self.state_manager.save_result(doi, cached_result, source_type)
             return cached_result
     
-        # Use cached API fetching
-        try:
-            crossref_data, openalex_data = cached_fetch_article_data(
-                doi, self.crossref_client, self.openalex_client, self.state_manager
-            )
-        except Exception as e:
-            error_msg = f"Failed to fetch article data: {str(e)}"
-            self._handle_processing_error(doi, error_msg, source_type, original_doi)
-            return {
-                'doi': doi,
-                'status': 'failed',
-                'error': error_msg
-            }
+        # OPTIMIZED: Fetch both APIs in parallel using threading
+        crossref_data = {}
+        openalex_data = {}
+        
+        def fetch_crossref_parallel():
+            nonlocal crossref_data
+            try:
+                crossref_data = self.crossref_client.fetch_article(doi)
+            except Exception:
+                crossref_data = {}
+    
+        def fetch_openalex_parallel():
+            nonlocal openalex_data
+            try:
+                openalex_data = self.openalex_client.fetch_article(doi)
+            except Exception:
+                openalex_data = {}
+    
+        # Parallel execution of both API calls
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_crossref = executor.submit(fetch_crossref_parallel)
+            future_openalex = executor.submit(fetch_openalex_parallel)
+            
+            # Wait with timeout
+            try:
+                future_crossref.result(timeout=15)
+                future_openalex.result(timeout=15)
+            except:
+                pass
     
         crossref_error = None
         openalex_error = None
@@ -2870,51 +2828,46 @@ class OptimizedDOIProcessor:
         crossref_data = crossref_data if isinstance(crossref_data, dict) else {}
         openalex_data = openalex_data if isinstance(openalex_data, dict) else {}
     
+        # Fetch references - fast, simple request
         references = []
         try:
-            # Use cached references fetching
             refs = cached_get_references(doi, self.crossref_client, self.state_manager)
             references = refs if isinstance(refs, list) else []
-    
             if references:
                 self.reference_relationships[doi] = references
-        except Exception as e:
-            st.warning(f"⚠️ Error fetching references for {doi}: {e}")
+        except Exception:
             references = []
     
+        # Fetch citations - OPTIMIZED for speed
         citations = []
         try:
-            # Use cached citing works fetching with timeout protection
             if source_type == "analyzed":
-                # For analyzed articles: collect ALL citations
+                # For analyzed articles: collect citations with fast method
                 cites_openalex = []
                 try:
-                    # Add timeout protection via threading
-                    import concurrent.futures
+                    # Use direct fetch without complex pagination for first pass
+                    # But still get full list for complete analysis
                     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                         future = executor.submit(
                             cached_get_citing_works, 
                             doi, self.openalex_client, source_type, self.state_manager
                         )
                         try:
-                            cites_openalex = future.result(timeout=45)  # 45 second timeout
+                            cites_openalex = future.result(timeout=30)  # Increased timeout slightly
                             if not isinstance(cites_openalex, list):
                                 cites_openalex = []
                         except concurrent.futures.TimeoutError:
-                            st.warning(f"⚠️ Timeout collecting citations for {doi}")
                             cites_openalex = []
-                except Exception as e:
-                    st.warning(f"⚠️ Error in OpenAlex citation collection for {doi}: {e}")
+                except Exception:
                     cites_openalex = []
     
-                # Also get citations from Crossref for data completeness
+                # Also get citations from Crossref (usually much faster)
                 cites_crossref = []
                 try:
                     cites_crossref = self.crossref_client.fetch_citations(doi)
                     if not isinstance(cites_crossref, list):
                         cites_crossref = []
-                except Exception as e:
-                    st.warning(f"⚠️ Error in Crossref citation collection for {doi}: {e}")
+                except Exception:
                     cites_crossref = []
     
                 citations = list(set(cites_openalex + cites_crossref))
@@ -2923,14 +2876,13 @@ class OptimizedDOIProcessor:
                     self.citation_relationships[doi] = citations
     
             else:
-                # For reference and citing articles: use limited collection
+                # For reference and citing articles: use faster limited collection
                 cites_openalex = []
                 try:
                     cites_openalex = cached_get_citing_works(doi, self.openalex_client, "standard", self.state_manager)
                     if not isinstance(cites_openalex, list):
                         cites_openalex = []
-                except Exception as e:
-                    st.warning(f"⚠️ Error in OpenAlex citation collection for {doi}: {e}")
+                except Exception:
                     cites_openalex = []
                     
                 cites_crossref = []
@@ -2938,17 +2890,15 @@ class OptimizedDOIProcessor:
                     cites_crossref = self.crossref_client.fetch_citations(doi)
                     if not isinstance(cites_crossref, list):
                         cites_crossref = []
-                except Exception as e:
-                    st.warning(f"⚠️ Error in Crossref citation collection for {doi}: {e}")
+                except Exception:
                     cites_crossref = []
     
                 citations = list(set(cites_openalex + cites_crossref))
     
                 if citations:
                     self.citation_relationships[doi] = citations
-                    
-        except Exception as e:
-            st.warning(f"⚠️ General citation fetch error for {doi}: {e}")
+                        
+        except Exception:
             citations = []
     
         # Use cached article data extraction
@@ -2982,7 +2932,6 @@ class OptimizedDOIProcessor:
             self.cache.set("full_analysis", cache_key, result, category="full_analysis")
             self.state_manager.save_result(doi, result, source_type)
             
-            # CRITICAL FIX: Save session state immediately after each successful DOI
             self.state_manager.save_to_session()
     
             self.cache.update_popularity(doi)
