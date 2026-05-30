@@ -896,7 +896,7 @@ def cached_get_citing_works(doi: str, openalex_client,
 def cached_get_references(doi: str, crossref_client,
                         state_manager: AnalysisStateManager = None) -> List[str]:
     """
-    Cached fetching of references
+    Cached fetching of references with automatic deduplication
     """
     # Check in-memory cache
     if doi in _reference_works_cache:
@@ -913,16 +913,26 @@ def cached_get_references(doi: str, crossref_client,
     # Fetch references
     references = crossref_client.fetch_references(doi)
     
+    # ========== ИСПРАВЛЕНИЕ 3: Дедупликация при получении ==========
+    unique_references = []
+    if references:
+        seen = set()
+        for ref in references:
+            if ref and ref not in seen:
+                seen.add(ref)
+                unique_references.append(ref)
+    # ====================================================================
+    
     # Cache in memory
-    _reference_works_cache[doi] = references
+    _reference_works_cache[doi] = unique_references
     _cache_stats['saves'] += 1
     
     # Cache in session state
     if state_manager:
-        state_manager.reference_cache[doi] = references
+        state_manager.reference_cache[doi] = unique_references
         state_manager.save_to_session()
     
-    return references
+    return unique_references
 
 def get_cache_stats() -> Dict:
     """Get cache statistics"""
@@ -1585,6 +1595,62 @@ class OpenAlexClient(APIClient):
         except Exception as e:
             return []
 
+    def get_openalex_references_count(self, doi: str) -> Tuple[int, List[str]]:
+        """
+        Получает из OpenAlex точное количество ссылок и список уникальных DOI
+        Возвращает: (count, unique_references_list)
+        """
+        clean_doi = self._clean_doi(doi)
+        if not clean_doi:
+            return 0, []
+        
+        cache_key = f"openalex_refs:{clean_doi}"
+        cached = self.cache.get("openalex_references", cache_key)
+        if cached is not None:
+            return cached.get('count', 0), cached.get('references', [])
+        
+        try:
+            url = f"https://api.openalex.org/works/https://doi.org/{clean_doi}"
+            response = self.session.get(url, timeout=15)
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                # Получаем точное количество из OpenAlex
+                references_count = data.get('referenced_works_count', 0)
+                
+                # Получаем список ссылок
+                referenced_works = data.get('referenced_works', [])
+                references = []
+                
+                for ref_url in referenced_works:
+                    # Извлекаем DOI из URL OpenAlex
+                    # URL имеет формат: https://openalex.org/W123456789
+                    # Для получения DOI нужен отдельный запрос
+                    # Пока используем URL как идентификатор
+                    references.append(ref_url)
+                
+                # Дедупликация
+                unique_references = []
+                seen = set()
+                for ref in references:
+                    if ref not in seen:
+                        seen.add(ref)
+                        unique_references.append(ref)
+                
+                result = {
+                    'count': len(unique_references),  # Используем уникальное количество
+                    'references': unique_references
+                }
+                
+                self.cache.set("openalex_references", cache_key, result)
+                return result['count'], result['references']
+                
+            return 0, []
+            
+        except Exception as e:
+            return 0, []
+
     def _safe_get(self, data, *keys, default=''):
         """Safe value extraction from dictionary (helper function)"""
         if not isinstance(data, dict):
@@ -1869,6 +1935,18 @@ class DataProcessor:
         self.cache = cache_manager
         self.country_codes = Config.COUNTRY_CODES
 
+    def get_unique_references_count(self, references: List[str]) -> int:
+        """Возвращает количество уникальных ссылок"""
+        if not references:
+            return 0
+        return len(set(references))
+    
+    def get_unique_citations_count(self, citations: List[str]) -> int:
+        """Возвращает количество уникальных цитирований"""
+        if not citations:
+            return 0
+        return len(set(citations))
+        
     def extract_article_info(self, crossref_data: Dict, openalex_data: Dict,
                            doi: str, references: List[str], citations: List[str]) -> Dict:
     
@@ -1880,7 +1958,6 @@ class DataProcessor:
         country_codes = list(set(filter(None, country_codes)))
     
         orcid_urls = []
-        # NEW: collect author countries
         author_countries = []
         for author in authors:
             if author.get('orcid'):
@@ -1888,7 +1965,6 @@ class DataProcessor:
                 if orcid_url:
                     orcid_urls.append(orcid_url)
             
-            # Add author country if defined
             if author.get('author_country'):
                 author_countries.append(author['author_country'])
     
@@ -1896,16 +1972,36 @@ class DataProcessor:
         if not pages_field and pub_info['article_number']:
             pages_field = f"Article {pub_info['article_number']}"
     
-        # Extract topic information from OpenAlex
         topics_info = self._extract_topics_info(openalex_data)
     
+        # ========== ИСПРАВЛЕНИЕ 1: Удаляем дубликаты из references ==========
+        unique_references = []
+        if references:
+            # Используем set для удаления дубликатов, но сохраняем порядок
+            seen = set()
+            for ref in references:
+                if ref and ref not in seen:
+                    seen.add(ref)
+                    unique_references.append(ref)
+        # ====================================================================
+    
         # Check reference count via OpenAlex if Crossref shows 0
-        references_count = len(references)
+        references_count = len(unique_references)
         if references_count == 0 and openalex_data and 'referenced_works_count' in openalex_data:
             references_count = openalex_data.get('referenced_works_count', 0)
     
+        # ========== ИСПРАВЛЕНИЕ 2: Аналогично для citations ==========
+        unique_citations = []
+        if citations:
+            seen = set()
+            for cite in citations:
+                if cite and cite not in seen:
+                    seen.add(cite)
+                    unique_citations.append(cite)
+        # ====================================================================
+    
         quick_insights = self._extract_quick_insights(
-            authors, countries, references, citations, pub_info
+            authors, countries, unique_references, unique_citations, pub_info
         )
     
         return {
@@ -1914,10 +2010,10 @@ class DataProcessor:
             'topics_info': topics_info,
             'authors': authors,
             'countries': country_codes,
-            'author_countries': list(set(author_countries)),  # NEW: author countries
+            'author_countries': list(set(author_countries)),
             'orcid_urls': orcid_urls,
-            'references': references,
-            'citations': citations,
+            'references': unique_references,  # Исправлено: уникальные ссылки
+            'citations': unique_citations,     # Исправлено: уникальные цитирования
             'references_count': references_count,
             'pages_formatted': pages_field,
             'status': 'success',
@@ -2461,6 +2557,7 @@ class OptimizedDOIProcessor:
         unique_dois = []
         seen_dois = set()
         duplicate_count = 0
+        total_count = len(clean_dois)
         
         for doi in clean_dois:
             clean_doi = self._clean_doi_for_deduplication(doi)
@@ -2471,9 +2568,9 @@ class OptimizedDOIProcessor:
                 duplicate_count += 1
         
         if duplicate_count > 0:
-            st.info(f"📊 В {source_type} найдено {duplicate_count} дубликатов DOI")
+            st.info(f"📊 В {source_type} найдено {duplicate_count} дубликатов DOI из {total_count} (удалено {duplicate_count})")
         
-        st.info(f"📊 Всего DOI в {source_type}: {len(clean_dois)}, уникальных: {len(unique_dois)}")
+        st.info(f"📊 Всего DOI в {source_type}: {total_count}, уникальных: {len(unique_dois)}")
         
         return unique_dois
 
@@ -2796,12 +2893,10 @@ class OptimizedDOIProcessor:
             except Exception:
                 openalex_data = {}
     
-        # Parallel execution of both API calls
         with ThreadPoolExecutor(max_workers=2) as executor:
             future_crossref = executor.submit(fetch_crossref_parallel)
             future_openalex = executor.submit(fetch_openalex_parallel)
             
-            # Wait with timeout
             try:
                 future_crossref.result(timeout=15)
                 future_openalex.result(timeout=15)
@@ -2828,7 +2923,7 @@ class OptimizedDOIProcessor:
         crossref_data = crossref_data if isinstance(crossref_data, dict) else {}
         openalex_data = openalex_data if isinstance(openalex_data, dict) else {}
     
-        # Fetch references - fast, simple request
+        # Fetch references - with deduplication
         references = []
         try:
             refs = cached_get_references(doi, self.crossref_client, self.state_manager)
@@ -2838,22 +2933,19 @@ class OptimizedDOIProcessor:
         except Exception:
             references = []
     
-        # Fetch citations - OPTIMIZED for speed
+        # Fetch citations - with deduplication
         citations = []
         try:
             if source_type == "analyzed":
-                # For analyzed articles: collect citations with fast method
                 cites_openalex = []
                 try:
-                    # Use direct fetch without complex pagination for first pass
-                    # But still get full list for complete analysis
                     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                         future = executor.submit(
                             cached_get_citing_works, 
                             doi, self.openalex_client, source_type, self.state_manager
                         )
                         try:
-                            cites_openalex = future.result(timeout=30)  # Increased timeout slightly
+                            cites_openalex = future.result(timeout=30)
                             if not isinstance(cites_openalex, list):
                                 cites_openalex = []
                         except concurrent.futures.TimeoutError:
@@ -2861,7 +2953,6 @@ class OptimizedDOIProcessor:
                 except Exception:
                     cites_openalex = []
     
-                # Also get citations from Crossref (usually much faster)
                 cites_crossref = []
                 try:
                     cites_crossref = self.crossref_client.fetch_citations(doi)
@@ -2870,13 +2961,14 @@ class OptimizedDOIProcessor:
                 except Exception:
                     cites_crossref = []
     
-                citations = list(set(cites_openalex + cites_crossref))
+                # Дедупликация citations
+                all_cites = list(set(cites_openalex + cites_crossref))
+                citations = all_cites
     
                 if citations:
                     self.citation_relationships[doi] = citations
     
             else:
-                # For reference and citing articles: use faster limited collection
                 cites_openalex = []
                 try:
                     cites_openalex = cached_get_citing_works(doi, self.openalex_client, "standard", self.state_manager)
@@ -2893,7 +2985,9 @@ class OptimizedDOIProcessor:
                 except Exception:
                     cites_crossref = []
     
-                citations = list(set(cites_openalex + cites_crossref))
+                # Дедупликация citations
+                all_cites = list(set(cites_openalex + cites_crossref))
+                citations = all_cites
     
                 if citations:
                     self.citation_relationships[doi] = citations
@@ -2928,7 +3022,6 @@ class OptimizedDOIProcessor:
         if result.get('status') == 'success':
             self.stats['successful'] += 1
     
-            # Cache at all levels
             self.cache.set("full_analysis", cache_key, result, category="full_analysis")
             self.state_manager.save_result(doi, result, source_type)
             
@@ -4361,46 +4454,63 @@ class ExcelExporter:
                 error_df.to_excel(writer, sheet_name=f"Error_{idx}"[:31], index=False)
 
     def _prepare_summary_data(self):
-        """Prepare summary data with error handling"""
+        """Prepare summary data with error handling and deduplication"""
         total_analyzed_articles = len([r for r in self.analyzed_results.values() 
                                      if isinstance(r, dict) and r.get('status') == 'success'])
         total_ref_articles = len([r for r in self.ref_results.values() 
                                 if isinstance(r, dict) and r.get('status') == 'success'])
         total_citing_articles = len([r for r in self.citing_results.values() 
                                    if isinstance(r, dict) and r.get('status') == 'success'])
-
+    
+        # ========== ДЕДУПЛИКАЦИЯ ПРИ СБОРЕ ССЫЛОК ==========
+        # Собираем ВСЕ ссылки с дедупликацией
+        all_references = set()
+        all_citations = set()
+        
+        for doi, result in self.analyzed_results.items():
+            if isinstance(result, dict) and result.get('status') == 'success':
+                refs = result.get('references', [])
+                if isinstance(refs, list):
+                    all_references.update(refs)
+                
+                cites = result.get('citations', [])
+                if isinstance(cites, list):
+                    all_citations.update(cites)
+        # ====================================================
+    
         # Temporary counters for correct normalization
         author_analyzed_counts = Counter()
         affiliation_analyzed_counts = Counter()
-
+    
         # Process analyzed articles
         for doi, result in self.analyzed_results.items():
             if not isinstance(result, dict) or result.get('status') != 'success':
                 continue
-
+    
             self.source_dois['analyzed'].add(doi)
-
-            # Update Terms and Topics statistics for analyzed articles
+    
             self._update_terms_topics_stats(doi, result, 'analyzed')
-
-            # Update reference relationships
+    
+            # Update reference relationships with deduplication
             refs = result.get('references', [])
             if isinstance(refs, list):
-                for ref_doi in refs:
+                unique_refs = list(set(refs))  # Дедупликация на уровне статьи
+                for ref_doi in unique_refs:
                     if ref_doi:
                         self.ref_to_analyzed[ref_doi].append(doi)
                         self.doi_to_source_counts[ref_doi]['ref'] += 1
                         self.source_dois['ref'].add(ref_doi)
-
-            # Update citation relationships
+    
+            # Update citation relationships with deduplication
             cites = result.get('citations', [])
             if isinstance(cites, list):
-                for cite_doi in cites:
+                unique_cites = list(set(cites))  # Дедупликация на уровне статьи
+                for cite_doi in unique_cites:
                     if cite_doi:
                         self.analyzed_to_citing[doi].append(cite_doi)
                         self.doi_to_source_counts[cite_doi]['citing'] += 1
                         self.source_dois['citing'].add(cite_doi)
-
+    
             # Count authors in analyzed articles
             authors = result.get('authors', [])
             if isinstance(authors, list):
@@ -4415,10 +4525,8 @@ class ExcelExporter:
                     normalized_name = self.processor.normalize_author_name(full_name)
                     key = normalized_name
                     
-                    # Increase article counter for this author in analyzed
                     author_analyzed_counts[key] += 1
                 
-                    # Initialize author record if not exists
                     if key not in self.author_stats:
                         self.author_stats[key] = {
                             'normalized_name': normalized_name,
@@ -4432,7 +4540,6 @@ class ExcelExporter:
                             'normalized_citing': 0
                         }
                 
-                    # Update ORCID as set
                     if author.get('orcid'):
                         try:
                             orcid_url = self.processor._format_orcid_id(author.get('orcid', ''))
@@ -4441,30 +4548,25 @@ class ExcelExporter:
                         except:
                             pass
                 
-                    # Determine affiliation
                     if not self.author_stats[key]['affiliation']:
                         affs = author.get('affiliation', [])
                         if affs and isinstance(affs, list) and len(affs) > 0:
                             self.author_stats[key]['affiliation'] = affs[0]
                 
-                    # Determine author country
                     if not self.author_stats[key]['country']:
-                        # Try to take from author_country
                         if 'author_country' in author and author['author_country']:
                             self.author_stats[key]['country'] = author['author_country']
-                        # If not, determine from affiliation
                         elif self.author_stats[key]['affiliation']:
                             country_from_aff = self._get_country_from_affiliation(self.author_stats[key]['affiliation'])
                             if country_from_aff:
                                 self.author_stats[key]['country'] = country_from_aff
-                        # Fallback: from article
                         elif result.get('countries'):
                             countries = result.get('countries', [])
                             if countries and isinstance(countries, list) and len(countries) > 0:
                                 self.author_stats[key]['country'] = countries[0]
                 
                     self.author_stats[key]['normalized_name'] = normalized_name
-
+    
             # Update affiliation statistics FOR ANALYZED
             unique_affiliations_in_article = set()
             for author in result.get('authors', []):
@@ -4476,12 +4578,10 @@ class ExcelExporter:
                     for affiliation in affs:
                         if affiliation and isinstance(affiliation, str):
                             unique_affiliations_in_article.add(affiliation)
-
-            # Count absolute article number for each affiliation in analyzed
+    
             for affiliation in unique_affiliations_in_article:
                 affiliation_analyzed_counts[affiliation] += 1
                 
-                # Initialize affiliation record if not exists
                 if affiliation not in self.affiliation_stats:
                     self.affiliation_stats[affiliation] = {
                         'colab_id': '',
@@ -4500,33 +4600,31 @@ class ExcelExporter:
                         for country in countries:
                             if country and isinstance(country, str):
                                 self.affiliation_stats[affiliation]['countries'].append(country)
-
+    
         # After counting all analyzed articles, calculate normalized values FOR AUTHORS
         for author_key, count in author_analyzed_counts.items():
             if total_analyzed_articles > 0:
                 normalized_value = count / total_analyzed_articles
                 self.author_stats[author_key]['normalized_analyzed'] = normalized_value
                 self.author_stats[author_key]['article_count_analyzed'] = count
-                # Update total_count for author
                 self.author_stats[author_key]['total_count'] += normalized_value
-
+    
         # After counting all analyzed articles, calculate normalized values FOR AFFILIATIONS
         for affiliation, count in affiliation_analyzed_counts.items():
             if total_analyzed_articles > 0:
                 normalized_value = count / total_analyzed_articles
                 self.affiliation_stats[affiliation]['normalized_analyzed'] = normalized_value
                 self.affiliation_stats[affiliation]['article_count_analyzed'] = count
-                # Update total_count for affiliation
                 self.affiliation_stats[affiliation]['total_count'] += normalized_value
-
+    
         # Process ref results
         for doi, result in self.ref_results.items():
             if not isinstance(result, dict) or result.get('status') != 'success':
                 continue
-
+    
             # Update Terms and Topics statistics for reference articles
             self._update_terms_topics_stats(doi, result, 'reference')
-
+    
             # Update author stats for ref articles - ONLY normalized values
             authors = result.get('authors', [])
             if isinstance(authors, list):
@@ -4537,16 +4635,16 @@ class ExcelExporter:
                     full_name = author.get('name', '')
                     if not full_name:
                         continue
-
+    
                     normalized_name = self.processor.normalize_author_name(full_name)
                     key = normalized_name
-
+    
                     # Calculate normalized value for ref articles
                     if total_ref_articles > 0:
                         normalized_value = 1 / total_ref_articles
                         self.author_stats[key]['normalized_reference'] += normalized_value
                         self.author_stats[key]['total_count'] += normalized_value
-
+    
                     # Update ORCID as set
                     if author.get('orcid'):
                         try:
@@ -4555,19 +4653,19 @@ class ExcelExporter:
                                 self.author_stats[key]['orcid'].add(orcid_url)
                         except:
                             pass
-
+    
                     if not self.author_stats[key]['affiliation']:
                         affs = author.get('affiliation', [])
                         if affs and isinstance(affs, list) and len(affs) > 0:
                             self.author_stats[key]['affiliation'] = affs[0]
-
+    
                     if not self.author_stats[key]['country']:
                         countries = result.get('countries', [])
                         if countries and isinstance(countries, list) and len(countries) > 0:
                             self.author_stats[key]['country'] = countries[0]
-
+    
                     self.author_stats[key]['normalized_name'] = normalized_name
-
+    
             # Update affiliation stats for ref articles - ONLY normalized values
             unique_affiliations_in_article = set()
             for author in result.get('authors', []):
@@ -4579,21 +4677,21 @@ class ExcelExporter:
                     for affiliation in affs:
                         if affiliation and isinstance(affiliation, str):
                             unique_affiliations_in_article.add(affiliation)
-
+    
             if total_ref_articles > 0:
                 normalized_aff_value = 1 / total_ref_articles
                 for affiliation in unique_affiliations_in_article:
                     self.affiliation_stats[affiliation]['normalized_reference'] += normalized_aff_value
                     self.affiliation_stats[affiliation]['total_count'] += normalized_aff_value
-
+    
         # Process citing results
         for doi, result in self.citing_results.items():
             if not isinstance(result, dict) or result.get('status') != 'success':
                 continue
-
+    
             # Update Terms and Topics statistics for citing articles
             self._update_terms_topics_stats(doi, result, 'citing')
-
+    
             # Update author stats for citing articles - ONLY normalized values
             authors = result.get('authors', [])
             if isinstance(authors, list):
@@ -4604,16 +4702,16 @@ class ExcelExporter:
                     full_name = author.get('name', '')
                     if not full_name:
                         continue
-
+    
                     normalized_name = self.processor.normalize_author_name(full_name)
                     key = normalized_name
-
+    
                     # Calculate normalized value for citing articles
                     if total_citing_articles > 0:
                         normalized_value = 1 / total_citing_articles
                         self.author_stats[key]['normalized_citing'] += normalized_value
                         self.author_stats[key]['total_count'] += normalized_value
-
+    
                     # Update ORCID as set
                     if author.get('orcid'):
                         try:
@@ -4622,19 +4720,19 @@ class ExcelExporter:
                                 self.author_stats[key]['orcid'].add(orcid_url)
                         except:
                             pass
-
+    
                     if not self.author_stats[key]['affiliation']:
                         affs = author.get('affiliation', [])
                         if affs and isinstance(affs, list) and len(affs) > 0:
                             self.author_stats[key]['affiliation'] = affs[0]
-
+    
                     if not self.author_stats[key]['country']:
                         countries = result.get('countries', [])
                         if countries and isinstance(countries, list) and len(countries) > 0:
                             self.author_stats[key]['country'] = countries[0]
-
+    
                     self.author_stats[key]['normalized_name'] = normalized_name
-
+    
             # Update affiliation stats for citing articles - ONLY normalized values
             unique_affiliations_in_article = set()
             for author in result.get('authors', []):
@@ -4646,12 +4744,21 @@ class ExcelExporter:
                     for affiliation in affs:
                         if affiliation and isinstance(affiliation, str):
                             unique_affiliations_in_article.add(affiliation)
-
+    
             if total_citing_articles > 0:
                 normalized_aff_value = 1 / total_citing_articles
                 for affiliation in unique_affiliations_in_article:
                     self.affiliation_stats[affiliation]['normalized_citing'] += normalized_aff_value
                     self.affiliation_stats[affiliation]['total_count'] += normalized_aff_value
+    
+        # ========== ЛОГИРОВАНИЕ СТАТИСТИКИ ССЫЛОК ==========
+        # Логируем правильную статистику
+        if hasattr(st, 'info'):
+            st.info(f"📊 СТАТИСТИКА ССЫЛОК:")
+            st.info(f"   - Всего уникальных ссылок из анализируемых статей: {len(all_references):,}")
+            st.info(f"   - Всего уникальных цитирований из анализируемых статей: {len(all_citations):,}")
+            st.info(f"   - Анализируемых статей: {total_analyzed_articles:,}")
+        # ====================================================
 
     def _update_terms_topics_stats(self, doi: str, result: Dict, source_type: str):
         """Update terms and topics statistics with error handling"""
