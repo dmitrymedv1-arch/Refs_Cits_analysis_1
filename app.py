@@ -827,26 +827,39 @@ def cached_fetch_article_data(doi: str, crossref_client,
                              openalex_client, 
                              state_manager: AnalysisStateManager) -> Tuple[Dict, Dict]:
     """
-    Cached fetching of article data from APIs with multi-level caching
+    Параллельное получение данных с обоих API
     """
-    # Check session state cache first (fastest)
+    # Проверка кэша сессии
     cached = state_manager.get_cached_result(doi, 'unified')
     if cached:
         return cached.get('crossref', {}), cached.get('openalex', {})
     
-    # Check in-memory caches
+    # Проверка in-memory кэша
     if doi in _crossref_article_cache and doi in _openalex_article_cache:
         return _crossref_article_cache[doi], _openalex_article_cache[doi]
     
-    # Fetch from APIs
-    crossref_data = crossref_client.fetch_article(doi)
-    openalex_data = openalex_client.fetch_article(doi)
+    # Параллельное получение
+    crossref_data = {}
+    openalex_data = {}
     
-    # Cache in memory
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        crossref_future = executor.submit(crossref_client.fetch_article, doi)
+        openalex_future = executor.submit(openalex_client.fetch_article, doi)
+        
+        try:
+            crossref_data = crossref_future.result(timeout=12)
+        except:
+            crossref_data = {"error": "Timeout"}
+        
+        try:
+            openalex_data = openalex_future.result(timeout=10)
+        except:
+            openalex_data = {"error": "Timeout"}
+    
+    # Кэширование
     _crossref_article_cache[doi] = crossref_data
     _openalex_article_cache[doi] = openalex_data
     
-    # Cache in session state
     unified_data = {
         'crossref': crossref_data,
         'openalex': openalex_data,
@@ -860,33 +873,38 @@ def cached_get_citing_works(doi: str, openalex_client,
                           source_type: str = "analyzed",
                           state_manager: AnalysisStateManager = None) -> List[str]:
     """
-    Cached fetching of citing works with intelligent caching
+    Быстрое получение цитирующих работ с ограничениями
     """
     cache_key = f"citing:{doi}:{source_type}"
     
-    # Check relationship cache
+    # Проверка кэша
     if cache_key in _citing_works_cache:
         _cache_stats['hits'] += 1
         return _citing_works_cache[cache_key]
     
-    # Check session state cache
     if state_manager and doi in state_manager.citing_cache:
         _cache_stats['hits'] += 1
         return state_manager.citing_cache[doi]
     
     _cache_stats['misses'] += 1
     
-    # Fetch citing works
+    # Быстрое получение с ограничениями
     if source_type == "analyzed":
+        # Для анализируемых статей - ограниченный сбор
         citing_works = openalex_client.fetch_all_citations_for_analyzed_article(doi)
+        # Ограничиваем количество для скорости
+        if len(citing_works) > 1500:
+            citing_works = citing_works[:1500]
     else:
+        # Для вспомогательных - только одна страница
         citing_works = openalex_client.fetch_citations(doi)
+        if len(citing_works) > 200:
+            citing_works = citing_works[:200]
     
-    # Cache in memory
+    # Кэширование
     _citing_works_cache[cache_key] = citing_works
     _cache_stats['saves'] += 1
     
-    # Cache in session state
     if state_manager:
         state_manager.citing_cache[doi] = citing_works
         state_manager.save_to_session()
@@ -896,28 +914,31 @@ def cached_get_citing_works(doi: str, openalex_client,
 def cached_get_references(doi: str, crossref_client,
                         state_manager: AnalysisStateManager = None) -> List[str]:
     """
-    Cached fetching of references
+    Быстрое получение ссылок с таймаутом
     """
-    # Check in-memory cache
+    # Проверка кэша
     if doi in _reference_works_cache:
         _cache_stats['hits'] += 1
         return _reference_works_cache[doi]
     
-    # Check session state cache
     if state_manager and doi in state_manager.reference_cache:
         _cache_stats['hits'] += 1
         return state_manager.reference_cache[doi]
     
     _cache_stats['misses'] += 1
     
-    # Fetch references
-    references = crossref_client.fetch_references(doi)
+    # Быстрое получение с таймаутом
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(crossref_client.fetch_references, doi)
+            references = future.result(timeout=10)  # Жесткий таймаут 10 секунд
+    except Exception:
+        references = []
     
-    # Cache in memory
+    # Кэширование
     _reference_works_cache[doi] = references
     _cache_stats['saves'] += 1
     
-    # Cache in session state
     if state_manager:
         state_manager.reference_cache[doi] = references
         state_manager.save_to_session()
@@ -945,11 +966,11 @@ def get_cache_stats() -> Dict:
 # ============================================================================
 
 class AdaptiveDelayManager:
-    def __init__(self, initial_delay: float = Config.INITIAL_DELAY):
+    def __init__(self, initial_delay: float = 0.05):  # Уменьшен initial_delay
         self.initial_delay = initial_delay
         self.current_delay = initial_delay
-        self.max_delay = Config.MAX_DELAY
-        self.min_delay = Config.MIN_DELAY
+        self.max_delay = 2.0  # Уменьшен max_delay с Config.MAX_DELAY (было 1.0)
+        self.min_delay = 0.02  # Уменьшен min_delay
         self.success_count = 0
         self.failure_count = 0
         self.last_request_time = 0
@@ -980,7 +1001,7 @@ class AdaptiveDelayManager:
 
         if response_time:
             self.response_times.append(response_time)
-            if len(self.response_times) > 10:
+            if len(self.response_times) > 5:  # Уменьшено с 10
                 self.response_times.pop(0)
             self.stats['avg_response_time'] = sum(self.response_times) / len(self.response_times)
 
@@ -990,7 +1011,7 @@ class AdaptiveDelayManager:
             self.stats['successful_requests'] += 1
 
             if self.success_count >= 2:
-                self.current_delay = max(self.min_delay, self.current_delay * 0.7)
+                self.current_delay = max(self.min_delay, self.current_delay * 0.6)  # Более агрессивное уменьшение
                 self.success_count = 0
 
         else:
@@ -998,7 +1019,7 @@ class AdaptiveDelayManager:
             self.success_count = 0
             self.stats['failed_requests'] += 1
 
-            self.current_delay = min(self.max_delay, self.current_delay * 1.3)
+            self.current_delay = min(self.max_delay, self.current_delay * 1.5)  # Меньший множитель
 
         self.current_delay = min(self.max_delay, self.current_delay)
 
@@ -1443,73 +1464,63 @@ class OpenAlexClient(APIClient):
 
     def fetch_all_citations_for_analyzed_article(self, doi: str) -> List[str]:
         """
-        Complete collection of ALL citations for analyzed articles
-        Uses cursor-based pagination with timeout protection
+        Быстрый сбор ВСЕХ цитирований для анализируемых статей
+        Оптимизирован: уменьшен таймаут, ограничено количество страниц, ранний выход
         """
         clean_doi = self._clean_doi(doi)
         if not clean_doi:
             return []
-    
-        # Check cache for full citations
+        
+        # Проверяем кэш
         cache_key = f"full_citations:{clean_doi}"
         cached_result = self.cache.get("full_citations", cache_key)
         if cached_result is not None:
             return cached_result
-    
+        
         try:
-            # First get work_id from DOI with timeout
+            # Быстрое получение work_id с малым таймаутом
             article_data = self.fetch_article(clean_doi)
             
-            # Check if article_data is valid
-            if not isinstance(article_data, dict):
-                return []
-                
-            if 'error' in article_data:
+            if not isinstance(article_data, dict) or 'error' in article_data:
                 return []
             
-            # Try to get work ID from different possible structures
+            # Извлечение work_id из разных источников
             article_id = None
             
-            # Try direct id field
             if 'id' in article_data:
                 article_id = article_data.get('id', '').split('/')[-1]
             
-            # Try alternative structure with timeout protection
             if not article_id and 'doi' in article_data:
-                url = f"https://api.openalex.org/works/https://doi.org/{clean_doi}"
                 try:
-                    response = self.session.get(url, timeout=15)
+                    url = f"https://api.openalex.org/works/https://doi.org/{clean_doi}"
+                    response = self.session.get(url, timeout=10)  # Уменьшен таймаут
                     if response.status_code == 200:
                         data = response.json()
                         if 'id' in data:
                             article_id = data['id'].split('/')[-1]
-                except requests.exceptions.Timeout:
-                    print(f"Timeout getting work ID for {clean_doi}")
-                    return []
-                except Exception:
+                except:
                     pass
             
             if not article_id:
                 return []
-    
+            
             all_citing_dois = []
             cursor = "*"
             page_num = 1
             max_retries = 2
-            max_pages = 30  # Reduced from 50 to prevent timeout (6000 citations max)
-            total_collected = 0
+            max_pages = 10  # Уменьшено с 30 до 10 (максимум 2000 цитирований)
+            max_total_citations = 1500  # Жесткий лимит для скорости
             consecutive_errors = 0
             
-            # Use a new session for each article to avoid connection issues
             with requests.Session() as session:
                 session.headers.update({
-                    'User-Agent': 'ArticleAnalyzer/3.0 (colab-user@example.com)',
+                    'User-Agent': 'ArticleAnalyzer/3.0 (fast-mode)',
                     'Accept': 'application/json',
                     'Accept-Encoding': 'gzip'
                 })
-                session.timeout = 25  # Overall timeout for session
+                session.timeout = 15  # Уменьшен общий таймаут
                 
-                while cursor and page_num <= max_pages:
+                while cursor and page_num <= max_pages and len(all_citing_dois) < max_total_citations:
                     success = False
                     page_cursor = cursor
                     
@@ -1517,88 +1528,72 @@ class OpenAlexClient(APIClient):
                         try:
                             url = f"https://api.openalex.org/works?filter=cites:{article_id}&per-page=200&cursor={page_cursor}"
                             
-                            # Wait before request
                             self.delay.wait_if_needed()
                             
                             start_time = time.time()
-                            response = session.get(url, timeout=25)
+                            response = session.get(url, timeout=12)  # Уменьшен таймаут
                             response_time = time.time() - start_time
-    
+                            
                             if response.status_code == 200:
                                 self.delay.update_delay(True, response_time)
                                 data = response.json()
-    
+                                
                                 if not isinstance(data, dict):
                                     break
-    
+                                
                                 works = data.get('results', [])
                                 
                                 if not works:
                                     cursor = None
                                     success = True
                                     break
-    
+                                
                                 page_citing_dois = []
                                 for work in works:
                                     if isinstance(work, dict) and work.get('doi'):
                                         citing_doi = self._clean_doi(work['doi'])
                                         if citing_doi:
                                             page_citing_dois.append(citing_doi)
-    
-                                all_citing_dois.extend(page_citing_dois)
-                                total_collected += len(page_citing_dois)
                                 
-                                # Reset consecutive errors on success
+                                all_citing_dois.extend(page_citing_dois)
                                 consecutive_errors = 0
-    
-                                # Get next cursor
+                                
                                 meta = data.get('meta', {})
                                 next_cursor = meta.get('next_cursor')
-    
+                                
                                 if next_cursor and next_cursor != page_cursor and page_num < max_pages:
                                     cursor = next_cursor
                                     page_num += 1
-                                    # Add delay between pages
-                                    time.sleep(0.3)
+                                    time.sleep(0.2)  # Меньшая задержка
                                     success = True
                                     break
                                 else:
                                     cursor = None
                                     success = True
                                     break
-    
+                            
                             elif response.status_code == 429:
                                 self.delay.update_delay(False, response_time)
-                                wait_time = min(2 ** attempt, 4)  # Exponential backoff capped at 4 seconds
+                                wait_time = min(2 ** attempt, 3)  # Максимум 3 секунды
                                 time.sleep(wait_time)
                                 continue
-    
-                            elif response.status_code == 404:
-                                # Article not found
+                            
+                            elif response.status_code in [404, 400]:
                                 cursor = None
                                 success = True
                                 break
-    
+                            
                             else:
                                 self.delay.update_delay(False, response_time)
                                 consecutive_errors += 1
                                 if attempt < max_retries - 1:
-                                    time.sleep(1)
+                                    time.sleep(0.5)
                                     continue
                                 else:
                                     success = False
                                     break
-    
+                        
                         except requests.exceptions.Timeout:
-                            consecutive_errors += 1
-                            if attempt < max_retries - 1:
-                                time.sleep(2)
-                                continue
-                            else:
-                                success = False
-                                break
-                                
-                        except Exception as e:
                             consecutive_errors += 1
                             if attempt < max_retries - 1:
                                 time.sleep(1)
@@ -1606,29 +1601,31 @@ class OpenAlexClient(APIClient):
                             else:
                                 success = False
                                 break
-    
-                    # If too many consecutive errors, stop pagination
-                    if consecutive_errors >= 5:
-                        print(f"Too many consecutive errors for {clean_doi}, stopping")
-                        break
                         
+                        except Exception as e:
+                            consecutive_errors += 1
+                            if attempt < max_retries - 1:
+                                time.sleep(0.5)
+                                continue
+                            else:
+                                success = False
+                                break
+                    
+                    if consecutive_errors >= 3:
+                        break
+                    
                     if not success:
                         break
             
-            # Remove duplicates and save to cache
-            unique_citing_dois = list(set(all_citing_dois))
+            # Быстрая дедупликация
+            unique_citing_dois = list(dict.fromkeys(all_citing_dois))
             
-            # Log for debugging
-            if len(unique_citing_dois) > 0:
-                print(f"Collected {len(unique_citing_dois)} citations for {clean_doi}")
-    
-            # Save to cache with separate category for full citations
+            # Сохраняем в кэш
             self.cache.set("full_citations", cache_key, unique_citing_dois, category="full_citations_analyzed")
             
             return unique_citing_dois
-    
+        
         except Exception as e:
-            # Log error but don't crash - return empty list
             print(f"Error collecting citations for {clean_doi}: {str(e)}")
             return []
 
@@ -2545,46 +2542,43 @@ class OptimizedDOIProcessor:
                                     original_doi: str = None, fetch_refs: bool = True,
                                     fetch_cites: bool = True, batch_size: int = Config.BATCH_SIZE,
                                     progress_container=None, resume: bool = False) -> Dict[str, Dict]:
-    
-        # Set current stage in state manager
+        """
+        Оптимизированная пакетная обработка с возобновлением
+        """
+        # Уменьшаем размер пакета для большей скорости
+        batch_size = min(batch_size, 25)  # Максимум 25 DOI в пакете
+        
         self.state_manager.set_stage(source_type, len(dois))
         
-        # Check if can resume from interrupted point
         if resume and source_type in self.stage_progress:
             if self.stage_progress[source_type]['remaining']:
-                # Continue from interrupted point
                 dois = self.stage_progress[source_type]['remaining']
-                if progress_container:
-                    progress_container.info(f"🔄 Resuming {source_type} processing with {len(dois)} remaining DOI")
             else:
-                # No saved progress, start from beginning
                 self.stage_progress[source_type] = {'processed': [], 'remaining': dois}
         else:
-            # Normal start
             self.stage_progress[source_type] = {'processed': [], 'remaining': dois}
-    
+        
         results = {}
         total_batches = (len(dois) + batch_size - 1) // batch_size
-    
+        
         if progress_container:
             status_text = progress_container.text(f"🔧 Processing {len(dois)} DOI (source: {source_type})")
             progress_bar = progress_container.progress(0)
         else:
             status_text = None
             progress_bar = None
-    
+        
         monitor = ProgressMonitor(len(dois), f"Processing {source_type}", progress_bar, status_text)
-    
+        
         try:
             for batch_idx in range(0, len(dois), batch_size):
                 batch = dois[batch_idx:batch_idx + batch_size]
                 
-                # Check which DOI are already cached
+                # Предварительная проверка кэша
                 batch_to_process = []
                 cached_results = {}
                 
                 for doi in batch:
-                    # Check session state cache
                     if source_type == 'analyzed' and doi in self.state_manager.analyzed_results:
                         cached_results[doi] = self.state_manager.analyzed_results[doi]
                         self.stats['session_state_hits'] += 1
@@ -2597,68 +2591,91 @@ class OptimizedDOIProcessor:
                     else:
                         batch_to_process.append(doi)
                 
-                # Add cached results
                 results.update(cached_results)
                 
-                # Process only non-cached DOI
+                # ОПТИМИЗАЦИЯ: Обрабатываем весь пакет параллельно
                 if batch_to_process:
-                    batch_results = self._process_single_batch_with_retry(
-                        batch_to_process, source_type, original_doi, True, True
+                    batch_results = self._process_batch_parallel(
+                        batch_to_process, source_type, original_doi, fetch_refs, fetch_cites
                     )
                     results.update(batch_results)
-    
-                # Update progress
+                
+                # Обновление прогресса
                 processed_batch = list(batch_to_process) + list(cached_results.keys())
                 self.stage_progress[source_type]['processed'].extend(processed_batch)
                 self.stage_progress[source_type]['remaining'] = dois[batch_idx + batch_size:]
                 
-                # Update state manager
                 self.state_manager.update_progress(
                     batch_idx // batch_size + 1,
                     self.stage_progress[source_type]['processed'],
                     self.stage_progress[source_type]['remaining']
                 )
                 
-                # CRITICAL FIX: Save progress to cache after each batch
                 self.cache.save_progress(
                     source_type,
                     self.stage_progress[source_type]['processed'],
                     self.stage_progress[source_type]['remaining']
                 )
                 
-                # CRITICAL FIX: Save session state after each batch
                 self.state_manager.save_to_session()
-    
                 monitor.update(len(batch), 'processed')
-    
-            # Clear saved progress after successful completion
+            
+            # Очистка после успешного завершения
             self.stage_progress[source_type] = {'processed': [], 'remaining': []}
             self.cache.clear_progress()
-            
-            # Update state manager
             self.state_manager.current_stage = None
             self.state_manager.save_to_session()
-    
+            
             monitor.complete()
-    
+            
             successful = sum(1 for r in results.values() if r.get('status') == 'success')
             failed = len(dois) - successful
-    
+            
             self.stats['total_processed'] += len(dois)
             self.stats['successful'] += successful
             self.stats['failed'] += failed
-    
+            
             return results
-    
+        
         except Exception as e:
-            # Save progress on exception
             if progress_container:
                 progress_container.warning(f"⚠️ {source_type} processing interrupted: {e}")
                 progress_container.info(f"📊 Progress saved. Can resume from interruption point.")
             
-            # Ensure state is saved
             self.state_manager.save_to_session()
             return results
+    
+    def _process_batch_parallel(self, batch: List[str], source_type: str,
+                               original_doi: str, fetch_refs: bool, fetch_cites: bool) -> Dict[str, Dict]:
+        """
+        Параллельная обработка целого пакета DOI
+        """
+        results = {}
+        
+        with ThreadPoolExecutor(max_workers=min(Config.MAX_WORKERS, len(batch), 7)) as executor:
+            future_to_doi = {}
+            
+            for doi in batch:
+                future = executor.submit(
+                    self._process_single_doi_optimized,
+                    doi, source_type, original_doi, fetch_refs, fetch_cites
+                )
+                future_to_doi[future] = doi
+            
+            for future in as_completed(future_to_doi):
+                doi = future_to_doi[future]
+                try:
+                    result = future.result(timeout=30)
+                    results[doi] = result
+                except Exception as e:
+                    self._handle_processing_error(doi, str(e), source_type, original_doi)
+                    results[doi] = {
+                        'doi': doi,
+                        'status': 'failed',
+                        'error': f"Processing timeout: {str(e)}"
+                    }
+        
+        return results
 
     def _process_single_batch_with_retry(self, batch: List[str], source_type: str,
                                        original_doi: str, fetch_refs: bool, fetch_cites: bool) -> Dict[str, Dict]:
@@ -2816,8 +2833,14 @@ class OptimizedDOIProcessor:
 
     def _process_single_doi_optimized(self, doi: str, source_type: str,
                                      original_doi: str, fetch_refs: bool, fetch_cites: bool) -> Dict:
-    
-        # Check if already processed in this session
+        """
+        Оптимизированная обработка одного DOI
+        - Минимальные таймауты
+        - Быстрое извлечение только основных данных
+        - Отложенная сложная обработка
+        """
+        
+        # Проверка быстрого кэша
         if source_type == 'analyzed' and doi in self.state_manager.analyzed_results:
             self.stats['session_state_hits'] += 1
             return self.state_manager.analyzed_results[doi]
@@ -2827,171 +2850,308 @@ class OptimizedDOIProcessor:
         elif source_type == 'citing' and doi in self.state_manager.citing_results:
             self.stats['session_state_hits'] += 1
             return self.state_manager.citing_results[doi]
-    
+        
+        # Проверка дискового кэша
         cache_key = f"full_result:{doi}"
         cached_result = self.cache.get("full_analysis", cache_key)
-    
+        
         if cached_result is not None:
             self.stats['cached_hits'] += 1
             self.state_manager.save_result(doi, cached_result, source_type)
             return cached_result
-    
-        # Use cached API fetching
+        
+        # Быстрое получение данных с обоих API параллельно
         try:
-            crossref_data, openalex_data = cached_fetch_article_data(
-                doi, self.crossref_client, self.openalex_client, self.state_manager
-            )
+            crossref_data, openalex_data = self._fetch_article_data_parallel(doi)
         except Exception as e:
             error_msg = f"Failed to fetch article data: {str(e)}"
             self._handle_processing_error(doi, error_msg, source_type, original_doi)
-            return {
-                'doi': doi,
-                'status': 'failed',
-                'error': error_msg
-            }
-    
+            return self._create_minimal_result(doi, error_msg)
+        
         crossref_error = None
         openalex_error = None
-    
+        
         if isinstance(crossref_data, dict):
             crossref_error = crossref_data.get('error')
         if isinstance(openalex_data, dict):
             openalex_error = openalex_data.get('error')
-    
+        
         if crossref_error and openalex_error:
             error_msg = f"API errors: Crossref - {crossref_error}, OpenAlex - {openalex_error}"
             self._handle_processing_error(doi, error_msg, source_type, original_doi)
-            return {
-                'doi': doi,
-                'status': 'failed',
-                'error': error_msg
-            }
-    
+            return self._create_minimal_result(doi, error_msg)
+        
         crossref_data = crossref_data if isinstance(crossref_data, dict) else {}
         openalex_data = openalex_data if isinstance(openalex_data, dict) else {}
-    
+        
+        # Быстрый сбор ссылок (только если нужно)
         references = []
-        try:
-            # Use cached references fetching
-            refs = cached_get_references(doi, self.crossref_client, self.state_manager)
-            references = refs if isinstance(refs, list) else []
-    
-            if references:
-                self.reference_relationships[doi] = references
-        except Exception as e:
-            st.warning(f"⚠️ Error fetching references for {doi}: {e}")
-            references = []
-    
+        if fetch_refs:
+            try:
+                refs = cached_get_references(doi, self.crossref_client, self.state_manager)
+                references = refs if isinstance(refs, list) else []
+                if references:
+                    self.reference_relationships[doi] = references
+            except Exception as e:
+                # Не прерываем обработку из-за ошибки в ссылках
+                references = []
+        
+        # Быстрый сбор цитирований (только если нужно)
         citations = []
-        try:
-            # Use cached citing works fetching with timeout protection
-            if source_type == "analyzed":
-                # For analyzed articles: collect ALL citations
-                cites_openalex = []
-                try:
-                    # Add timeout protection via threading
-                    import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                        future = executor.submit(
-                            cached_get_citing_works, 
-                            doi, self.openalex_client, source_type, self.state_manager
-                        )
-                        try:
-                            cites_openalex = future.result(timeout=45)  # 45 second timeout
-                            if not isinstance(cites_openalex, list):
-                                cites_openalex = []
-                        except concurrent.futures.TimeoutError:
-                            st.warning(f"⚠️ Timeout collecting citations for {doi}")
-                            cites_openalex = []
-                except Exception as e:
-                    st.warning(f"⚠️ Error in OpenAlex citation collection for {doi}: {e}")
-                    cites_openalex = []
-    
-                # Also get citations from Crossref for data completeness
-                cites_crossref = []
-                try:
-                    cites_crossref = self.crossref_client.fetch_citations(doi)
-                    if not isinstance(cites_crossref, list):
-                        cites_crossref = []
-                except Exception as e:
-                    st.warning(f"⚠️ Error in Crossref citation collection for {doi}: {e}")
-                    cites_crossref = []
-    
-                citations = list(set(cites_openalex + cites_crossref))
-    
+        if fetch_cites:
+            try:
+                if source_type == "analyzed":
+                    # Для анализируемых статей - ограниченный сбор
+                    citations = self._fetch_citations_fast(doi, source_type)
+                else:
+                    # Для вспомогательных статей - минимальный сбор
+                    citations = self._fetch_citations_minimal(doi)
+                
                 if citations:
                     self.citation_relationships[doi] = citations
-    
-            else:
-                # For reference and citing articles: use limited collection
-                cites_openalex = []
-                try:
-                    cites_openalex = cached_get_citing_works(doi, self.openalex_client, "standard", self.state_manager)
-                    if not isinstance(cites_openalex, list):
-                        cites_openalex = []
-                except Exception as e:
-                    st.warning(f"⚠️ Error in OpenAlex citation collection for {doi}: {e}")
-                    cites_openalex = []
-                    
-                cites_crossref = []
-                try:
-                    cites_crossref = self.crossref_client.fetch_citations(doi)
-                    if not isinstance(cites_crossref, list):
-                        cites_crossref = []
-                except Exception as e:
-                    st.warning(f"⚠️ Error in Crossref citation collection for {doi}: {e}")
-                    cites_crossref = []
-    
-                citations = list(set(cites_openalex + cites_crossref))
-    
-                if citations:
-                    self.citation_relationships[doi] = citations
-                    
-        except Exception as e:
-            st.warning(f"⚠️ General citation fetch error for {doi}: {e}")
-            citations = []
-    
-        # Use cached article data extraction
+            except Exception as e:
+                citations = []
+        
+        # Быстрое извлечение основных данных (без сложной обработки)
         try:
-            result = cached_extract_article_data(
-                crossref_data, openalex_data, doi, references, citations, self.data_processor
+            result = self._extract_article_basic(
+                crossref_data, openalex_data, doi, references, citations
             )
         except Exception as e:
-            error_msg = f"Failed to extract article data: {str(e)}"
+            error_msg = f"Failed to extract basic article data: {str(e)}"
             self._handle_processing_error(doi, error_msg, source_type, original_doi)
-            return {
-                'doi': doi,
-                'status': 'failed',
-                'error': error_msg
-            }
-    
-        if result.get('status') == 'success':
-            for author in result.get('authors', []):
-                author_name = author.get('name', '')
-                if author_name:
-                    self.doi_author_map[doi].append(author_name)
-                    for affiliation in author.get('affiliation', []):
-                        if affiliation:
-                            self.author_affiliation_map[author_name].add(affiliation)
-                            self.doi_affiliation_map[doi].add(affiliation)
-    
+            return self._create_minimal_result(doi, error_msg)
+        
         if result.get('status') == 'success':
             self.stats['successful'] += 1
-    
-            # Cache at all levels
+            
+            # Кэширование
             self.cache.set("full_analysis", cache_key, result, category="full_analysis")
             self.state_manager.save_result(doi, result, source_type)
-            
-            # CRITICAL FIX: Save session state immediately after each successful DOI
             self.state_manager.save_to_session()
-    
             self.cache.update_popularity(doi)
         else:
             self.stats['failed'] += 1
-    
+        
         self.stats['api_calls'] += 2
-    
+        
         return result
+    
+    def _fetch_article_data_parallel(self, doi: str) -> Tuple[Dict, Dict]:
+        """
+        Параллельное получение данных из Crossref и OpenAlex
+        """
+        crossref_data = None
+        openalex_data = None
+        
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            crossref_future = executor.submit(self.crossref_client.fetch_article, doi)
+            openalex_future = executor.submit(self.openalex_client.fetch_article, doi)
+            
+            try:
+                crossref_data = crossref_future.result(timeout=12)
+            except:
+                crossref_data = {"error": "Timeout"}
+            
+            try:
+                openalex_data = openalex_future.result(timeout=10)
+            except:
+                openalex_data = {"error": "Timeout"}
+        
+        return crossref_data, openalex_data
+    
+    def _fetch_citations_fast(self, doi: str, source_type: str) -> List[str]:
+        """
+        Быстрый сбор цитирований с ограничениями
+        """
+        citations = []
+        
+        # OpenAlex с ограничением по времени
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(
+                    cached_get_citing_works, 
+                    doi, self.openalex_client, source_type, self.state_manager
+                )
+                try:
+                    cites_openalex = future.result(timeout=25)  # Уменьшен таймаут
+                    if isinstance(cites_openalex, list):
+                        citations.extend(cites_openalex)
+                except concurrent.futures.TimeoutError:
+                    pass
+        except Exception:
+            pass
+        
+        # Crossref - быстрый запрос
+        try:
+            cites_crossref = self.crossref_client.fetch_citations(doi)
+            if isinstance(cites_crossref, list):
+                citations.extend(cites_crossref)
+        except Exception:
+            pass
+        
+        # Быстрая дедупликация
+        if citations:
+            return list(dict.fromkeys(citations))
+        return []
+    
+    def _fetch_citations_minimal(self, doi: str) -> List[str]:
+        """
+        Минимальный сбор цитирований для вспомогательных статей
+        Только одна страница из OpenAlex
+        """
+        citations = []
+        
+        # Только одна страница из OpenAlex
+        try:
+            clean_doi = self.openalex_client._clean_doi(doi)
+            if clean_doi:
+                article_data = self.openalex_client.fetch_article(clean_doi)
+                if isinstance(article_data, dict) and 'id' in article_data:
+                    article_id = article_data['id'].split('/')[-1]
+                    
+                    if article_id:
+                        url = f"https://api.openalex.org/works?filter=cites:{article_id}&per-page=100"
+                        response = self.session.get(url, timeout=8)
+                        if response.status_code == 200:
+                            data = response.json()
+                            for work in data.get('results', []):
+                                if work.get('doi'):
+                                    citing_doi = self.openalex_client._clean_doi(work['doi'])
+                                    if citing_doi:
+                                        citations.append(citing_doi)
+        except Exception:
+            pass
+        
+        return citations
+    
+    def _extract_article_basic(self, crossref_data: Dict, openalex_data: Dict,
+                              doi: str, references: List[str], citations: List[str]) -> Dict:
+        """
+        Быстрое извлечение ТОЛЬКО основных полей
+        Сложная обработка откладывается на этап экспорта
+        """
+        # Быстрое извлечение из OpenAlex
+        title = ''
+        journal = ''
+        year = ''
+        authors = []
+        citations_count = 0
+        references_count = len(references)
+        
+        if openalex_data and isinstance(openalex_data, dict):
+            title = openalex_data.get('title', '')
+            year = openalex_data.get('publication_year', '')
+            citations_count = openalex_data.get('cited_by_count', 0)
+            references_count = openalex_data.get('referenced_works_count', references_count)
+            
+            # Быстрое извлечение авторов (только базовые поля)
+            if 'authorships' in openalex_data:
+                for authorship in openalex_data['authorships']:
+                    if authorship and isinstance(authorship, dict):
+                        author_data = authorship.get('author', {})
+                        if author_data:
+                            author_name = author_data.get('display_name', '')
+                            if author_name:
+                                authors.append({
+                                    'name': author_name,
+                                    'affiliation': [],
+                                    'orcid': author_data.get('orcid', '')
+                                })
+            
+            # Быстрое извлечение журнала
+            if 'primary_location' in openalex_data:
+                source = openalex_data['primary_location'].get('source', {})
+                journal = source.get('display_name', '')
+        
+        # Дополнение из Crossref если нужно
+        if crossref_data and isinstance(crossref_data, dict):
+            message = crossref_data.get('message', crossref_data)
+            
+            if not title:
+                title_list = message.get('title', [])
+                title = title_list[0] if title_list else title
+            
+            if not journal:
+                journal_list = message.get('container-title', [])
+                journal = journal_list[0] if journal_list else journal
+            
+            if not year:
+                if 'created' in message and 'date-parts' in message['created']:
+                    date_parts = message['created'].get('date-parts', [[]])
+                    if date_parts and date_parts[0]:
+                        year = str(date_parts[0][0])
+                elif 'published' in message and 'date-parts' in message['published']:
+                    date_parts = message['published'].get('date-parts', [[]])
+                    if date_parts and date_parts[0]:
+                        year = str(date_parts[0][0])
+            
+            if citations_count == 0:
+                citations_count = message.get('is-referenced-by-count', 0)
+            
+            # Авторы из Crossref если нет из OpenAlex
+            if not authors and 'author' in message:
+                for author_obj in message.get('author', []):
+                    if author_obj:
+                        given = author_obj.get('given', '')
+                        family = author_obj.get('family', '')
+                        full_name = f"{given} {family}".strip()
+                        if full_name:
+                            authors.append({
+                                'name': full_name,
+                                'affiliation': [],
+                                'orcid': author_obj.get('ORCID', '')
+                            })
+        
+        return {
+            'doi': doi,
+            'publication_info': {
+                'title': title or 'Title not found',
+                'journal': journal or 'Journal not found',
+                'year': str(year) if year else '',
+                'citation_count_crossref': citations_count if crossref_data else 0,
+                'citation_count_openalex': citations_count if openalex_data else 0,
+                'publication_date': f"{year}-01-01" if year else '',
+                'volume': '',
+                'pages': ''
+            },
+            'topics_info': {
+                'topic': '',
+                'subfield': '',
+                'field': '',
+                'domain': '',
+                'concepts': []
+            },
+            'authors': authors,
+            'countries': [],
+            'orcid_urls': [],
+            'references': references,
+            'citations': citations,
+            'references_count': references_count,
+            'pages_formatted': '',
+            'status': 'success',
+            'quick_insights': {}
+        }
+    
+    def _create_minimal_result(self, doi: str, error_msg: str = "") -> Dict:
+        """
+        Создание минимального результата для ошибочных DOI
+        """
+        return {
+            'doi': doi,
+            'status': 'failed',
+            'error': error_msg or 'Processing failed',
+            'publication_info': {
+                'title': 'Failed to retrieve',
+                'journal': 'Unknown',
+                'year': '',
+                'citation_count_crossref': 0,
+                'citation_count_openalex': 0
+            },
+            'authors': [],
+            'references': [],
+            'citations': []
+        }
 
     def _handle_processing_error(self, doi: str, error: str, source_type: str, original_doi: str):
 
