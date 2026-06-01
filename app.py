@@ -911,11 +911,10 @@ def cached_get_citing_works(doi: str, openalex_client,
     
     return citing_works
 
-def cached_get_references(doi: str, crossref_client, openalex_client,
-                        state_manager: AnalysisStateManager = None,
-                        use_openalex: bool = True) -> List[str]:
+def cached_get_references(doi: str, crossref_client,
+                        state_manager: AnalysisStateManager = None) -> List[str]:
     """
-    Быстрое получение ссылок с использованием обоих API
+    Быстрое получение ссылок с таймаутом
     """
     # Проверка кэша
     if doi in _reference_works_cache:
@@ -928,46 +927,23 @@ def cached_get_references(doi: str, crossref_client, openalex_client,
     
     _cache_stats['misses'] += 1
     
-    references = set()  # Используем set для автоматической дедупликации
-    
-    # Параллельное получение из обоих источников
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        crossref_future = None
-        openalex_future = None
-        
-        crossref_future = executor.submit(crossref_client.fetch_references, doi)
-        
-        if use_openalex:
-            openalex_future = executor.submit(openalex_client.fetch_references, doi)
-        
-        # Получаем результаты из Crossref
-        try:
-            crossref_refs = crossref_future.result(timeout=10)
-            if isinstance(crossref_refs, list):
-                references.update(crossref_refs)
-        except Exception:
-            pass
-        
-        # Получаем результаты из OpenAlex
-        if openalex_future:
-            try:
-                openalex_refs = openalex_future.result(timeout=15)
-                if isinstance(openalex_refs, list):
-                    references.update(openalex_refs)
-            except Exception:
-                pass
-    
-    references_list = list(references)
+    # Быстрое получение с таймаутом
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(crossref_client.fetch_references, doi)
+            references = future.result(timeout=10)  # Жесткий таймаут 10 секунд
+    except Exception:
+        references = []
     
     # Кэширование
-    _reference_works_cache[doi] = references_list
+    _reference_works_cache[doi] = references
     _cache_stats['saves'] += 1
     
     if state_manager:
-        state_manager.reference_cache[doi] = references_list
+        state_manager.reference_cache[doi] = references
         state_manager.save_to_session()
     
-    return references_list
+    return references
 
 def get_cache_stats() -> Dict:
     """Get cache statistics"""
@@ -1358,143 +1334,46 @@ class CrossrefClient(APIClient):
         url = f"{self.base_url}{clean_doi}"
         return self.make_request(url, f"crossref:{clean_doi}", category="crossref")
 
-    def fetch_references(self, doi: str, max_pages: int = 10) -> List[str]:
-        """
-        Сбор ссылок (referenced works) из OpenAlex
-        """
+    def fetch_references(self, doi: str) -> List[str]:
         clean_doi = self._clean_doi(doi)
         if not clean_doi:
             return []
-    
-        referenced_dois = []
-    
-        try:
-            article_data = self.fetch_article(clean_doi)
-            if 'error' in article_data:
-                return []
-    
-            # Получаем work_id
-            article_id = article_data.get('id', '').split('/')[-1]
-            if not article_id:
-                return []
-    
-            # Получаем список referenced_works из данных статьи
-            referenced_works = article_data.get('referenced_works', [])
-            
-            if referenced_works:
-                # Прямой метод: у нас уже есть список ID работ
-                # Нужно получить DOI для каждого ID
-                for work_url in referenced_works[:2000]:  # Ограничиваем количество
-                    work_id = work_url.split('/')[-1]
-                    try:
-                        # Быстрый запрос для получения DOI
-                        url = f"{self.works_url}/{work_id}"
-                        self.delay.wait_if_needed()
-                        response = self.session.get(url, timeout=8)
-                        if response.status_code == 200:
-                            work_data = response.json()
-                            if work_data.get('doi'):
-                                ref_doi = self._clean_doi(work_data['doi'])
-                                if ref_doi:
-                                    referenced_dois.append(ref_doi)
-                    except Exception:
-                        continue
-            else:
-                # Альтернативный метод: фильтрация по referenced_works
-                params = {
-                    'filter': f'referenced_works:{article_id}',
-                    'per-page': 200,
-                    'select': 'doi'
-                }
-                
-                page = 1
-                cursor = "*"
-                has_more = True
-                
-                while has_more and page <= max_pages:
-                    self.delay.wait_if_needed()
-                    
-                    params['cursor'] = cursor
-                    response = self.session.get(self.works_url, params=params)
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        
-                        for work in data.get('results', []):
-                            if work.get('doi'):
-                                ref_doi = self._clean_doi(work['doi'])
-                                if ref_doi:
-                                    referenced_dois.append(ref_doi)
-                        
-                        if 'meta' in data and data['meta'].get('next_cursor'):
-                            cursor = data['meta']['next_cursor']
-                            page += 1
-                            time.sleep(0.1)
-                        else:
-                            has_more = False
-                    else:
-                        has_more = False
-    
-        except Exception as e:
-            st.warning(f"OpenAlex references error for {doi}: {e}")
-    
-        return list(set(referenced_dois))
 
-    def fetch_citations(self, doi: str, max_pages: int = 10) -> List[str]:
-        """
-        Old citation collection logic - used for reference and citing articles
-        Collects only up to 2000 citations (200 * max_pages)
-        """
+        data = self.fetch_article(clean_doi)
+        references = []
+
+        if 'message' in data and 'reference' in data['message']:
+            for ref in data['message']['reference']:
+                if 'DOI' in ref and ref['DOI']:
+                    ref_doi = self._clean_doi(ref['DOI'])
+                    if ref_doi:
+                        references.append(ref_doi)
+
+        return references
+
+    def fetch_citations(self, doi: str) -> List[str]:
         clean_doi = self._clean_doi(doi)
         if not clean_doi:
             return []
-    
+
         citing_dois = []
-    
         try:
-            article_data = self.fetch_article(clean_doi)
-            if 'error' in article_data:
-                return []
-    
-            article_id = article_data.get('id', '').split('/')[-1]
-            if not article_id:
-                return []
-    
-            params = {
-                'filter': f'cites:{article_id}',
-                'per-page': 200,
-                'select': 'doi,title,publication_year'
-            }
-    
-            page = 1
-            has_more = True
-    
-            while has_more and page <= max_pages:
-                self.delay.wait_if_needed()
-    
-                response = self.session.get(self.works_url, params=params)
-                if response.status_code == 200:
-                    data = response.json()
-    
-                    for work in data.get('results', []):
-                        if work.get('doi'):
-                            citing_doi = self._clean_doi(work['doi'])
-                            if citing_doi:
-                                citing_dois.append(citing_doi)
-    
-                    if 'meta' in data and data['meta'].get('next_cursor'):
-                        params['cursor'] = data['meta']['next_cursor']
-                        page += 1
-                        time.sleep(0.1)
-                    else:
-                        has_more = False
-                else:
-                    has_more = False
-    
+            url = f"{self.base_url}{clean_doi}"
+            params = {'filter': 'has-reference:1'}
+            data = self.make_request(url, f"crossref_citations:{clean_doi}", params=params)
+
+            if 'message' in data and 'is-referenced-by' in data['message']:
+                references = data['message']['is-referenced-by']
+                for ref in references:
+                    if isinstance(ref, dict) and 'DOI' in ref:
+                        citing_doi = self._clean_doi(ref['DOI'])
+                        if citing_doi:
+                            citing_dois.append(citing_doi)
+
         except Exception as e:
-            st.warning(f"OpenAlex citations error for {doi}: {e}")
-    
-        return list(set(citing_dois))
+            st.warning(f"Crossref citations error for {doi}: {e}")
+
+        return citing_dois
 
     def _clean_doi(self, doi: str) -> str:
         if not doi or not isinstance(doi, str):
@@ -1614,7 +1493,7 @@ class OpenAlexClient(APIClient):
             if not article_id and 'doi' in article_data:
                 try:
                     url = f"https://api.openalex.org/works/https://doi.org/{clean_doi}"
-                    response = self.session.get(url, timeout=10)
+                    response = self.session.get(url, timeout=10)  # Уменьшен таймаут
                     if response.status_code == 200:
                         data = response.json()
                         if 'id' in data:
@@ -1629,8 +1508,8 @@ class OpenAlexClient(APIClient):
             cursor = "*"
             page_num = 1
             max_retries = 2
-            max_pages = 10
-            max_total_citations = 1500
+            max_pages = 10  # Уменьшено с 30 до 10 (максимум 2000 цитирований)
+            max_total_citations = 1500  # Жесткий лимит для скорости
             consecutive_errors = 0
             
             with requests.Session() as session:
@@ -1639,7 +1518,7 @@ class OpenAlexClient(APIClient):
                     'Accept': 'application/json',
                     'Accept-Encoding': 'gzip'
                 })
-                session.timeout = 15
+                session.timeout = 15  # Уменьшен общий таймаут
                 
                 while cursor and page_num <= max_pages and len(all_citing_dois) < max_total_citations:
                     success = False
@@ -1652,7 +1531,7 @@ class OpenAlexClient(APIClient):
                             self.delay.wait_if_needed()
                             
                             start_time = time.time()
-                            response = session.get(url, timeout=12)
+                            response = session.get(url, timeout=12)  # Уменьшен таймаут
                             response_time = time.time() - start_time
                             
                             if response.status_code == 200:
@@ -1685,7 +1564,7 @@ class OpenAlexClient(APIClient):
                                 if next_cursor and next_cursor != page_cursor and page_num < max_pages:
                                     cursor = next_cursor
                                     page_num += 1
-                                    time.sleep(0.2)
+                                    time.sleep(0.2)  # Меньшая задержка
                                     success = True
                                     break
                                 else:
@@ -1695,7 +1574,7 @@ class OpenAlexClient(APIClient):
                             
                             elif response.status_code == 429:
                                 self.delay.update_delay(False, response_time)
-                                wait_time = min(2 ** attempt, 3)
+                                wait_time = min(2 ** attempt, 3)  # Максимум 3 секунды
                                 time.sleep(wait_time)
                                 continue
                             
@@ -3005,12 +2884,11 @@ class OptimizedDOIProcessor:
         crossref_data = crossref_data if isinstance(crossref_data, dict) else {}
         openalex_data = openalex_data if isinstance(openalex_data, dict) else {}
         
-        # Быстрый сбор ссылок (теперь из обоих источников)
+        # Быстрый сбор ссылок (только если нужно)
         references = []
         if fetch_refs:
             try:
-                # Используем улучшенную функцию с параллельным сбором
-                refs = cached_get_references(doi, self.crossref_client, self.openalex_client, self.state_manager, use_openalex=True)
+                refs = cached_get_references(doi, self.crossref_client, self.state_manager)
                 references = refs if isinstance(refs, list) else []
                 if references:
                     self.reference_relationships[doi] = references
@@ -3161,16 +3039,11 @@ class OptimizedDOIProcessor:
         citations_count = 0
         references_count = len(references)
         
-        # Получаем точное число ссылок из OpenAlex если возможно
-        if openalex_data and isinstance(openalex_data, dict):
-            oa_references_count = openalex_data.get('referenced_works_count', 0)
-            if oa_references_count > references_count:
-                references_count = oa_references_count
-        
         if openalex_data and isinstance(openalex_data, dict):
             title = openalex_data.get('title', '')
             year = openalex_data.get('publication_year', '')
             citations_count = openalex_data.get('cited_by_count', 0)
+            references_count = openalex_data.get('referenced_works_count', references_count)
             
             # Быстрое извлечение авторов (только базовые поля)
             if 'authorships' in openalex_data:
@@ -3309,19 +3182,12 @@ class OptimizedDOIProcessor:
         # Удаляем дубликаты и пустые значения
         unique_refs = []
         seen_refs = set()
-        duplicate_count = 0
-        
         for ref in all_refs:
             if ref and ref not in seen_refs:
                 seen_refs.add(ref)
                 unique_refs.append(ref)
-            elif ref and ref in seen_refs:
-                duplicate_count += 1
         
-        # Подробная статистика для отладки
-        st.info(f"📊 Собрано {len(all_refs)} ссылок (включая дубликаты)")
-        st.info(f"📊 Уникальных DOI: {len(unique_refs)}")
-        st.info(f"📊 Найдено дубликатов: {duplicate_count}")
+        st.info(f"📊 Собрано {len(all_refs)} ссылок, из них {len(unique_refs)} уникальных")
         
         # Сохраняем связи для каждого найденного DOI ссылки
         for doi, result in results.items():
