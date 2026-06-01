@@ -2546,7 +2546,7 @@ class OptimizedDOIProcessor:
         Оптимизированная пакетная обработка с возобновлением
         """
         # Уменьшаем размер пакета для большей скорости
-        batch_size = min(batch_size, 25)  # Максимум 25 DOI в пакете
+        batch_size = min(batch_size, Config.BATCH_SIZE) 
         
         self.state_manager.set_stage(source_type, len(dois))
         
